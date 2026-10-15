@@ -209,10 +209,12 @@ class AxiomEngine:
     # ==========================================
     def verificar_setup_vwap(self, df: pd.DataFrame, sym: str) -> Optional[Dict[str, Any]]:
         """
-        Detecta rechazo en VWAP sin importar si la vela es verde o roja.
-        Identifica la última vela cerrada que cruzó o tocó el VWAP:
-        - LONG: vela que testeó el VWAP (Low <= VWAP) y cerró por encima (Close > VWAP).
-        - SHORT: vela que testeó el VWAP (High >= VWAP) y cerró por debajo (Close < VWAP).
+        Detecta rechazo estricto por mecha (Wick Rejection) en VWAP para todos los símbolos.
+        REGLA INSTITUCIONAL:
+        - La mecha de la vela más reciente debe tocar o pasar el VWAP.
+        - El cuerpo de la vela NO puede pasar el VWAP (la operación queda invalidada si el cuerpo lo cruza).
+        - LONG (Compras): Mecha inferior toca/pasa el VWAP (Low <= VWAP), pero todo el cuerpo queda por encima (min(Open, Close) > VWAP).
+        - SHORT (Ventas): Mecha superior toca/pasa el VWAP (High >= VWAP), pero todo el cuerpo queda por debajo (max(Open, Close) < VWAP).
         """
         if len(df) < 4:
             return None
@@ -222,16 +224,20 @@ class AxiomEngine:
         # 1. EVALUAR SETUP LONG (Compras)
         for vela in candidatos:
             vwap_val = vela['VWAP']
-            toco_o_cruzo_vwap = vela['Low'] <= vwap_val
-            cerro_arriba_vwap = vela['Close'] > vwap_val
+            cuerpo_bajo = min(vela['Open'], vela['Close'])
             
-            if toco_o_cruzo_vwap and cerro_arriba_vwap:
-                if df.iloc[-2]['Close'] > df.iloc[-2]['VWAP']:
+            # Condición estricta: La mecha toca o pasa el VWAP, pero el cuerpo NO lo pasa
+            mecha_toco_vwap = vela['Low'] <= vwap_val
+            cuerpo_no_paso = cuerpo_bajo > vwap_val
+            
+            if mecha_toco_vwap and cuerpo_no_paso:
+                # Verificamos que la última vela confirmada mantenga el cuerpo por encima de VWAP
+                if min(df.iloc[-2]['Open'], df.iloc[-2]['Close']) > df.iloc[-2]['VWAP']:
                     return {
                         "direccion": "LONG",
                         "simbolo": sym,
                         "vela_cruce": vela,
-                        "extremo_precio": float(vela['Low']), # Precio más bajo
+                        "extremo_precio": float(vela['Low']), # Mínimo de la mecha de rechazo
                         "vwap_cruce": float(vwap_val),
                         "upper_band": float(vela['Upper_Band']),
                         "lower_band": float(vela['Lower_Band'])
@@ -241,16 +247,20 @@ class AxiomEngine:
         # 2. EVALUAR SETUP SHORT (Ventas)
         for vela in candidatos:
             vwap_val = vela['VWAP']
-            toco_o_cruzo_vwap = vela['High'] >= vwap_val
-            cerro_abajo_vwap = vela['Close'] < vwap_val
+            cuerpo_alto = max(vela['Open'], vela['Close'])
             
-            if toco_o_cruzo_vwap and cerro_abajo_vwap:
-                if df.iloc[-2]['Close'] < df.iloc[-2]['VWAP']:
+            # Condición estricta: La mecha toca o pasa el VWAP, pero el cuerpo NO lo pasa
+            mecha_toco_vwap = vela['High'] >= vwap_val
+            cuerpo_no_paso = cuerpo_alto < vwap_val
+            
+            if mecha_toco_vwap and cuerpo_no_paso:
+                # Verificamos que la última vela confirmada mantenga el cuerpo por debajo de VWAP
+                if max(df.iloc[-2]['Open'], df.iloc[-2]['Close']) < df.iloc[-2]['VWAP']:
                     return {
                         "direccion": "SHORT",
                         "simbolo": sym,
                         "vela_cruce": vela,
-                        "extremo_precio": float(vela['High']), # Precio más alto
+                        "extremo_precio": float(vela['High']), # Máximo de la mecha de rechazo
                         "vwap_cruce": float(vwap_val),
                         "upper_band": float(vela['Upper_Band']),
                         "lower_band": float(vela['Lower_Band'])

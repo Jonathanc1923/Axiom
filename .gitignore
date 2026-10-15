@@ -50,4 +50,5 @@ Thumbs.db
 
 # Logs & Runtime black box data
 *.log
+registro_operaciones.csv
 registro_operaciones.csv.bak
