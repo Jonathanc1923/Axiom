@@ -179,18 +179,26 @@ def emergency_flatten(req: Optional[SymbolRequest] = None):
 def get_chart_data(symbol: Optional[str] = None):
     return engine.get_chart_data(symbol)
 
+@app.post("/api/sync")
+def sync_topstep():
+    """Fuerza la sincronización inmediata de operaciones, balance y PnL reales con TopstepX."""
+    try:
+        stats = engine.sync_real_data_from_topstep()
+        history = engine.load_operations_history()
+        return {
+            "success": True,
+            "message": "Sincronización con TopstepX completada exitosamente.",
+            "stats": stats,
+            "operations": history
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.get("/api/operations")
 def get_operations():
     history = engine.load_operations_history()
-    trades_topstep = []
-    if engine.account_id:
-        try:
-            trades_topstep = client.search_trades(engine.account_id, minutes_back=1440)
-        except Exception:
-            pass
     return {
         "csv_records": history,
-        "topstep_trades": trades_topstep,
         "stats": engine.stats
     }
 

@@ -46,6 +46,10 @@
             </div>
 
             <div class="header-actions">
+                <button id="btn-sync-topstep" class="btn-primary" style="background:rgba(0,242,254,0.15); border-color:var(--accent-cyan); color:var(--accent-cyan);" title="Sincronizar inmediatamente operaciones y balance reales desde TopstepX API">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
+                    SINCRONIZAR TOPSTEP
+                </button>
                 <button id="btn-emergency-top" class="btn-emergency" title="Cierra inmediatamente todas las posiciones abiertas en TopstepX">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M18.36 6.64a9 9 0 1 1-12.73 0M12 2v10"/></svg>
                     KILL SWITCH (FLATTEN)
@@ -54,43 +58,43 @@
         </header>
 
         <!-- ==========================================
-             KEY PERFORMANCE METRICS RIBBON
+             KEY PERFORMANCE METRICS RIBBON (REAL TOPSTEPX DATA)
              ========================================== -->
         <section class="metrics-ribbon">
             <div class="metric-card">
-                <span class="metric-title">PnL Neto Acumulado</span>
+                <span class="metric-title">PnL Neto Real</span>
                 <span id="metric-pnl" class="metric-value bull">+$0.00</span>
-                <span class="metric-sub">Base Sesión CME</span>
+                <span class="metric-sub" id="metric-pnl-sub">TopstepX Auditado</span>
             </div>
 
             <div class="metric-card">
-                <span class="metric-title">Win Rate Cuantitativo</span>
-                <span id="metric-winrate" class="metric-value cyan">66.7%</span>
-                <span class="metric-sub">Ratio Reversión VWAP</span>
+                <span class="metric-title">Balance Real de Cuenta</span>
+                <span id="metric-balance" class="metric-value" style="color:#F8FAFC;">$0.00</span>
+                <span class="metric-sub" id="spec-account">PRAC Gateway</span>
             </div>
 
             <div class="metric-card">
-                <span class="metric-title">Total Operaciones</span>
-                <span id="metric-trades" class="metric-value">0 (0L / 0S)</span>
-                <span class="metric-sub">Registros Caja Negra</span>
+                <span class="metric-title">Win Rate Real</span>
+                <span id="metric-winrate" class="metric-value cyan">0.0%</span>
+                <span class="metric-sub" id="metric-winrate-sub">Fills Confirmados</span>
             </div>
 
             <div class="metric-card">
-                <span class="metric-title">Posición en Mercado</span>
-                <span id="metric-position" class="metric-value cyan">MONITOR FLAT</span>
-                <span class="metric-sub">Gestión OCO Activa</span>
+                <span class="metric-title">Total Operaciones Reales</span>
+                <span id="metric-trades" class="metric-value">0 (0W / 0L)</span>
+                <span class="metric-sub" id="metric-trades-sub">Round-Trips Cerrados</span>
             </div>
 
             <div class="metric-card">
-                <span class="metric-title">Cooldown Estratégico</span>
-                <span id="metric-cooldown" class="metric-value bull">0s (LISTO)</span>
-                <span class="metric-sub">Filtro Antiespeculativo</span>
+                <span class="metric-title">Profit Factor Real</span>
+                <span id="metric-profit-factor" class="metric-value bull">0.00</span>
+                <span class="metric-sub">Ratio Bruto G/P</span>
             </div>
 
             <div class="metric-card">
-                <span class="metric-title">Entorno Seguro</span>
-                <span class="metric-value" style="color:#38BDF8;">PRACTICE ONLY</span>
-                <span class="metric-sub" id="spec-account">TopstepX Gateway</span>
+                <span class="metric-title">Sincronización Topstep</span>
+                <span id="metric-sync-status" class="metric-value cyan" style="font-size:13px;">Cada 1 Hora</span>
+                <span class="metric-sub" id="metric-sync-time">Última: Sincronizando...</span>
             </div>
         </section>
 
@@ -293,14 +297,16 @@
                             <tr>
                                 <th>Fecha & Hora</th>
                                 <th>Símbolo</th>
-                                <th>Estado</th>
+                                <th>Estado Real</th>
                                 <th>Dirección</th>
-                                <th>Precio Entrada</th>
-                                <th>SL Ticks</th>
-                                <th>TP Ticks</th>
-                                <th>Motivo Técnico</th>
+                                <th>Entrada Real</th>
+                                <th>Salida Real</th>
+                                <th>PnL Bruto (USD)</th>
+                                <th>Comisiones</th>
+                                <th>PnL Neto Real (USD)</th>
                                 <th>Order ID</th>
-                                <th>Respuesta Servidor</th>
+                                <th>Exit ID</th>
+                                <th>Condición / Motivo</th>
                             </tr>
                         </thead>
                         <tbody id="operations-table-body">

@@ -194,9 +194,42 @@ class TopstepClient:
         res.raise_for_status()
         return res.json()
 
-    def search_trades(self, account_id: int, minutes_back: int = 1440) -> List[Dict[str, Any]]:
+    def get_account_balance(self, account_id: Optional[int] = None) -> float:
+        """Obtiene el balance real de la cuenta desde TopstepX."""
+        url = f"{self.base_url}/api/Account/search"
+        try:
+            res = requests.post(url, json={"onlyActiveAccounts": True}, headers=self.get_headers(), timeout=15)
+            if res.status_code == 200:
+                data = res.json()
+                accounts = data.get("accounts", [])
+                for acc in accounts:
+                    if account_id is not None and acc.get("id") == account_id:
+                        return float(acc.get("balance", 0.0))
+                    if account_id is None and ("PRAC" in acc.get("name", "").upper() or "PRACTICE" in acc.get("name", "").upper()):
+                        return float(acc.get("balance", 0.0))
+                if accounts:
+                    return float(accounts[0].get("balance", 0.0))
+        except Exception as e:
+            print(f"Error fetching account balance: {e}")
+        return 0.0
+
+    def get_open_positions(self, account_id: int) -> List[Dict[str, Any]]:
+        """Obtiene las posiciones abiertas activas desde TopstepX."""
+        url = f"{self.base_url}/api/Position/searchOpen"
+        try:
+            res = requests.post(url, json={"accountId": int(account_id)}, headers=self.get_headers(), timeout=15)
+            if res.status_code == 200:
+                data = res.json()
+                if data.get("success"):
+                    return data.get("positions", [])
+        except Exception as e:
+            print(f"Error searching open positions: {e}")
+        return []
+
+    def search_trades(self, account_id: int, days_back: int = 30) -> List[Dict[str, Any]]:
+        """Obtiene todas las operaciones reales ejecutadas (fills) desde TopstepX."""
         end = datetime.now(timezone.utc)
-        start = end - timedelta(minutes=minutes_back)
+        start = end - timedelta(days=days_back)
         payload = {
             "accountId": int(account_id),
             "startTimestamp": start.strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -208,7 +241,9 @@ class TopstepClient:
             if res.status_code == 200:
                 data = res.json()
                 if data.get("success"):
-                    return data.get("trades", [])
-        except Exception:
-            pass
+                    trades = data.get("trades", [])
+                    trades.sort(key=lambda x: x.get("creationTimestamp", ""))
+                    return trades
+        except Exception as e:
+            print(f"Error searching trades: {e}")
         return []

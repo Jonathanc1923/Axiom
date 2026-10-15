@@ -63,16 +63,28 @@ class AxiomEngine:
         self.max_logs: int = 400
         self.log_listeners: List[Callable[[Dict[str, Any]], None]] = []
         
-        # Consolidated Platform Execution Statistics
+        # Hourly Topstep API Synchronization Clock
+        self.last_sync_time: float = 0
+        self.next_sync_time: float = 0
+        self.sync_interval_seconds: int = 3600  # Sincronización exacta cada 1 hora
+
+        # Consolidated Platform Execution Statistics (Métricas Reales de TopstepX)
         self.stats: Dict[str, Any] = {
             "total_trades": 0,
             "executed_trades": 0,
             "rejected_trades": 0,
             "longs": 0,
             "shorts": 0,
+            "real_balance": 0.0,
+            "gross_pnl_usd": 0.0,
+            "total_fees_usd": 0.0,
             "net_pnl_usd": 0.0,
-            "win_rate": 66.7,
-            "profit_factor": 1.85,
+            "win_rate": 0.0,
+            "profit_factor": 0.0,
+            "winning_trades": 0,
+            "losing_trades": 0,
+            "last_sync": "Pendiente",
+            "next_sync": "Pendiente",
             "by_symbol": {}
         }
 
@@ -146,7 +158,12 @@ class AxiomEngine:
             except Exception as e:
                 self.log(f"⚠️ No se pudo resolver contrato {sym}: {e}", "ERROR", sym)
                 
-        self.load_operations_history()
+        # Sincronización inmediata de datos reales de operaciones y balance desde TopstepX
+        try:
+            self.sync_real_data_from_topstep()
+        except Exception as e:
+            self.log(f"⚠️ Alerta en sincronización inicial Topstep: {e}", "ERROR")
+            self.load_operations_history()
 
     def toggle_symbol(self, symbol_key: str, enabled: Optional[bool] = None) -> bool:
         """Activa o desactiva las operaciones autónomas para un símbolo específico."""
@@ -392,68 +409,350 @@ class AxiomEngine:
             )
 
     # ==========================================
-    # BLACK BOX RECORDING (CSV ENGINE)
+    # BLACK BOX RECORDING & REAL TOPSTEP SYNCHRONIZATION
     # ==========================================
+    def resolve_symbol_from_contract(self, contract_id: str) -> str:
+        """Determina el símbolo estándar (ES, NQ, GC, CL, etc.) a partir del contractId de TopstepX."""
+        c = str(contract_id).upper()
+        for sym, state in self.symbol_states.items():
+            if state.get("contract_id") and state["contract_id"] == contract_id:
+                return sym
+                
+        prefix_map = [
+            (".EP.", "ES"), (".MES.", "MES"), (".ENQ.", "NQ"), (".MNQ.", "MNQ"),
+            (".YM.", "YM"), (".MYM.", "MYM"), (".RTY.", "RTY"), (".M2K.", "M2K"),
+            (".GCE.", "GC"), (".MGC.", "MGC"), (".CLE.", "CL"), (".MCLE.", "MCL")
+        ]
+        for pfx, s in prefix_map:
+            if pfx in c:
+                return s
+        return "ES"
+
     def registrar_en_csv(self, simbolo, direccion, precio, ticks_sl, ticks_tp, condicion, exito, mensaje_servidor, error_code, order_id):
-        """Guarda todos los detalles de la operación en el archivo CSV institucional."""
+        """Guarda la orden emitida en el archivo CSV institucional."""
         try:
             os.makedirs(os.path.dirname(os.path.abspath(CSV_PATH)), exist_ok=True)
             archivo_existe = os.path.isfile(CSV_PATH)
             
             fecha_actual = datetime.now().strftime('%Y-%m-%d')
             hora_actual = datetime.now().strftime('%H:%M:%S')
-            estado = "EJECUTADA (OCO)" if exito else "RECHAZADA"
+            estado = "EN CURSO (OCO)" if exito else "RECHAZADA"
+            
+            fieldnames = [
+                'Fecha', 'Hora', 'Simbolo', 'Estado', 'Direccion', 'Precio_Mercado',
+                'Precio_Entrada_Real', 'Precio_Salida_Real', 'SL_Ticks', 'TP_Ticks',
+                'PnL_Bruto_USD', 'Comisiones_USD', 'PnL_Neto_USD', 'Order_ID',
+                'Exit_Order_ID', 'Condicion_Tecnica', 'Ultima_Actualizacion'
+            ]
             
             with open(CSV_PATH, mode='a', newline='', encoding='utf-8') as file:
-                writer = csv.writer(file, delimiter=';')
+                writer = csv.DictWriter(file, fieldnames=fieldnames, delimiter=';')
                 if not archivo_existe:
-                    writer.writerow(['Fecha', 'Hora', 'Simbolo', 'Estado', 'Direccion', 'Precio_Mercado', 'SL_Ticks', 'TP_Ticks', 'Condicion_Tecnica', 'Respuesta_Servidor', 'Error_Code', 'Order_ID'])
+                    writer.writeheader()
                 
-                writer.writerow([fecha_actual, hora_actual, simbolo, estado, direccion, precio, ticks_sl, ticks_tp, condicion, mensaje_servidor, error_code, order_id])
+                writer.writerow({
+                    'Fecha': fecha_actual,
+                    'Hora': hora_actual,
+                    'Simbolo': simbolo,
+                    'Estado': estado,
+                    'Direccion': direccion,
+                    'Precio_Mercado': f"{precio:.2f}",
+                    'Precio_Entrada_Real': f"{precio:.2f}" if exito else "N/A",
+                    'Precio_Salida_Real': "PENDIENTE" if exito else "N/A",
+                    'SL_Ticks': ticks_sl,
+                    'TP_Ticks': ticks_tp,
+                    'PnL_Bruto_USD': "0.00",
+                    'Comisiones_USD': "0.00",
+                    'PnL_Neto_USD': "0.00",
+                    'Order_ID': order_id,
+                    'Exit_Order_ID': "PENDIENTE" if exito else "N/A",
+                    'Condicion_Tecnica': condicion,
+                    'Ultima_Actualizacion': f"{fecha_actual} {hora_actual}"
+                })
                 
             self.log(f"💾 Registro guardado en CSV ({estado}).", "SYSTEM", simbolo)
-            self.load_operations_history()
         except Exception as e:
             self.log(f"❌ Error al escribir en el CSV: {e}", "ERROR", simbolo)
 
+    def sync_real_data_from_topstep(self) -> Dict[str, Any]:
+        """
+        Consulta periódica (cada 1 hora y bajo demanda) al API de TopstepX para actualizar
+        el archivo CSV y las estadísticas con los datos reales de operaciones,
+        precios de ejecución, comisiones, balance real y PnL neto/bruto.
+        """
+        now = time.time()
+        self.last_sync_time = now
+        self.next_sync_time = now + self.sync_interval_seconds
+        sync_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        next_str = datetime.fromtimestamp(self.next_sync_time).strftime('%Y-%m-%d %H:%M:%S')
+
+        if not self.account_id:
+            try:
+                acc = self.client.get_practice_account()
+                self.account_id = acc["id"]
+                self.account_name = acc["name"]
+            except Exception as e:
+                self.log(f"⚠️ Error al obtener cuenta para sincronización: {e}", "ERROR")
+                return self.stats
+
+        # 1. Obtener balance real desde TopstepX
+        try:
+            real_balance = self.client.get_account_balance(self.account_id)
+        except Exception:
+            real_balance = 0.0
+
+        # 2. Obtener fills reales desde TopstepX (últimos 30 días)
+        try:
+            raw_trades = self.client.search_trades(self.account_id, days_back=30)
+        except Exception as e:
+            self.log(f"⚠️ Error al consultar Trade/search de TopstepX: {e}", "ERROR")
+            raw_trades = []
+
+        # 3. Emparejar operaciones (Round-Trips) cronológicamente
+        raw_trades.sort(key=lambda x: x.get('creationTimestamp', ''))
+        paired_trades = []
+        open_fills_by_contract: Dict[str, List[Dict[str, Any]]] = {}
+
+        for t in raw_trades:
+            cid = t.get('contractId', '')
+            pnl = t.get('profitAndLoss')
+            
+            if pnl is None:
+                # Opening fill (inicia posición)
+                if cid not in open_fills_by_contract:
+                    open_fills_by_contract[cid] = []
+                open_fills_by_contract[cid].append(t)
+            else:
+                # Closing fill (cierra posición con PnL realizado)
+                opening = None
+                if cid in open_fills_by_contract and len(open_fills_by_contract[cid]) > 0:
+                    opening = open_fills_by_contract[cid].pop(0)
+                    
+                entry_price = float(opening['price']) if opening and opening.get('price') is not None else float(t['price'])
+                entry_side = opening['side'] if opening and opening.get('side') is not None else (1 if t.get('side') == 0 else 0)
+                entry_ts_str = opening.get('creationTimestamp', t.get('creationTimestamp', ''))
+                order_id = str(opening['orderId']) if opening and opening.get('orderId') else "N/A"
+                exit_order_id = str(t.get('orderId', 'N/A'))
+                
+                try:
+                    dt_entry = datetime.fromisoformat(entry_ts_str.replace("Z", "+00:00"))
+                    fecha_str = dt_entry.strftime('%Y-%m-%d')
+                    hora_str = dt_entry.strftime('%H:%M:%S')
+                except Exception:
+                    fecha_str = datetime.now().strftime('%Y-%m-%d')
+                    hora_str = datetime.now().strftime('%H:%M:%S')
+
+                fees = float(opening.get('fees', 0.0) if opening else 0.0) + float(t.get('fees', 0.0) or 0.0)
+                comms = float(opening.get('commissions', 0.0) if opening else 0.0) + float(t.get('commissions', 0.0) or 0.0)
+                total_fees_comms = round(fees + comms, 2)
+                gross_pnl = float(pnl)
+                net_pnl = round(gross_pnl - total_fees_comms, 2)
+                
+                direccion = "LONG" if entry_side == 0 else "SHORT"
+                sym = self.resolve_symbol_from_contract(cid)
+                
+                if gross_pnl > 0:
+                    estado_str = f"CERRADA (+${gross_pnl:,.2f} USD)"
+                elif gross_pnl < 0:
+                    estado_str = f"CERRADA (-${abs(gross_pnl):,.2f} USD)"
+                else:
+                    estado_str = "CERRADA ($0.00 USD)"
+
+                paired_trades.append({
+                    "Fecha": fecha_str,
+                    "Hora": hora_str,
+                    "Simbolo": sym,
+                    "Estado": estado_str,
+                    "Direccion": direccion,
+                    "Precio_Mercado": f"{entry_price:.2f}",
+                    "Precio_Entrada_Real": f"{entry_price:.2f}",
+                    "Precio_Salida_Real": f"{float(t['price']):.2f}",
+                    "SL_Ticks": "10",
+                    "TP_Ticks": "Dinámico",
+                    "PnL_Bruto_USD": f"{gross_pnl:.2f}",
+                    "Comisiones_USD": f"{total_fees_comms:.2f}",
+                    "PnL_Neto_USD": f"{net_pnl:.2f}",
+                    "Order_ID": order_id,
+                    "Exit_Order_ID": exit_order_id,
+                    "Condicion_Tecnica": "Rechazo VWAP TopstepX Confirmado",
+                    "Ultima_Actualizacion": sync_str
+                })
+
+        # Incluir posiciones que siguen abiertas
+        for cid, open_list in open_fills_by_contract.items():
+            for opening in open_list:
+                sym = self.resolve_symbol_from_contract(cid)
+                side_str = "LONG" if opening.get('side') == 0 else "SHORT"
+                p_in = float(opening.get('price', 0.0))
+                oid = str(opening.get('orderId', 'N/A'))
+                try:
+                    dt_o = datetime.fromisoformat(opening.get('creationTimestamp', '').replace("Z", "+00:00"))
+                    f_o = dt_o.strftime('%Y-%m-%d')
+                    h_o = dt_o.strftime('%H:%M:%S')
+                except Exception:
+                    f_o = datetime.now().strftime('%Y-%m-%d')
+                    h_o = datetime.now().strftime('%H:%M:%S')
+
+                paired_trades.append({
+                    "Fecha": f_o,
+                    "Hora": h_o,
+                    "Simbolo": sym,
+                    "Estado": "ABIERTA (En Curso)",
+                    "Direccion": side_str,
+                    "Precio_Mercado": f"{p_in:.2f}",
+                    "Precio_Entrada_Real": f"{p_in:.2f}",
+                    "Precio_Salida_Real": "N/A",
+                    "SL_Ticks": "10",
+                    "TP_Ticks": "Dinámico",
+                    "PnL_Bruto_USD": "0.00",
+                    "Comisiones_USD": f"{(float(opening.get('fees', 0.0)) + float(opening.get('commissions', 0.0))):.2f}",
+                    "PnL_Neto_USD": "0.00",
+                    "Order_ID": oid,
+                    "Exit_Order_ID": "PENDIENTE",
+                    "Condicion_Tecnica": "Posición en mercado TopstepX",
+                    "Ultima_Actualizacion": sync_str
+                })
+
+        # 4. Sincronizar y actualizar con el CSV en disco
+        existing_rows = []
+        if os.path.isfile(CSV_PATH):
+            try:
+                with open(CSV_PATH, mode='r', encoding='utf-8') as f:
+                    r = csv.DictReader(f, delimiter=';')
+                    for row in r:
+                        existing_rows.append(row)
+            except Exception:
+                existing_rows = []
+
+        existing_by_order = {}
+        rejected_rows = []
+        for row in existing_rows:
+            oid = str(row.get("Order_ID", "")).strip()
+            if oid and oid != "N/A":
+                existing_by_order[oid] = row
+            elif "RECHAZADA" in (row.get("Estado") or "").upper():
+                rejected_rows.append(row)
+
+        final_csv_rows = []
+        for pt in paired_trades:
+            oid = pt["Order_ID"]
+            if oid in existing_by_order:
+                old = existing_by_order[oid]
+                if old.get("Condicion_Tecnica") and "Rechazo VWAP" in old["Condicion_Tecnica"]:
+                    pt["Condicion_Tecnica"] = old["Condicion_Tecnica"]
+                if old.get("SL_Ticks"):
+                    pt["SL_Ticks"] = old["SL_Ticks"]
+                if old.get("TP_Ticks"):
+                    pt["TP_Ticks"] = old["TP_Ticks"]
+            final_csv_rows.append(pt)
+
+        for r_row in rejected_rows:
+            for col in ['Precio_Entrada_Real', 'Precio_Salida_Real', 'PnL_Bruto_USD', 'Comisiones_USD', 'PnL_Neto_USD', 'Exit_Order_ID']:
+                if col not in r_row:
+                    r_row[col] = "0.00" if "USD" in col else "N/A"
+            if "Ultima_Actualizacion" not in r_row:
+                r_row["Ultima_Actualizacion"] = sync_str
+            final_csv_rows.append(r_row)
+
+        fieldnames = [
+            'Fecha', 'Hora', 'Simbolo', 'Estado', 'Direccion', 'Precio_Mercado',
+            'Precio_Entrada_Real', 'Precio_Salida_Real', 'SL_Ticks', 'TP_Ticks',
+            'PnL_Bruto_USD', 'Comisiones_USD', 'PnL_Neto_USD', 'Order_ID',
+            'Exit_Order_ID', 'Condicion_Tecnica', 'Ultima_Actualizacion'
+        ]
+        try:
+            os.makedirs(os.path.dirname(os.path.abspath(CSV_PATH)), exist_ok=True)
+            with open(CSV_PATH, mode='w', newline='', encoding='utf-8') as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames, delimiter=';')
+                writer.writeheader()
+                for row in final_csv_rows:
+                    clean_row = {k: row.get(k, "N/A") for k in fieldnames}
+                    writer.writerow(clean_row)
+        except Exception as e:
+            self.log(f"⚠️ Error escribiendo CSV sincronizado: {e}", "ERROR")
+
+        # 5. Computar estadísticas matemáticas estrictamente de datos REALES
+        total_closed = 0
+        winning = 0
+        losing = 0
+        total_gross_pnl = 0.0
+        total_fees = 0.0
+        total_net_pnl = 0.0
+        gross_profit = 0.0
+        gross_loss = 0.0
+        by_sym = {sym: {"total": 0, "executed": 0, "longs": 0, "shorts": 0, "net_pnl": 0.0} for sym in SUPPORTED_SYMBOLS}
+
+        for pt in paired_trades:
+            if "CERRADA" in pt["Estado"]:
+                total_closed += 1
+                g_pnl = float(pt["PnL_Bruto_USD"])
+                n_pnl = float(pt["PnL_Neto_USD"])
+                comm = float(pt["Comisiones_USD"])
+                
+                total_gross_pnl += g_pnl
+                total_fees += comm
+                total_net_pnl += n_pnl
+                
+                if g_pnl > 0:
+                    winning += 1
+                    gross_profit += g_pnl
+                elif g_pnl < 0:
+                    losing += 1
+                    gross_loss += abs(g_pnl)
+                    
+                sym = pt["Simbolo"]
+                if sym in by_sym:
+                    by_sym[sym]["total"] += 1
+                    by_sym[sym]["executed"] += 1
+                    by_sym[sym]["net_pnl"] += n_pnl
+                    if pt["Direccion"] == "LONG":
+                        by_sym[sym]["longs"] += 1
+                    else:
+                        by_sym[sym]["shorts"] += 1
+
+        win_rate = round((winning / total_closed * 100.0), 1) if total_closed > 0 else 0.0
+        pf = round(gross_profit / gross_loss, 2) if gross_loss > 0 else (round(gross_profit, 2) if gross_profit > 0 else 0.0)
+
+        with self.lock:
+            self.stats = {
+                "total_trades": len(final_csv_rows),
+                "executed_trades": total_closed,
+                "rejected_trades": len(rejected_rows),
+                "longs": sum(s["longs"] for s in by_sym.values()),
+                "shorts": sum(s["shorts"] for s in by_sym.values()),
+                "real_balance": real_balance,
+                "gross_pnl_usd": round(total_gross_pnl, 2),
+                "total_fees_usd": round(total_fees, 2),
+                "net_pnl_usd": round(total_net_pnl, 2),
+                "win_rate": win_rate,
+                "profit_factor": pf,
+                "winning_trades": winning,
+                "losing_trades": losing,
+                "last_sync": sync_str,
+                "next_sync": next_str,
+                "by_symbol": by_sym
+            }
+
+        pnl_symbol_str = "+" if total_net_pnl >= 0 else ""
+        self.log(
+            f"🔄 Sincronización TopstepX exitosa: Balance: ${real_balance:,.2f} | PnL Neto Real: {pnl_symbol_str}${total_net_pnl:,.2f} USD | Operaciones: {total_closed} (Win Rate: {win_rate}%)",
+            "SYSTEM"
+        )
+        return self.stats
+
     def load_operations_history(self) -> List[Dict[str, Any]]:
-        """Lee el CSV de operaciones y computa estadísticas consolidadas y por símbolo."""
+        """Lee el CSV de operaciones institucional."""
         trades = []
         if not os.path.isfile(CSV_PATH):
             return trades
             
-        by_sym = {sym: {"total": 0, "executed": 0, "longs": 0, "shorts": 0} for sym in SUPPORTED_SYMBOLS}
-        
         try:
             with open(CSV_PATH, mode='r', encoding='utf-8') as file:
                 reader = csv.DictReader(file, delimiter=';')
                 for row in reader:
-                    # Retrocompatibilidad: si no tiene columna Simbolo, asignar ES
                     if "Simbolo" not in row or not row["Simbolo"]:
                         row["Simbolo"] = "ES"
-                    sym = row["Simbolo"]
                     trades.append(row)
-                    
-                    if sym in by_sym:
-                        by_sym[sym]["total"] += 1
-                        if "EJECUTADA" in (row.get("Estado") or "").upper():
-                            by_sym[sym]["executed"] += 1
-                            if (row.get("Direccion") or "").upper() == "LONG":
-                                by_sym[sym]["longs"] += 1
-                            else:
-                                by_sym[sym]["shorts"] += 1
-                    
-            # Actualizar estadísticas
-            self.stats["total_trades"] = len(trades)
-            executed = [t for t in trades if "EJECUTADA" in t.get("Estado", "").upper()]
-            self.stats["executed_trades"] = len(executed)
-            self.stats["rejected_trades"] = len(trades) - len(executed)
-            self.stats["longs"] = len([t for t in executed if t.get("Direccion", "").upper() == "LONG"])
-            self.stats["shorts"] = len([t for t in executed if t.get("Direccion", "").upper() == "SHORT"])
-            self.stats["by_symbol"] = by_sym
-            
-            if len(executed) > 0:
-                self.stats["net_pnl_usd"] = float(len(executed) * 150.0) # Base referencial
         except Exception as e:
             print(f"Error reading CSV: {e}")
             
@@ -464,9 +763,20 @@ class AxiomEngine:
     # ==========================================
     def run_loop(self):
         self.log("⏳ Motor Multi-Símbolo Activo. Telemetría y scanner iniciados...", "SYSTEM")
+        if self.last_sync_time == 0:
+            self.last_sync_time = time.time()
+            self.next_sync_time = time.time() + self.sync_interval_seconds
         
         while not self.stop_event.is_set():
             try:
+                # 0. Sincronización horaria automática con TopstepX (cada 1 hora = 3600 segundos)
+                if time.time() - self.last_sync_time >= self.sync_interval_seconds:
+                    self.log("⏰ [SINCRONIZACIÓN HORARIA] Actualizando balance y operaciones reales con TopstepX...", "SYSTEM")
+                    try:
+                        self.sync_real_data_from_topstep()
+                    except Exception as e:
+                        self.log(f"⚠️ Error en sincronización horaria de TopstepX: {e}", "ERROR")
+
                 # 1. Monitorear los símbolos habilitados y el símbolo actualmente en pantalla
                 symbols_to_query = list(SUPPORTED_SYMBOLS.keys())
                 
@@ -638,6 +948,10 @@ class AxiomEngine:
             "lower_band": lower_points
         }
 
+    @property
+    def latest_telemetry(self) -> Dict[str, Any]:
+        return self.symbol_states.get(self.active_symbol, {}).get("telemetry", {})
+
     def get_status(self) -> Dict[str, Any]:
         active_state = self.symbol_states.get(self.active_symbol, {})
         
@@ -645,6 +959,7 @@ class AxiomEngine:
         matrix = {}
         for sym, s in self.symbol_states.items():
             t = s.get("telemetry", {})
+            sym_stats = self.stats.get("by_symbol", {}).get(sym, {})
             matrix[sym] = {
                 "symbol": sym,
                 "name": s.get("name"),
@@ -656,7 +971,8 @@ class AxiomEngine:
                 "lower": t.get("lower_band", 0.0),
                 "spread_vwap": t.get("distance_vwap", 0.0),
                 "cooldown": t.get("cooldown_remaining", 0),
-                "trades": s["stats"]["trades"]
+                "trades": sym_stats.get("total", 0),
+                "net_pnl": sym_stats.get("net_pnl", 0.0)
             }
             
         return {
@@ -667,5 +983,7 @@ class AxiomEngine:
             "telemetry": active_state.get("telemetry", {}),
             "stats": self.stats,
             "symbols_matrix": matrix,
-            "supported_symbols": list(SUPPORTED_SYMBOLS.keys())
+            "supported_symbols": list(SUPPORTED_SYMBOLS.keys()),
+            "last_sync": self.stats.get("last_sync", "N/A"),
+            "next_sync": self.stats.get("next_sync", "N/A")
         }

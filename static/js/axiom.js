@@ -40,12 +40,15 @@ document.addEventListener('DOMContentLoaded', () => {
     const radarSymbolBadge = document.getElementById('radar-symbol-badge');
     const specStatus = document.getElementById('spec-status');
     
-    // Metrics Ribbon
+    // Metrics Ribbon (Real Topstep Data)
     const metricPnl = document.getElementById('metric-pnl');
+    const metricBalance = document.getElementById('metric-balance');
     const metricWinrate = document.getElementById('metric-winrate');
     const metricTrades = document.getElementById('metric-trades');
-    const metricPosition = document.getElementById('metric-position');
-    const metricCooldown = document.getElementById('metric-cooldown');
+    const metricProfitFactor = document.getElementById('metric-profit-factor');
+    const metricSyncStatus = document.getElementById('metric-sync-status');
+    const metricSyncTime = document.getElementById('metric-sync-time');
+    const btnSyncTopstep = document.getElementById('btn-sync-topstep');
     
     // Clocks
     const clockNy = document.getElementById('clock-ny');
@@ -509,20 +512,45 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function updateMetricsUI(stats, running) {
         if (!stats) return;
+        
+        // PnL Neto Real
         if (metricPnl) {
-            const pnl = stats.net_pnl_usd || 0;
-            metricPnl.innerText = (pnl >= 0 ? '+' : '') + `$${pnl.toFixed(2)}`;
-            metricPnl.className = pnl >= 0 ? 'metric-value bull' : 'metric-value bear';
+            const netPnl = stats.net_pnl_usd || 0;
+            metricPnl.innerText = (netPnl >= 0 ? '+' : '') + `$${netPnl.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+            metricPnl.className = netPnl >= 0 ? 'metric-value bull' : 'metric-value bear';
         }
+        
+        // Balance Real de la Cuenta
+        if (metricBalance) {
+            const bal = stats.real_balance || 0;
+            metricBalance.innerText = `$${bal.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+        }
+        
+        // Win Rate Real
         if (metricWinrate) {
             metricWinrate.innerText = `${stats.win_rate || 0}%`;
+            metricWinrate.className = (stats.win_rate >= 50) ? 'metric-value bull' : 'metric-value cyan';
         }
+        
+        // Total Operaciones Reales
         if (metricTrades) {
-            metricTrades.innerText = `${stats.total_trades || 0} (${stats.longs || 0}L / ${stats.shorts || 0}S)`;
+            const exec = stats.executed_trades || 0;
+            const wins = stats.winning_trades || 0;
+            const losses = stats.losing_trades || 0;
+            metricTrades.innerText = `${exec} (${wins}W / ${losses}L)`;
         }
-        if (metricPosition) {
-            metricPosition.innerText = running ? 'MULTIACTIVO ACTIVO' : 'OFFLINE';
-            metricPosition.className = running ? 'metric-value cyan' : 'metric-value dim';
+        
+        // Profit Factor Real
+        if (metricProfitFactor) {
+            const pf = stats.profit_factor || 0.0;
+            metricProfitFactor.innerText = pf.toFixed(2);
+            metricProfitFactor.className = pf >= 1.0 ? 'metric-value bull' : 'metric-value bear';
+        }
+        
+        // Sincronización Topstep
+        if (metricSyncTime && stats.last_sync) {
+            const timePart = stats.last_sync.includes(' ') ? stats.last_sync.split(' ')[1] : stats.last_sync;
+            metricSyncTime.innerText = `Última: ${timePart}`;
         }
         
         // Update fleet stats breakdown chip summary
@@ -530,11 +558,14 @@ document.addEventListener('DOMContentLoaded', () => {
             const parts = [];
             Object.keys(stats.by_symbol).forEach(sym => {
                 const s = stats.by_symbol[sym];
-                if (s.total > 0) {
-                    parts.push(`<span><strong>${sym}:</strong> ${s.total} ops (${s.executed} ejec.)</span>`);
+                if (s.total > 0 || s.executed > 0) {
+                    const pnlVal = s.net_pnl || 0;
+                    const pnlSign = pnlVal >= 0 ? '+' : '';
+                    const pnlColor = pnlVal >= 0 ? '#10B981' : '#EF4444';
+                    parts.push(`<span><strong>${sym}:</strong> ${s.executed || s.total} ops (<strong style="color:${pnlColor}">${pnlSign}$${pnlVal.toFixed(2)}</strong>)</span>`);
                 }
             });
-            fleetStatsSummary.innerHTML = parts.length > 0 ? parts.join(' | ') : '<span>Sin operaciones aún</span>';
+            fleetStatsSummary.innerHTML = parts.length > 0 ? parts.join(' | ') : '<span>Sincronizando operaciones reales...</span>';
         }
     }
 
@@ -598,6 +629,7 @@ document.addEventListener('DOMContentLoaded', () => {
             if (!res.ok) return;
             const data = await res.json();
             rawOperations = data.csv_records || [];
+            if (data.stats) updateMetricsUI(data.stats, isRunning);
             renderOperationsTable();
         } catch (e) {
             console.error('Error loading operations:', e);
@@ -615,27 +647,47 @@ document.addEventListener('DOMContentLoaded', () => {
         });
 
         if (filtered.length === 0) {
-            operationsTableBody.innerHTML = `<tr><td colspan="10" style="text-align:center; color:#64748B; padding:20px;">No hay registros de operaciones para el filtro seleccionado (${filterVal}).</td></tr>`;
+            operationsTableBody.innerHTML = `<tr><td colspan="12" style="text-align:center; color:#64748B; padding:20px;">No hay registros de operaciones para el filtro seleccionado (${filterVal}).</td></tr>`;
             return;
         }
 
         filtered.forEach(r => {
             const tr = document.createElement('tr');
-            const isExecuted = (r.Estado || '').includes('EJECUTADA');
+            const estadoRaw = (r.Estado || '').toUpperCase();
+            const isClosed = estadoRaw.includes('CERRADA');
+            const isExecuted = estadoRaw.includes('EJECUTADA') || estadoRaw.includes('EN CURSO') || estadoRaw.includes('ABIERTA');
             const isLong = (r.Direccion || '').toUpperCase() === 'LONG';
             const sym = r.Simbolo || 'ES';
+            
+            const netPnl = parseFloat(r.PnL_Neto_USD || 0);
+            const grossPnl = parseFloat(r.PnL_Bruto_USD || 0);
+            const comms = parseFloat(r.Comisiones_USD || 0);
+            
+            let badgeClass = 'badge-rejected';
+            if (isClosed) {
+                badgeClass = netPnl >= 0 ? 'badge-executed' : 'badge-short';
+            } else if (isExecuted) {
+                badgeClass = 'badge-long';
+            }
+            
+            const entryPrice = parseFloat(r.Precio_Entrada_Real || r.Precio_Mercado || 0);
+            const exitPrice = r.Precio_Salida_Real && r.Precio_Salida_Real !== 'N/A' && r.Precio_Salida_Real !== 'PENDIENTE'
+                ? parseFloat(r.Precio_Salida_Real).toLocaleString('en-US', { minimumFractionDigits: 2 })
+                : (r.Precio_Salida_Real || '--.--');
             
             tr.innerHTML = `
                 <td>${r.Fecha || ''} ${r.Hora || ''}</td>
                 <td><span class="badge-sym">${sym}</span></td>
-                <td><span class="badge ${isExecuted ? 'badge-executed' : 'badge-rejected'}">${r.Estado || 'N/A'}</span></td>
+                <td><span class="badge ${badgeClass}">${escapeHtml(r.Estado || 'N/A')}</span></td>
                 <td><span class="badge ${isLong ? 'badge-long' : 'badge-short'}">${r.Direccion || ''}</span></td>
-                <td>${parseFloat(r.Precio_Mercado || 0).toLocaleString('en-US', { minimumFractionDigits: 2 })}</td>
-                <td>${r.SL_Ticks || ''} ticks</td>
-                <td>${r.TP_Ticks || ''} ticks</td>
-                <td style="max-width:240px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${r.Condicion_Tecnica || ''}">${r.Condicion_Tecnica || ''}</td>
+                <td>${entryPrice > 0 ? entryPrice.toLocaleString('en-US', { minimumFractionDigits: 2 }) : '--.--'}</td>
+                <td>${exitPrice}</td>
+                <td style="color:${grossPnl >= 0 ? 'var(--bull-color)' : 'var(--bear-color)'}; font-weight:600;">${grossPnl >= 0 ? '+' : ''}$${grossPnl.toFixed(2)}</td>
+                <td style="color:#94A3B8;">${comms > 0 ? `-$${comms.toFixed(2)}` : '$0.00'}</td>
+                <td style="color:${netPnl >= 0 ? 'var(--bull-color)' : 'var(--bear-color)'}; font-weight:700;">${netPnl >= 0 ? '+' : ''}$${netPnl.toFixed(2)}</td>
                 <td>${r.Order_ID || 'N/A'}</td>
-                <td>${r.Respuesta_Servidor || ''}</td>
+                <td>${r.Exit_Order_ID || 'N/A'}</td>
+                <td style="max-width:220px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${escapeHtml(r.Condicion_Tecnica || '')}">${escapeHtml(r.Condicion_Tecnica || '')}</td>
             `;
             operationsTableBody.appendChild(tr);
         });
@@ -738,6 +790,29 @@ document.addEventListener('DOMContentLoaded', () => {
     if (btnStop) btnStop.addEventListener('click', stopEngine);
     if (btnFlatten) btnFlatten.addEventListener('click', emergencyFlatten);
     if (btnEmergencyTop) btnEmergencyTop.addEventListener('click', emergencyFlatten);
+
+    if (btnSyncTopstep) {
+        btnSyncTopstep.addEventListener('click', async () => {
+            btnSyncTopstep.disabled = true;
+            btnSyncTopstep.innerHTML = `<span class="pulse-dot" style="background:#00F2FE;"></span> SINCRONIZANDO...`;
+            try {
+                const res = await fetch('/api/sync', { method: 'POST' });
+                const data = await res.json();
+                if (data.success) {
+                    if (data.stats) updateMetricsUI(data.stats, isRunning);
+                    if (data.operations) {
+                        rawOperations = data.operations;
+                        renderOperationsTable();
+                    }
+                }
+            } catch (e) {
+                console.error('Error al sincronizar con TopstepX:', e);
+            } finally {
+                btnSyncTopstep.disabled = false;
+                btnSyncTopstep.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg> SINCRONIZAR TOPSTEP`;
+            }
+        });
+    }
 
     if (btnToggleActiveTrading) {
         btnToggleActiveTrading.addEventListener('click', () => {
