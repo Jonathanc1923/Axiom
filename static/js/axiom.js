@@ -49,6 +49,8 @@ document.addEventListener('DOMContentLoaded', () => {
     const metricSyncStatus = document.getElementById('metric-sync-status');
     const metricSyncTime = document.getElementById('metric-sync-time');
     const btnSyncTopstep = document.getElementById('btn-sync-topstep');
+    const metricCooldown = document.getElementById('metric-cooldown');
+    const metricPosition = document.getElementById('metric-position');
     
     // Clocks
     const clockNy = document.getElementById('clock-ny');
@@ -482,14 +484,15 @@ document.addEventListener('DOMContentLoaded', () => {
             hudSpread.className = spread >= 0 ? 'metric-value bull' : 'metric-value bear';
         }
         
-        if (metricCooldown) {
+        const cdEl = document.getElementById('metric-cooldown');
+        if (cdEl) {
             const cd = telemetry.cooldown_remaining || 0;
             if (cd > 0) {
-                metricCooldown.innerText = `${cd}s (PAUSA)`;
-                metricCooldown.className = 'metric-value bear';
+                cdEl.innerText = `${cd}s (PAUSA)`;
+                cdEl.className = 'metric-value bear';
             } else {
-                metricCooldown.innerText = '0s (LISTO)';
-                metricCooldown.className = 'metric-value bull';
+                cdEl.innerText = '0s (LISTO)';
+                cdEl.className = 'metric-value bull';
             }
         }
         
