@@ -151,7 +151,12 @@ def verificar_setup_vwap(df):
     """
     if len(df) < 4: return None
         
-    vela = df.iloc[-2]
+    now_utc = datetime.now(timezone.utc)
+    df_cerradas = df[df['Timestamp'] + pd.Timedelta(minutes=5) <= now_utc]
+    if df_cerradas.empty or len(df_cerradas) < 2:
+        return None
+        
+    vela = df_cerradas.iloc[-1]
     vwap_val = float(vela['VWAP'])
     cuerpo_bajo = min(float(vela['Open']), float(vela['Close']))
     cuerpo_alto = max(float(vela['Open']), float(vela['Close']))

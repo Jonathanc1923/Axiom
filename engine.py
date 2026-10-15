@@ -243,7 +243,7 @@ class AxiomEngine:
         """
         Detecta rechazo estricto por mecha (Wick Rejection) en VWAP para todos los símbolos.
         REGLAS INSTITUCIONALES (ESTRICTAS):
-        1. Vela evaluada: La vela cerrada más reciente confirmada (df.iloc[-2]).
+        1. Vela evaluada: La vela cerrada más reciente confirmada (cuyo cierre ya ocurrió en tiempo real).
         2. Color de vela: Indiferente (no necesariamente debe ser verde o roja).
         3. Mecha vs VWAP: La mecha DEBE tocar o pasar el VWAP:
            - LONG: Low <= VWAP (la mecha inferior toca o cruza hacia abajo el VWAP).
@@ -258,7 +258,13 @@ class AxiomEngine:
         if len(df) < 4:
             return None
             
-        vela = df.iloc[-2]
+        now_utc = datetime.now(timezone.utc)
+        # Filtramos estrictamente velas cuyo intervalo de 5m ya haya cerrado por completo:
+        df_cerradas = df[df['Timestamp'] + pd.Timedelta(minutes=5) <= now_utc]
+        if df_cerradas.empty or len(df_cerradas) < 2:
+            return None
+            
+        vela = df_cerradas.iloc[-1]
         vwap_val = float(vela['VWAP'])
         cuerpo_bajo = min(float(vela['Open']), float(vela['Close']))
         cuerpo_alto = max(float(vela['Open']), float(vela['Close']))
@@ -334,6 +340,11 @@ class AxiomEngine:
     # EXECUTION ENGINE: ORDER DISPATCH
     # ==========================================
     def ejecutar_orden(self, setup: Dict[str, Any], df: pd.DataFrame, sym: str):
+        # Validación de seguridad estricta: el setup debe pertenecer al símbolo que se está ejecutando
+        if setup.get("simbolo") != sym:
+            self.log(f"❌ Error de seguridad crítico: discrepancia de símbolo setup={setup.get('simbolo')} vs sym={sym}", "ERROR", sym)
+            return
+            
         direccion = setup["direccion"]
         extremo_precio = setup["extremo_precio"]
         contract_id = self.symbol_states[sym]["contract_id"]
@@ -799,9 +810,8 @@ class AxiomEngine:
                     is_enabled = state.get("enabled", False)
                     is_active_view = (sym == self.active_symbol)
                     
-                    # Para optimizar cuotas de API:
-                    # Descargamos historial completo para símbolos habilitados o el activo en pantalla
-                    limit_bars = 288 if (is_enabled or is_active_view) else 50
+                    # Descargamos historial de 350 velas para asegurar la sesión completa CME (reseteo 18:00 ET)
+                    limit_bars = 350
                     
                     df = self.client.retrieve_bars(contract_id, unit=2, unit_number=5, limit=limit_bars, days_back=2)
                     if not df.empty:
@@ -836,18 +846,29 @@ class AxiomEngine:
                         
                         # 2. Evaluación de Trading Autónomo (solo si el símbolo está HABILITADO)
                         if is_enabled:
-                            vela_cerrada = df.iloc[-2]
+                            now_utc = datetime.now(timezone.utc)
+                            # En futuros CME 5m, una vela con timestamp T cierra a las T + 5 minutos.
+                            # Filtramos estrictamente todas las velas cuyo intervalo de 5m ya haya cerrado por completo:
+                            df_cerradas = df[df['Timestamp'] + pd.Timedelta(minutes=5) <= now_utc]
+                            if df_cerradas.empty or len(df_cerradas) < 2:
+                                continue
+                                
+                            vela_cerrada = df_cerradas.iloc[-1]
                             vela_cerrada_ts = vela_cerrada['Timestamp']
                             time_str = vela_cerrada_ts.strftime('%H:%M')
                             
-                            if state["latest_candle_time"] != vela_cerrada_ts:
-                                is_first_check = (state["latest_candle_time"] is None)
+                            # Si es la primera vez que se evalúa (recién activado o al inicio):
+                            # Establecemos la vela actual como línea base para NUNCA disparar en velas pasadas.
+                            if state["latest_candle_time"] is None:
                                 state["latest_candle_time"] = vela_cerrada_ts
-                                
-                                if is_first_check:
-                                    self.log(f"🔍 Escáner activo para {sym} (Vela 5m: {time_str} UTC). Evaluando rechazo VWAP institucional...", "SETUP", sym)
-                                else:
-                                    self.log(f"⏱️ [{sym}] Vela 5m confirmada ({time_str} UTC). Evaluando rechazo VWAP institucional...", "SETUP", sym)
+                                state["last_executed_candle_ts"] = vela_cerrada_ts
+                                self.log(f"🔍 Escáner activo para {sym}. Línea base fijada en vela {time_str} UTC. Esperando próximo cierre de vela 5m para evaluar...", "SETUP", sym)
+                                continue
+                            
+                            # Solo evaluamos cuando una NUEVA vela se ha confirmado en tiempo real
+                            if state["latest_candle_time"] != vela_cerrada_ts:
+                                state["latest_candle_time"] = vela_cerrada_ts
+                                self.log(f"⏱️ [{sym}] Nueva vela 5m confirmada ({time_str} UTC). Evaluando rechazo VWAP institucional...", "SETUP", sym)
                                 
                                 if time.time() < state["cooldown_until"]:
                                     restante = int(state["cooldown_until"] - time.time())
