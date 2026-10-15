@@ -1,0 +1,24 @@
+services:
+  - type: web
+    name: axiom-algorithmic
+    env: python
+    region: oregon
+    plan: starter
+    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
+    startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/status
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.10.0
+      - key: TOPSTEP_USERNAME
+        sync: false
+      - key: TOPSTEP_API_KEY
+        sync: false
+      - key: TOPSTEP_BASE_URL
+        value: https://api.topstepx.com
+      - key: ACCOUNT_FILTER
+        value: PRAC
+      - key: DEFAULT_SYMBOL
+        value: ES
+      - key: AUTO_START_ENGINE
+        value: "true"

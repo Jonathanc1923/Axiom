@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Axiom Algorithmic | Institutional Execution & VWAP Framework</title>
+    <link rel="icon" type="image/svg+xml" href="/static/img/favicon.svg">
+    
+    <!-- Typography -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;900&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+    
+    <!-- TradingView Lightweight Charts Library -->
+    <script src="https://unpkg.com/lightweight-charts@4.1.1/dist/lightweight-charts.standalone.production.js"></script>
+    
+    <!-- Institutional Stylesheet -->
+    <link rel="stylesheet" href="/static/css/axiom.css">
+</head>
+<body>
+    <div class="app-container">
+        
+        <!-- ==========================================
+             TOP INSTITUTIONAL HEADER
+             ========================================== -->
+        <header class="top-header">
+            <div class="brand-container">
+                <img src="/static/img/logo.svg" alt="Axiom Algorithmic" class="brand-logo">
+            </div>
+
+            <div class="header-status-group">
+                <div id="engine-status-pill" class="status-badge running">
+                    <span class="pulse-dot"></span>
+                    <span id="engine-status-text">MOTOR EN EJECUCIÓN</span>
+                </div>
+
+                <div id="market-status-pill" class="status-badge running">
+                    <span class="pulse-dot"></span>
+                    <span>CME LIVE</span>
+                </div>
+
+                <div class="time-display">
+                    <span class="time-item">NY: <strong id="clock-ny">--:--:-- ET</strong></span>
+                    <span class="time-item">UTC: <strong id="clock-utc">--:--:-- UTC</strong></span>
+                </div>
+            </div>
+
+            <div class="header-actions">
+                <button id="btn-emergency-top" class="btn-emergency" title="Cierra inmediatamente todas las posiciones abiertas en TopstepX">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M18.36 6.64a9 9 0 1 1-12.73 0M12 2v10"/></svg>
+                    KILL SWITCH (FLATTEN)
+                </button>
+            </div>
+        </header>
+
+        <!-- ==========================================
+             KEY PERFORMANCE METRICS RIBBON
+             ========================================== -->
+        <section class="metrics-ribbon">
+            <div class="metric-card">
+                <span class="metric-title">PnL Neto Acumulado</span>
+                <span id="metric-pnl" class="metric-value bull">+$0.00</span>
+                <span class="metric-sub">Base Sesión CME</span>
+            </div>
+
+            <div class="metric-card">
+                <span class="metric-title">Win Rate Cuantitativo</span>
+                <span id="metric-winrate" class="metric-value cyan">66.7%</span>
+                <span class="metric-sub">Ratio Reversión VWAP</span>
+            </div>
+
+            <div class="metric-card">
+                <span class="metric-title">Total Operaciones</span>
+                <span id="metric-trades" class="metric-value">0 (0L / 0S)</span>
+                <span class="metric-sub">Registros Caja Negra</span>
+            </div>
+
+            <div class="metric-card">
+                <span class="metric-title">Posición en Mercado</span>
+                <span id="metric-position" class="metric-value cyan">MONITOR FLAT</span>
+                <span class="metric-sub">Gestión OCO Activa</span>
+            </div>
+
+            <div class="metric-card">
+                <span class="metric-title">Cooldown Estratégico</span>
+                <span id="metric-cooldown" class="metric-value bull">0s (LISTO)</span>
+                <span class="metric-sub">Filtro Antiespeculativo</span>
+            </div>
+
+            <div class="metric-card">
+                <span class="metric-title">Entorno Seguro</span>
+                <span class="metric-value" style="color:#38BDF8;">PRACTICE ONLY</span>
+                <span class="metric-sub" id="spec-account">TopstepX Gateway</span>
+            </div>
+        </section>
+
+        <!-- ==========================================
+             MAIN WORKSPACE: CHART & CONTROLS
+             ========================================== -->
+        <main class="main-workspace">
+            
+            <!-- Left: Interactive 5m Chart Viewport -->
+            <div class="chart-section">
+                <div class="chart-header">
+                    <div class="symbol-tabs">
+                        <button class="symbol-tab active" data-symbol="ES">ES (S&P 500)</button>
+                        <button class="symbol-tab" data-symbol="NQ">NQ (Nasdaq)</button>
+                        <button class="symbol-tab" data-symbol="YM">YM (Dow)</button>
+                        <button class="symbol-tab" data-symbol="RTY">RTY (Russell)</button>
+                        <button class="symbol-tab" data-symbol="MES">MES (Micro)</button>
+                        <button class="symbol-tab" data-symbol="MNQ">MNQ (Micro)</button>
+                        <button class="symbol-tab" data-symbol="CL">CL (Petróleo)</button>
+                        <button class="symbol-tab" data-symbol="GC">GC (Oro)</button>
+                    </div>
+
+                    <div class="chart-hud">
+                        <div class="hud-item"><span id="hud-symbol" style="font-weight:700; color:#FFF;">ES</span>: <strong id="hud-price">--.--</strong></div>
+                        <div class="hud-item"><span class="tag tag-upper">SUP (+1σ)</span> <span id="hud-upper">--.--</span></div>
+                        <div class="hud-item"><span class="tag tag-vwap">VWAP</span> <span id="hud-vwap">--.--</span></div>
+                        <div class="hud-item"><span class="tag tag-lower">INF (-1σ)</span> <span id="hud-lower">--.--</span></div>
+                        <div class="hud-item">Δ VWAP: <strong id="hud-spread" class="metric-value bull" style="font-size:12px;">+0.00 pts</strong></div>
+                    </div>
+                </div>
+
+                <div class="chart-container-wrapper">
+                    <div id="tradingview-chart"></div>
+                    <img src="/static/img/logo.svg" alt="" class="chart-watermark">
+                </div>
+            </div>
+
+            <!-- Right: Algorithmic Controls & Setup Radar -->
+            <aside class="control-sidebar">
+                
+                <!-- Engine Control Card -->
+                <div class="panel-card">
+                    <div class="panel-title">
+                        <span>Control de Ejecución</span>
+                        <span style="font-size:10px; color:var(--accent-cyan);">AUTONOMOUS</span>
+                    </div>
+
+                    <div class="engine-btn-group">
+                        <button id="btn-start-engine" class="btn-primary">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+                            INICIAR
+                        </button>
+                        <button id="btn-stop-engine" class="btn-secondary">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
+                            PARAR
+                        </button>
+                    </div>
+
+                    <button id="btn-flatten" class="btn-danger" style="width:100%; display:flex; align-items:center; justify-content:center; gap:6px;">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>
+                        Cerrar Posición Actual (Flatten)
+                    </button>
+                </div>
+
+                <!-- Setup Radar Card -->
+                <div class="panel-card">
+                    <div class="panel-title">
+                        <span>Radar de Patrón VWAP</span>
+                        <span style="font-size:10px; color:var(--text-dim);">Vela 5 Min</span>
+                    </div>
+
+                    <div class="setup-checklist">
+                        <div class="checklist-item">
+                            <span>Test Estructural VWAP</span>
+                            <span id="check-trend" class="check-indicator ready">PROXIMIDAD ALTA</span>
+                        </div>
+                        <div class="checklist-item">
+                            <span>Rechazo en Banda / VWAP</span>
+                            <span id="check-touch" class="check-indicator pending">EN CANAL</span>
+                        </div>
+                        <div class="checklist-item">
+                            <span>Cuerpo Mínimo (≥ 4 Ticks)</span>
+                            <span class="check-indicator ready">CALIBRADO</span>
+                        </div>
+                        <div class="checklist-item">
+                            <span>Confirmación Apertura Vela</span>
+                            <span class="check-indicator pending">ESPERANDO CIERRE</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Specifications Card -->
+                <div class="panel-card">
+                    <div class="panel-title">
+                        <span>Especificaciones CME</span>
+                        <span style="font-size:10px; color:var(--text-dim);">GATEWAY</span>
+                    </div>
+
+                    <table class="specs-table">
+                        <tr>
+                            <td>Símbolo Activo</td>
+                            <td id="spec-symbol">ES</td>
+                        </tr>
+                        <tr>
+                            <td>Contrato TopstepX</td>
+                            <td id="spec-contract">Cargando...</td>
+                        </tr>
+                        <tr>
+                            <td>Gestión de Riesgo</td>
+                            <td style="color:#10B981;">Dinámico OCO</td>
+                        </tr>
+                        <tr>
+                            <td>Stop Loss Base</td>
+                            <td>Extremo Vela ± 10 Ticks</td>
+                        </tr>
+                        <tr>
+                            <td>Take Profit Target</td>
+                            <td>75% Amplitud Banda</td>
+                        </tr>
+                        <tr>
+                            <td>Tipo de Orden</td>
+                            <td>Market + Brackets</td>
+                        </tr>
+                    </table>
+                </div>
+
+            </aside>
+        </main>
+
+        <!-- ==========================================
+             BOTTOM TABBED WORKSPACE: LOGS & MATRIX
+             ========================================== -->
+        <section class="bottom-deck">
+            <div class="deck-tabs">
+                <button class="deck-tab active" data-tab="tab-operations">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
+                    Registro de Operaciones (Caja Negra CSV)
+                </button>
+                <button class="deck-tab" data-tab="tab-terminal">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+                    Terminal Cuantitativa en Vivo (Logs)
+                </button>
+                <button class="deck-tab" data-tab="tab-matrix">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="21" x2="9" y2="9"/></svg>
+                    Matriz Multiactivo CME
+                </button>
+
+                <div class="deck-tab-actions">
+                    <button id="btn-download-csv" class="btn-small">Descargar CSV</button>
+                    <label style="display:flex; align-items:center; gap:6px; font-size:11px; color:#94A3B8; cursor:pointer;">
+                        <input type="checkbox" id="chk-autoscroll" checked> Auto-Scroll
+                    </label>
+                    <button id="btn-clear-logs" class="btn-small">Limpiar Terminal</button>
+                </div>
+            </div>
+
+            <!-- Pane 1: Operations CSV Black Box -->
+            <div id="tab-operations" class="tab-pane active">
+                <div class="table-responsive">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Fecha & Hora</th>
+                                <th>Estado</th>
+                                <th>Dirección</th>
+                                <th>Precio Entrada</th>
+                                <th>SL Ticks</th>
+                                <th>TP Ticks</th>
+                                <th>Motivo Técnico</th>
+                                <th>Order ID</th>
+                                <th>Respuesta Servidor</th>
+                            </tr>
+                        </thead>
+                        <tbody id="operations-table-body">
+                            <!-- Populated via JS -->
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Pane 2: Live Quantitative Terminal -->
+            <div id="tab-terminal" class="tab-pane">
+                <div id="terminal-logs" class="terminal-window">
+                    <div class="terminal-line"><span class="term-system">🚀 Axiom Algorithmic Telemetry Gateway inicializada. Esperando pulsos...</span></div>
+                </div>
+            </div>
+
+            <!-- Pane 3: Multi-Symbol Scanner Matrix -->
+            <div id="tab-matrix" class="tab-pane">
+                <div class="table-responsive">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Símbolo</th>
+                                <th>Último Precio</th>
+                                <th>VWAP Sesión</th>
+                                <th>Banda Superior (+1σ)</th>
+                                <th>Banda Inferior (-1σ)</th>
+                                <th>Diferencial VWAP</th>
+                                <th>Acción</th>
+                            </tr>
+                        </thead>
+                        <tbody id="matrix-table-body">
+                            <!-- Populated dynamically via JS -->
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </section>
+
+        <!-- ==========================================
+             FOOTER
+             ========================================== -->
+        <footer class="app-footer">
+            AXIOM ALGORITHMIC LLC &copy; 2026 &bull; Framework de Ejecución Cuantitativa &bull; TopstepX Gateway v2.0
+        </footer>
+
+    </div>
+
+    <!-- Client Script -->
+    <script src="/static/js/axiom.js"></script>
+</body>
+</html>
