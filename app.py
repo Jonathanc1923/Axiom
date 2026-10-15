@@ -255,11 +255,13 @@ async def websocket_endpoint(websocket: WebSocket):
             with engine.lock:
                 telemetry_data = engine.latest_telemetry
                 stats_data = engine.stats
+                matrix_data = engine.get_status().get("symbols_matrix", {})
                 
             await websocket.send_text(json.dumps({
                 "type": "telemetry",
                 "telemetry": telemetry_data,
                 "stats": stats_data,
+                "symbols_matrix": matrix_data,
                 "running": engine.running
             }))
     except WebSocketDisconnect:

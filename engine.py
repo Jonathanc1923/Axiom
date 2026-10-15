@@ -94,7 +94,10 @@ class AxiomEngine:
     def log(self, message: str, category: str = "INFO", symbol: Optional[str] = None):
         """Emite un log estructurado global y hacia la terminal dedicada del símbolo."""
         now_str = datetime.now().strftime('%H:%M:%S')
-        sym = (symbol or self.active_symbol).upper()
+        if symbol is None:
+            sym = "ALL" if category in ["SYSTEM", "ALERT", "ERROR"] else self.active_symbol.upper()
+        else:
+            sym = symbol.upper()
         
         log_entry = {
             "timestamp": now_str,
@@ -111,8 +114,13 @@ class AxiomEngine:
             if len(self.log_history) > self.max_logs:
                 self.log_history.pop(0)
                 
-            # 2. Dedicated symbol log history
-            if sym in self.symbol_logs:
+            # 2. Dedicated symbol log history (ALL distributes to every symbol tab)
+            if sym == "ALL":
+                for s_sym in self.symbol_logs:
+                    self.symbol_logs[s_sym].append(log_entry)
+                    if len(self.symbol_logs[s_sym]) > 250:
+                        self.symbol_logs[s_sym].pop(0)
+            elif sym in self.symbol_logs:
                 self.symbol_logs[sym].append(log_entry)
                 if len(self.symbol_logs[sym]) > 250:
                     self.symbol_logs[sym].pop(0)
@@ -139,13 +147,13 @@ class AxiomEngine:
     # ==========================================
     def initialize(self):
         """Autentica y resuelve contratos para todos los símbolos registrados."""
-        self.log("🚀 Inicializando Gateway Cuantitativo Axiom...", "SYSTEM", "ES")
+        self.log("🚀 Inicializando Gateway Cuantitativo Axiom...", "SYSTEM", "ALL")
         self.client.ensure_authenticated()
         
         acc = self.client.get_practice_account()
         self.account_id = acc["id"]
         self.account_name = acc["name"]
-        self.log(f"✅ Cuenta vinculada: {self.account_name} (ID: {self.account_id})", "SYSTEM", "ES")
+        self.log(f"✅ Cuenta vinculada: {self.account_name} (ID: {self.account_id})", "SYSTEM", "ALL")
         
         # Resolver contratos TopstepX para todos los símbolos
         for sym in SUPPORTED_SYMBOLS.keys():
@@ -162,7 +170,7 @@ class AxiomEngine:
         try:
             self.sync_real_data_from_topstep()
         except Exception as e:
-            self.log(f"⚠️ Alerta en sincronización inicial Topstep: {e}", "ERROR")
+            self.log(f"⚠️ Alerta en sincronización inicial Topstep: {e}", "ERROR", "ALL")
             self.load_operations_history()
 
     def toggle_symbol(self, symbol_key: str, enabled: Optional[bool] = None) -> bool:
@@ -175,9 +183,16 @@ class AxiomEngine:
             current = self.symbol_states[sym]["enabled"]
             new_state = (not current) if enabled is None else bool(enabled)
             self.symbol_states[sym]["enabled"] = new_state
+            if new_state:
+                # Reset latest_candle_time para que en el próximo pase del bucle evalúe de inmediato
+                self.symbol_states[sym]["latest_candle_time"] = None
             
         estado_str = "ACTIVO (Operando)" if new_state else "INACTIVO (Solo Monitoreo)"
         self.log(f"⚙️ Estado de trading actualizado: {estado_str}", "SYSTEM", sym)
+        if new_state:
+            self.log(f"🚀 Escáner autónomo activado para {sym}. Monitoreando mechas vs VWAP institucional...", "SETUP", sym)
+        else:
+            self.log(f"⏸️ Escáner autónomo pausado para {sym}. Operaciones suspendidas.", "SYSTEM", sym)
         return new_state
 
     def switch_active_view(self, symbol_key: str):
@@ -227,62 +242,54 @@ class AxiomEngine:
     def verificar_setup_vwap(self, df: pd.DataFrame, sym: str) -> Optional[Dict[str, Any]]:
         """
         Detecta rechazo estricto por mecha (Wick Rejection) en VWAP para todos los símbolos.
-        REGLA INSTITUCIONAL:
-        - La mecha de la vela más reciente debe tocar o pasar el VWAP.
-        - El cuerpo de la vela NO puede pasar el VWAP (la operación queda invalidada si el cuerpo lo cruza).
-        - LONG (Compras): Mecha inferior toca/pasa el VWAP (Low <= VWAP), pero todo el cuerpo queda por encima (min(Open, Close) > VWAP).
-        - SHORT (Ventas): Mecha superior toca/pasa el VWAP (High >= VWAP), pero todo el cuerpo queda por debajo (max(Open, Close) < VWAP).
+        REGLAS INSTITUCIONALES (ESTRICTAS):
+        1. Vela evaluada: La vela cerrada más reciente confirmada (df.iloc[-2]).
+        2. Color de vela: Indiferente (no necesariamente debe ser verde o roja).
+        3. Mecha vs VWAP: La mecha DEBE tocar o pasar el VWAP:
+           - LONG: Low <= VWAP (la mecha inferior toca o cruza hacia abajo el VWAP).
+           - SHORT: High >= VWAP (la mecha superior toca o cruza hacia arriba el VWAP).
+        4. Cuerpo vs VWAP: El cuerpo NO PUEDE pasar el VWAP (la operación queda invalidada si el cuerpo lo cruza):
+           - LONG: min(Open, Close) > VWAP (todo el cuerpo queda estrictamente por encima del VWAP).
+           - SHORT: max(Open, Close) < VWAP (todo el cuerpo queda estrictamente por debajo del VWAP).
+        5. Stop Loss:
+           - LONG: Exactamente 10 ticks por debajo del precio más bajo de la vela de rechazo (Low - 10 ticks).
+           - SHORT: Exactamente 10 ticks por encima del precio más alto de la vela de rechazo (High + 10 ticks).
         """
         if len(df) < 4:
             return None
             
-        candidatos = [df.iloc[-2], df.iloc[-3]]
+        vela = df.iloc[-2]
+        vwap_val = float(vela['VWAP'])
+        cuerpo_bajo = min(float(vela['Open']), float(vela['Close']))
+        cuerpo_alto = max(float(vela['Open']), float(vela['Close']))
+        low_val = float(vela['Low'])
+        high_val = float(vela['High'])
         
         # 1. EVALUAR SETUP LONG (Compras)
-        for vela in candidatos:
-            vwap_val = vela['VWAP']
-            cuerpo_bajo = min(vela['Open'], vela['Close'])
-            
-            # Condición estricta: La mecha toca o pasa el VWAP, pero el cuerpo NO lo pasa
-            mecha_toco_vwap = vela['Low'] <= vwap_val
-            cuerpo_no_paso = cuerpo_bajo > vwap_val
-            
-            if mecha_toco_vwap and cuerpo_no_paso:
-                # Verificamos que la última vela confirmada mantenga el cuerpo por encima de VWAP
-                if min(df.iloc[-2]['Open'], df.iloc[-2]['Close']) > df.iloc[-2]['VWAP']:
-                    return {
-                        "direccion": "LONG",
-                        "simbolo": sym,
-                        "vela_cruce": vela,
-                        "extremo_precio": float(vela['Low']), # Mínimo de la mecha de rechazo
-                        "vwap_cruce": float(vwap_val),
-                        "upper_band": float(vela['Upper_Band']),
-                        "lower_band": float(vela['Lower_Band'])
-                    }
-                break
+        # Mecha inferior toca/pasa VWAP y todo el cuerpo permanece estrictamente por encima de VWAP
+        if low_val <= vwap_val and cuerpo_bajo > vwap_val:
+            return {
+                "direccion": "LONG",
+                "simbolo": sym,
+                "vela_cruce": vela,
+                "extremo_precio": low_val,  # Mínimo de la mecha de rechazo
+                "vwap_cruce": vwap_val,
+                "upper_band": float(vela['Upper_Band']),
+                "lower_band": float(vela['Lower_Band'])
+            }
 
         # 2. EVALUAR SETUP SHORT (Ventas)
-        for vela in candidatos:
-            vwap_val = vela['VWAP']
-            cuerpo_alto = max(vela['Open'], vela['Close'])
-            
-            # Condición estricta: La mecha toca o pasa el VWAP, pero el cuerpo NO lo pasa
-            mecha_toco_vwap = vela['High'] >= vwap_val
-            cuerpo_no_paso = cuerpo_alto < vwap_val
-            
-            if mecha_toco_vwap and cuerpo_no_paso:
-                # Verificamos que la última vela confirmada mantenga el cuerpo por debajo de VWAP
-                if max(df.iloc[-2]['Open'], df.iloc[-2]['Close']) < df.iloc[-2]['VWAP']:
-                    return {
-                        "direccion": "SHORT",
-                        "simbolo": sym,
-                        "vela_cruce": vela,
-                        "extremo_precio": float(vela['High']), # Máximo de la mecha de rechazo
-                        "vwap_cruce": float(vwap_val),
-                        "upper_band": float(vela['Upper_Band']),
-                        "lower_band": float(vela['Lower_Band'])
-                    }
-                break
+        # Mecha superior toca/pasa VWAP y todo el cuerpo permanece estrictamente por debajo de VWAP
+        if high_val >= vwap_val and cuerpo_alto < vwap_val:
+            return {
+                "direccion": "SHORT",
+                "simbolo": sym,
+                "vela_cruce": vela,
+                "extremo_precio": high_val,  # Máximo de la mecha de rechazo
+                "vwap_cruce": vwap_val,
+                "upper_band": float(vela['Upper_Band']),
+                "lower_band": float(vela['Lower_Band'])
+            }
 
         return None
 
@@ -823,34 +830,44 @@ class AxiomEngine:
                                 "cooldown_remaining": cd_left
                             }
                         
-                        # Si es el símbolo activo en pantalla, emitir telemetría al feed general
-                        if is_active_view:
-                            self.log(f"📊 {sym}: {vela_actual['Close']:,.2f} | 🔴 Sup: {vela_actual['Upper_Band']:,.2f} | 🔵 VWAP: {vela_actual['VWAP']:,.2f} | 🟢 Inf: {vela_actual['Lower_Band']:,.2f}", "TELEMETRY", sym)
+                        # Emitir telemetría para todos los símbolos habilitados o para la vista activa
+                        if is_enabled or is_active_view:
+                            self.log(f"📊 {sym}: {vela_actual['Close']:,.2f} | 🔴 Sup: {vela_actual['Upper_Band']:,.2f} | 🔵 VWAP: {vela_actual['VWAP']:,.2f} | 🟢 Inf: {vela_actual['Lower_Band']:,.2f} | Dist: {dist_vwap:+.2f} pts", "TELEMETRY", sym)
                         
                         # 2. Evaluación de Trading Autónomo (solo si el símbolo está HABILITADO)
                         if is_enabled:
-                            vela_cerrada_ts = df.iloc[-2]['Timestamp']
-                            if state["latest_candle_time"] is None:
+                            vela_cerrada = df.iloc[-2]
+                            vela_cerrada_ts = vela_cerrada['Timestamp']
+                            time_str = vela_cerrada_ts.strftime('%H:%M')
+                            
+                            if state["latest_candle_time"] != vela_cerrada_ts:
+                                is_first_check = (state["latest_candle_time"] is None)
                                 state["latest_candle_time"] = vela_cerrada_ts
-                            elif vela_cerrada_ts != state["latest_candle_time"]:
-                                self.log(f"⏱️ Vela de 5m confirmada ({vela_cerrada_ts.strftime('%H:%M')} UTC). Evaluando setup...", "SETUP", sym)
-                                state["latest_candle_time"] = vela_cerrada_ts
+                                
+                                if is_first_check:
+                                    self.log(f"🔍 Escáner activo para {sym} (Vela 5m: {time_str} UTC). Evaluando rechazo VWAP institucional...", "SETUP", sym)
+                                else:
+                                    self.log(f"⏱️ [{sym}] Vela 5m confirmada ({time_str} UTC). Evaluando rechazo VWAP institucional...", "SETUP", sym)
                                 
                                 if time.time() < state["cooldown_until"]:
                                     restante = int(state["cooldown_until"] - time.time())
-                                    self.log(f"⏳ Cooldown activo. Restan {restante}s.", "SYSTEM", sym)
+                                    self.log(f"⏳ Cooldown activo para {sym}. Restan {restante}s.", "SYSTEM", sym)
                                 else:
                                     setup = self.verificar_setup_vwap(df, sym)
                                     if setup:
-                                        self.ejecutar_orden(setup, df, sym)
+                                        if state.get("last_executed_candle_ts") != vela_cerrada_ts:
+                                            state["last_executed_candle_ts"] = vela_cerrada_ts
+                                            self.ejecutar_orden(setup, df, sym)
+                                        else:
+                                            self.log(f"ℹ️ [{sym}] Setup presente, pero ya ejecutado previamente en vela {time_str} UTC.", "SETUP", sym)
                                     else:
-                                        self.log("-> Sin rechazo de VWAP confirmado. Disciplina cuantitativa.", "SETUP", sym)
+                                        self.log(f"🔍 [{sym}] Filtro VWAP ({time_str} UTC): Sin rechazo válido por mecha (Cuerpo no cruzado). Disciplina activa.", "SETUP", sym)
                     
                     # Pausa corta entre consultas para cortesía con la API
-                    time.sleep(0.5)
+                    time.sleep(0.3)
                     
             except Exception as e:
-                self.log(f"⚠️ Excepción en el ciclo multi-símbolo: {e}", "ERROR")
+                self.log(f"⚠️ Excepción en el ciclo multi-símbolo: {e}", "ERROR", "ALL")
                 
             # Intervalo entre rondas completas de sondeo
             for _ in range(12):
@@ -858,7 +875,7 @@ class AxiomEngine:
                     break
                 time.sleep(1)
 
-        self.log("🛑 Motor multi-símbolo detenido correctamente.", "SYSTEM")
+        self.log("🛑 Motor multi-símbolo detenido correctamente.", "SYSTEM", "ALL")
 
     # ==========================================
     # LIFECYCLE MANAGEMENT

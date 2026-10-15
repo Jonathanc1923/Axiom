@@ -307,6 +307,10 @@ document.addEventListener('DOMContentLoaded', () => {
                 } else if (msg.type === 'telemetry') {
                     if (msg.telemetry) updateTelemetryUI(msg.telemetry);
                     if (msg.stats) updateMetricsUI(msg.stats, msg.running);
+                    if (msg.symbols_matrix) {
+                        renderFleetStrip(msg.symbols_matrix);
+                        updateMatrixUI(msg.symbols_matrix);
+                    }
                 } else if (msg.type === 'log') {
                     appendTerminalLine(msg.data);
                     if (msg.data.category === 'ORDER' || msg.data.category === 'SYSTEM') {
@@ -334,50 +338,93 @@ document.addEventListener('DOMContentLoaded', () => {
     // ==========================================
     function renderFleetStrip(matrix) {
         if (!fleetStrip || !matrix) return;
-        fleetStrip.innerHTML = '';
         symbolStates = matrix;
         
-        Object.keys(matrix).forEach(sym => {
-            const item = matrix[sym];
-            const isSelected = (sym === activeSymbol);
-            const isEnabled = item.enabled;
-            const spread = item.spread_vwap || 0;
-            const spreadClass = spread >= 0 ? 'bull' : 'bear';
-            
-            const card = document.createElement('div');
-            card.className = `fleet-card ${isSelected ? 'active-view' : ''}`;
-            card.setAttribute('data-symbol', sym);
-            
-            card.innerHTML = `
-                <div class="fleet-card-header">
-                    <span class="fleet-symbol">${sym}</span>
-                    <span class="badge-status-chip ${isEnabled ? 'active' : 'inactive'}">${isEnabled ? 'ACTIVO' : 'INACTIVO'}</span>
-                </div>
-                <div class="fleet-price">${item.price > 0 ? item.price.toLocaleString('en-US', { minimumFractionDigits: 2 }) : '--.--'}</div>
-                <div class="fleet-sub">VWAP: ${item.vwap > 0 ? item.vwap.toLocaleString('en-US', { minimumFractionDigits: 2 }) : '--.--'}</div>
-                <div class="fleet-sub ${spreadClass}">Δ: ${spread >= 0 ? '+' : ''}${spread.toFixed(2)} pts</div>
-                <button class="fleet-toggle-btn ${isEnabled ? 'active' : 'inactive'} btn-toggle-card" data-symbol="${sym}">
-                    ${isEnabled ? 'OPERANDO (ON)' : 'ACTIVAR (OFF)'}
-                </button>
-            `;
-            
-            // Clicking the card switches chart view
-            card.addEventListener('click', (e) => {
-                if (e.target.classList.contains('btn-toggle-card')) return;
-                switchSymbol(sym);
+        const existingCards = fleetStrip.querySelectorAll('.fleet-card');
+        const symbolKeys = Object.keys(matrix);
+        
+        if (existingCards.length !== symbolKeys.length) {
+            // Inicializar tarjetas en el DOM
+            fleetStrip.innerHTML = '';
+            symbolKeys.forEach(sym => {
+                const item = matrix[sym];
+                const isSelected = (sym === activeSymbol);
+                const isEnabled = item.enabled;
+                const spread = item.spread_vwap || 0;
+                const spreadClass = spread >= 0 ? 'bull' : 'bear';
+                
+                const card = document.createElement('div');
+                card.className = `fleet-card ${isSelected ? 'active-view' : ''}`;
+                card.setAttribute('data-symbol', sym);
+                
+                card.innerHTML = `
+                    <div class="fleet-card-header">
+                        <span class="fleet-symbol">${sym}</span>
+                        <span class="badge-status-chip ${isEnabled ? 'active' : 'inactive'}">${isEnabled ? 'ACTIVO' : 'INACTIVO'}</span>
+                    </div>
+                    <div class="fleet-price">${item.price > 0 ? item.price.toLocaleString('en-US', { minimumFractionDigits: 2 }) : '--.--'}</div>
+                    <div class="fleet-sub fleet-vwap">VWAP: ${item.vwap > 0 ? item.vwap.toLocaleString('en-US', { minimumFractionDigits: 2 }) : '--.--'}</div>
+                    <div class="fleet-sub fleet-spread ${spreadClass}">Δ: ${spread >= 0 ? '+' : ''}${spread.toFixed(2)} pts</div>
+                    <button class="fleet-toggle-btn ${isEnabled ? 'active' : 'inactive'} btn-toggle-card" data-symbol="${sym}">
+                        ${isEnabled ? 'OPERANDO (ON)' : 'ACTIVAR (OFF)'}
+                    </button>
+                `;
+                
+                // Clicking the card switches chart view
+                card.addEventListener('click', (e) => {
+                    if (e.target.classList.contains('btn-toggle-card')) return;
+                    switchSymbol(sym);
+                });
+                
+                const toggleBtn = card.querySelector('.btn-toggle-card');
+                if (toggleBtn) {
+                    toggleBtn.addEventListener('click', (e) => {
+                        e.stopPropagation();
+                        toggleSymbol(sym);
+                    });
+                }
+                
+                fleetStrip.appendChild(card);
             });
-            
-            fleetStrip.appendChild(card);
-        });
-
-        // Add toggle event listeners
-        document.querySelectorAll('.btn-toggle-card').forEach(btn => {
-            btn.addEventListener('click', (e) => {
-                e.stopPropagation();
-                const s = e.target.getAttribute('data-symbol');
-                toggleSymbol(s);
+        } else {
+            // Actualización suave in-place sin parpadeos ni interrupción de clics
+            existingCards.forEach(card => {
+                const sym = card.getAttribute('data-symbol');
+                const item = matrix[sym];
+                if (!item) return;
+                
+                card.classList.toggle('active-view', sym === activeSymbol);
+                
+                const chip = card.querySelector('.badge-status-chip');
+                if (chip) {
+                    chip.className = `badge-status-chip ${item.enabled ? 'active' : 'inactive'}`;
+                    chip.innerText = item.enabled ? 'ACTIVO' : 'INACTIVO';
+                }
+                
+                const priceEl = card.querySelector('.fleet-price');
+                if (priceEl && item.price > 0) {
+                    priceEl.innerText = item.price.toLocaleString('en-US', { minimumFractionDigits: 2 });
+                }
+                
+                const vwapEl = card.querySelector('.fleet-vwap');
+                if (vwapEl && item.vwap > 0) {
+                    vwapEl.innerText = `VWAP: ${item.vwap.toLocaleString('en-US', { minimumFractionDigits: 2 })}`;
+                }
+                
+                const spreadEl = card.querySelector('.fleet-spread');
+                if (spreadEl) {
+                    const spread = item.spread_vwap || 0;
+                    spreadEl.className = `fleet-sub fleet-spread ${spread >= 0 ? 'bull' : 'bear'}`;
+                    spreadEl.innerText = `Δ: ${spread >= 0 ? '+' : ''}${spread.toFixed(2)} pts`;
+                }
+                
+                const btn = card.querySelector('.btn-toggle-card');
+                if (btn) {
+                    btn.className = `fleet-toggle-btn ${item.enabled ? 'active' : 'inactive'} btn-toggle-card`;
+                    btn.innerText = item.enabled ? 'OPERANDO (ON)' : 'ACTIVAR (OFF)';
+                }
             });
-        });
+        }
     }
 
     function updateMatrixUI(matrix) {
@@ -581,7 +628,7 @@ document.addEventListener('DOMContentLoaded', () => {
         // Check symbol filter
         if (selectedTerminalSymbol !== 'ALL') {
             const logSym = (log.symbol || '').toUpperCase();
-            if (logSym !== selectedTerminalSymbol && logSym !== 'ALL' && log.category !== 'SYSTEM') {
+            if (logSym && logSym !== 'ALL' && logSym !== selectedTerminalSymbol) {
                 return;
             }
         }
@@ -735,6 +782,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 // Refresh status
                 const st = await (await fetch('/api/status')).json();
                 updateStatusUI(st);
+                if (selectedTerminalSymbol === symbolKey || selectedTerminalSymbol === 'ALL') {
+                    reloadTerminalLogsForSymbol(selectedTerminalSymbol);
+                }
             }
         } catch (e) {
             alert('Error al modificar estado de símbolo: ' + e);

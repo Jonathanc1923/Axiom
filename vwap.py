@@ -151,49 +151,34 @@ def verificar_setup_vwap(df):
     """
     if len(df) < 4: return None
         
-    candidatos = [df.iloc[-2], df.iloc[-3]]
+    vela = df.iloc[-2]
+    vwap_val = float(vela['VWAP'])
+    cuerpo_bajo = min(float(vela['Open']), float(vela['Close']))
+    cuerpo_alto = max(float(vela['Open']), float(vela['Close']))
+    low_val = float(vela['Low'])
+    high_val = float(vela['High'])
     
     # 1. SETUP LONG (Compras)
-    for vela in candidatos:
-        vwap_val = vela['VWAP']
-        cuerpo_bajo = min(vela['Open'], vela['Close'])
-        
-        # Condición estricta: La mecha toca o pasa el VWAP, pero el cuerpo NO lo pasa
-        mecha_toco_vwap = vela['Low'] <= vwap_val
-        cuerpo_no_paso = cuerpo_bajo > vwap_val
-        
-        if mecha_toco_vwap and cuerpo_no_paso:
-            if min(df.iloc[-2]['Open'], df.iloc[-2]['Close']) > df.iloc[-2]['VWAP']:
-                return {
-                    "direccion": "LONG",
-                    "vela_cruce": vela,
-                    "extremo_precio": float(vela['Low']), # Mínimo de la mecha
-                    "vwap_cruce": float(vwap_val),
-                    "upper_band": float(vela['Upper_Band']),
-                    "lower_band": float(vela['Lower_Band'])
-                }
-            break
+    if low_val <= vwap_val and cuerpo_bajo > vwap_val:
+        return {
+            "direccion": "LONG",
+            "vela_cruce": vela,
+            "extremo_precio": low_val, # Mínimo de la mecha
+            "vwap_cruce": vwap_val,
+            "upper_band": float(vela['Upper_Band']),
+            "lower_band": float(vela['Lower_Band'])
+        }
 
     # 2. SETUP SHORT (Ventas)
-    for vela in candidatos:
-        vwap_val = vela['VWAP']
-        cuerpo_alto = max(vela['Open'], vela['Close'])
-        
-        # Condición estricta: La mecha toca o pasa el VWAP, pero el cuerpo NO lo pasa
-        mecha_toco_vwap = vela['High'] >= vwap_val
-        cuerpo_no_paso = cuerpo_alto < vwap_val
-        
-        if mecha_toco_vwap and cuerpo_no_paso:
-            if max(df.iloc[-2]['Open'], df.iloc[-2]['Close']) < df.iloc[-2]['VWAP']:
-                return {
-                    "direccion": "SHORT",
-                    "vela_cruce": vela,
-                    "extremo_precio": float(vela['High']), # Máximo de la mecha
-                    "vwap_cruce": float(vwap_val),
-                    "upper_band": float(vela['Upper_Band']),
-                    "lower_band": float(vela['Lower_Band'])
-                }
-            break
+    if high_val >= vwap_val and cuerpo_alto < vwap_val:
+        return {
+            "direccion": "SHORT",
+            "vela_cruce": vela,
+            "extremo_precio": high_val, # Máximo de la mecha
+            "vwap_cruce": vwap_val,
+            "upper_band": float(vela['Upper_Band']),
+            "lower_band": float(vela['Lower_Band'])
+        }
 
     return None
 
