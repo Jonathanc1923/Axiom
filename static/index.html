@@ -95,6 +95,13 @@
         </section>
 
         <!-- ==========================================
+             MULTI-SYMBOL FLEET STRIP (STATUS & TOGGLE)
+             ========================================== -->
+        <section class="fleet-strip" id="fleet-strip">
+            <!-- Populated dynamically via JS with all 12 CME symbols -->
+        </section>
+
+        <!-- ==========================================
              MAIN WORKSPACE: CHART & CONTROLS
              ========================================== -->
         <main class="main-workspace">
@@ -102,18 +109,23 @@
             <!-- Left: Interactive 5m Chart Viewport -->
             <div class="chart-section">
                 <div class="chart-header">
-                    <div class="symbol-tabs">
-                        <button class="symbol-tab active" data-symbol="ES">ES (S&P 500)</button>
-                        <button class="symbol-tab" data-symbol="NQ">NQ (Nasdaq)</button>
-                        <button class="symbol-tab" data-symbol="YM">YM (Dow)</button>
-                        <button class="symbol-tab" data-symbol="RTY">RTY (Russell)</button>
-                        <button class="symbol-tab" data-symbol="MES">MES (Micro)</button>
-                        <button class="symbol-tab" data-symbol="MNQ">MNQ (Micro)</button>
-                        <button class="symbol-tab" data-symbol="CL">CL (Petróleo)</button>
-                        <button class="symbol-tab" data-symbol="GC">GC (Oro)</button>
+                    <div class="symbol-tabs" id="chart-symbol-tabs">
+                        <button class="symbol-tab active" data-symbol="ES">ES</button>
+                        <button class="symbol-tab" data-symbol="MES">MES</button>
+                        <button class="symbol-tab" data-symbol="NQ">NQ</button>
+                        <button class="symbol-tab" data-symbol="MNQ">MNQ</button>
+                        <button class="symbol-tab" data-symbol="YM">YM</button>
+                        <button class="symbol-tab" data-symbol="MYM">MYM</button>
+                        <button class="symbol-tab" data-symbol="RTY">RTY</button>
+                        <button class="symbol-tab" data-symbol="M2K">M2K</button>
+                        <button class="symbol-tab" data-symbol="GC">GC</button>
+                        <button class="symbol-tab" data-symbol="MGC">MGC</button>
+                        <button class="symbol-tab" data-symbol="CL">CL</button>
+                        <button class="symbol-tab" data-symbol="MCL">MCL</button>
                     </div>
 
                     <div class="chart-hud">
+                        <button id="btn-toggle-active-trading" class="fleet-toggle-btn active" title="Activar/Desactivar operaciones autónomas para este activo">TRADING: ACTIVO</button>
                         <div class="hud-item"><span id="hud-symbol" style="font-weight:700; color:#FFF;">ES</span>: <strong id="hud-price">--.--</strong></div>
                         <div class="hud-item"><span class="tag tag-upper">SUP (+1σ)</span> <span id="hud-upper">--.--</span></div>
                         <div class="hud-item"><span class="tag tag-vwap">VWAP</span> <span id="hud-vwap">--.--</span></div>
@@ -134,18 +146,18 @@
                 <!-- Engine Control Card -->
                 <div class="panel-card">
                     <div class="panel-title">
-                        <span>Control de Ejecución</span>
+                        <span>Control Multi-Símbolo</span>
                         <span style="font-size:10px; color:var(--accent-cyan);">AUTONOMOUS</span>
                     </div>
 
                     <div class="engine-btn-group">
                         <button id="btn-start-engine" class="btn-primary">
                             <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
-                            INICIAR
+                            INICIAR TODO
                         </button>
                         <button id="btn-stop-engine" class="btn-secondary">
                             <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
-                            PARAR
+                            PARAR TODO
                         </button>
                     </div>
 
@@ -159,7 +171,7 @@
                 <div class="panel-card">
                     <div class="panel-title">
                         <span>Radar de Patrón VWAP</span>
-                        <span style="font-size:10px; color:var(--text-dim);">Vela 5 Min</span>
+                        <span id="radar-symbol-badge" style="font-size:10px; color:var(--accent-cyan);">ES</span>
                     </div>
 
                     <div class="setup-checklist">
@@ -168,16 +180,16 @@
                             <span id="check-trend" class="check-indicator ready">PROXIMIDAD ALTA</span>
                         </div>
                         <div class="checklist-item">
-                            <span>Rechazo en Banda / VWAP</span>
+                            <span>Rechazo en VWAP (Absorción)</span>
                             <span id="check-touch" class="check-indicator pending">EN CANAL</span>
                         </div>
                         <div class="checklist-item">
-                            <span>Cuerpo Mínimo (≥ 4 Ticks)</span>
-                            <span class="check-indicator ready">CALIBRADO</span>
+                            <span>Independencia de Color</span>
+                            <span class="check-indicator ready">HABILITADO</span>
                         </div>
                         <div class="checklist-item">
-                            <span>Confirmación Apertura Vela</span>
-                            <span class="check-indicator pending">ESPERANDO CIERRE</span>
+                            <span>SL Estructural (10 Ticks)</span>
+                            <span class="check-indicator ready">CALIBRADO</span>
                         </div>
                     </div>
                 </div>
@@ -197,6 +209,10 @@
                         <tr>
                             <td>Contrato TopstepX</td>
                             <td id="spec-contract">Cargando...</td>
+                        </tr>
+                        <tr>
+                            <td>Estado de Trading</td>
+                            <td id="spec-status" style="color:#10B981;">ACTIVO</td>
                         </tr>
                         <tr>
                             <td>Gestión de Riesgo</td>
@@ -227,15 +243,15 @@
             <div class="deck-tabs">
                 <button class="deck-tab active" data-tab="tab-operations">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
-                    Registro de Operaciones (Caja Negra CSV)
+                    Desglose General de Operaciones (Todos los Símbolos)
                 </button>
                 <button class="deck-tab" data-tab="tab-terminal">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
-                    Terminal Cuantitativa en Vivo (Logs)
+                    Terminal Cuantitativa en Vivo (Por Símbolo)
                 </button>
                 <button class="deck-tab" data-tab="tab-matrix">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="21" x2="9" y2="9"/></svg>
-                    Matriz Multiactivo CME
+                    Matriz Multiactivo y Desglose General (12 Símbolos CME)
                 </button>
 
                 <div class="deck-tab-actions">
@@ -249,11 +265,34 @@
 
             <!-- Pane 1: Operations CSV Black Box -->
             <div id="tab-operations" class="tab-pane active">
+                <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:12px; gap:16px; flex-wrap:wrap;">
+                    <div style="display:flex; align-items:center; gap:10px;">
+                        <label style="font-size:12px; color:#94A3B8; font-weight:600;">Filtrar Símbolo:</label>
+                        <select id="select-op-filter" class="select-institutional">
+                            <option value="ALL">Todos los Símbolos (Consolidado)</option>
+                            <option value="ES">ES (E-mini S&P 500)</option>
+                            <option value="MES">MES (Micro S&P 500)</option>
+                            <option value="NQ">NQ (E-mini Nasdaq-100)</option>
+                            <option value="MNQ">MNQ (Micro Nasdaq-100)</option>
+                            <option value="YM">YM (E-mini Dow Jones)</option>
+                            <option value="MYM">MYM (Micro Dow Jones)</option>
+                            <option value="RTY">RTY (E-mini Russell 2000)</option>
+                            <option value="M2K">M2K (Micro Russell 2000)</option>
+                            <option value="GC">GC (Oro Futures)</option>
+                            <option value="MGC">MGC (Micro Oro Futures)</option>
+                            <option value="CL">CL (Petróleo Crudo)</option>
+                            <option value="MCL">MCL (Micro Petróleo)</option>
+                        </select>
+                    </div>
+                    <div id="fleet-stats-summary" style="display:flex; gap:10px; font-family:var(--font-mono); font-size:11px; color:#94A3B8;"></div>
+                </div>
+
                 <div class="table-responsive">
                     <table class="data-table">
                         <thead>
                             <tr>
                                 <th>Fecha & Hora</th>
+                                <th>Símbolo</th>
                                 <th>Estado</th>
                                 <th>Dirección</th>
                                 <th>Precio Entrada</th>
@@ -273,8 +312,25 @@
 
             <!-- Pane 2: Live Quantitative Terminal -->
             <div id="tab-terminal" class="tab-pane">
+                <!-- Terminal Symbol Filter Bar -->
+                <div class="terminal-sym-bar" id="terminal-sym-bar">
+                    <button class="term-sym-btn active" data-symbol="ALL">TODOS (Feed General)</button>
+                    <button class="term-sym-btn" data-symbol="ES">ES</button>
+                    <button class="term-sym-btn" data-symbol="MES">MES</button>
+                    <button class="term-sym-btn" data-symbol="NQ">NQ</button>
+                    <button class="term-sym-btn" data-symbol="MNQ">MNQ</button>
+                    <button class="term-sym-btn" data-symbol="YM">YM</button>
+                    <button class="term-sym-btn" data-symbol="MYM">MYM</button>
+                    <button class="term-sym-btn" data-symbol="RTY">RTY</button>
+                    <button class="term-sym-btn" data-symbol="M2K">M2K</button>
+                    <button class="term-sym-btn" data-symbol="GC">GC</button>
+                    <button class="term-sym-btn" data-symbol="MGC">MGC</button>
+                    <button class="term-sym-btn" data-symbol="CL">CL</button>
+                    <button class="term-sym-btn" data-symbol="MCL">MCL</button>
+                </div>
+
                 <div id="terminal-logs" class="terminal-window">
-                    <div class="terminal-line"><span class="term-system">🚀 Axiom Algorithmic Telemetry Gateway inicializada. Esperando pulsos...</span></div>
+                    <div class="terminal-line"><span class="term-system">🚀 Axiom Algorithmic Multi-Symbol Telemetry Gateway inicializada. Esperando pulsos...</span></div>
                 </div>
             </div>
 
@@ -285,11 +341,14 @@
                         <thead>
                             <tr>
                                 <th>Símbolo</th>
+                                <th>Nombre Contrato</th>
+                                <th>Estado Trading</th>
                                 <th>Último Precio</th>
                                 <th>VWAP Sesión</th>
                                 <th>Banda Superior (+1σ)</th>
                                 <th>Banda Inferior (-1σ)</th>
                                 <th>Diferencial VWAP</th>
+                                <th>Cooldown</th>
                                 <th>Acción</th>
                             </tr>
                         </thead>

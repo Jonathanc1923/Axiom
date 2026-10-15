@@ -17,7 +17,7 @@ if hasattr(sys.stderr, "reconfigure"):
         pass
 
 from pathlib import Path
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Query
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
@@ -117,10 +117,13 @@ def shutdown_event():
 class SymbolRequest(BaseModel):
     symbol: str
 
+class ToggleRequest(BaseModel):
+    symbol: str
+    enabled: Optional[bool] = None
+
 @app.get("/api/status")
 def get_system_status():
     status = engine.get_status()
-    # Check open orders from gateway
     open_orders = []
     if engine.account_id:
         try:
@@ -150,19 +153,31 @@ def change_symbol(req: SymbolRequest):
     if sym not in SUPPORTED_SYMBOLS:
         raise HTTPException(status_code=400, detail=f"Símbolo no soportado: {sym}")
     try:
-        engine.switch_symbol(sym)
-        return {"success": True, "symbol": sym, "message": f"Cambiado a {sym}"}
+        engine.switch_active_view(sym)
+        return {"success": True, "symbol": sym, "message": f"Vista cambiada a {sym}"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/symbol/toggle")
+def toggle_symbol(req: ToggleRequest):
+    sym = req.symbol.upper()
+    if sym not in SUPPORTED_SYMBOLS:
+        raise HTTPException(status_code=400, detail=f"Símbolo no soportado: {sym}")
+    try:
+        new_state = engine.toggle_symbol(sym, req.enabled)
+        return {"success": True, "symbol": sym, "enabled": new_state}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/engine/flatten")
-def emergency_flatten():
-    res = engine.emergency_flatten()
+def emergency_flatten(req: Optional[SymbolRequest] = None):
+    sym = req.symbol if req else None
+    res = engine.emergency_flatten(sym)
     return res
 
 @app.get("/api/chart/data")
-def get_chart_data():
-    return engine.get_chart_data()
+def get_chart_data(symbol: Optional[str] = None):
+    return engine.get_chart_data(symbol)
 
 @app.get("/api/operations")
 def get_operations():
@@ -186,8 +201,11 @@ def download_csv():
     raise HTTPException(status_code=404, detail="El archivo de registro aún no ha sido generado.")
 
 @app.get("/api/logs")
-def get_logs(limit: int = Query(default=100, le=500)):
+def get_logs(symbol: Optional[str] = None, limit: int = Query(default=100, le=500)):
     with engine.lock:
+        sym = symbol.upper() if symbol else None
+        if sym and sym in engine.symbol_logs:
+            return engine.symbol_logs[sym][-limit:]
         return engine.log_history[-limit:]
 
 @app.get("/api/symbols")

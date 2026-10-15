@@ -1,6 +1,6 @@
 /**
- * AXIOM ALGORITHMIC - INSTITUTIONAL CLIENT ENGINE
- * Handles TradingView Lightweight Charts, WebSocket streaming, UI Telemetry & Controls
+ * AXIOM ALGORITHMIC - INSTITUTIONAL MULTI-SYMBOL CLIENT ENGINE
+ * Handles TradingView Lightweight Charts, Multi-Symbol Fleet, WebSockets & Terminal Filtering
  */
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -15,7 +15,9 @@ document.addEventListener('DOMContentLoaded', () => {
     let isRunning = false;
     let ws = null;
     let autoScrollTerminal = true;
-    let activeFilter = 'ALL';
+    let selectedTerminalSymbol = 'ALL'; // Filter for dedicated symbol terminal
+    let symbolStates = {}; // Cache of all 12 CME symbols
+    let rawOperations = []; // Cache of all operations
     
     // UI Elements
     const statusPill = document.getElementById('engine-status-pill');
@@ -24,7 +26,9 @@ document.addEventListener('DOMContentLoaded', () => {
     const btnStop = document.getElementById('btn-stop-engine');
     const btnFlatten = document.getElementById('btn-flatten');
     const btnEmergencyTop = document.getElementById('btn-emergency-top');
-    const symbolTabs = document.querySelectorAll('.symbol-tab');
+    const chartSymbolTabs = document.getElementById('chart-symbol-tabs');
+    const btnToggleActiveTrading = document.getElementById('btn-toggle-active-trading');
+    const fleetStrip = document.getElementById('fleet-strip');
     
     // Telemetry HUD Elements
     const hudSymbol = document.getElementById('hud-symbol');
@@ -33,6 +37,8 @@ document.addEventListener('DOMContentLoaded', () => {
     const hudUpper = document.getElementById('hud-upper');
     const hudLower = document.getElementById('hud-lower');
     const hudSpread = document.getElementById('hud-spread');
+    const radarSymbolBadge = document.getElementById('radar-symbol-badge');
+    const specStatus = document.getElementById('spec-status');
     
     // Metrics Ribbon
     const metricPnl = document.getElementById('metric-pnl');
@@ -46,13 +52,16 @@ document.addEventListener('DOMContentLoaded', () => {
     const clockUtc = document.getElementById('clock-utc');
     const marketStatusPill = document.getElementById('market-status-pill');
     
-    // Bottom Deck Tabs & Terminal
+    // Bottom Deck Tabs, Terminal & Breakdown
     const deckTabs = document.querySelectorAll('.deck-tab');
     const tabPanes = document.querySelectorAll('.tab-pane');
     const terminalLogs = document.getElementById('terminal-logs');
+    const terminalSymBar = document.getElementById('terminal-sym-bar');
     const btnClearLogs = document.getElementById('btn-clear-logs');
     const chkAutoScroll = document.getElementById('chk-autoscroll');
     const operationsTableBody = document.getElementById('operations-table-body');
+    const selectOpFilter = document.getElementById('select-op-filter');
+    const fleetStatsSummary = document.getElementById('fleet-stats-summary');
     const btnDownloadCsv = document.getElementById('btn-download-csv');
     const matrixTableBody = document.getElementById('matrix-table-body');
 
@@ -101,7 +110,7 @@ document.addEventListener('DOMContentLoaded', () => {
             },
         });
 
-        // 5m Candlestick series (Institutional Bull/Bear palette)
+        // 5m Candlestick series
         candleSeries = chart.addCandlestickSeries({
             upColor: '#10B981',
             downColor: '#EF4444',
@@ -137,7 +146,6 @@ document.addEventListener('DOMContentLoaded', () => {
             priceLineVisible: false,
         });
 
-        // Auto resize chart
         window.addEventListener('resize', () => {
             if (chart && chartContainer) {
                 chart.resize(chartContainer.clientWidth, chartContainer.clientHeight);
@@ -146,11 +154,11 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // ==========================================
-    // 2. FETCH & RENDER CHART DATA
+    // 2. FETCH & RENDER CHART DATA FOR SYMBOL
     // ==========================================
-    async function fetchChartData() {
+    async function fetchChartData(symbolKey = activeSymbol) {
         try {
-            const res = await fetch('/api/chart/data');
+            const res = await fetch(`/api/chart/data?symbol=${symbolKey}`);
             if (!res.ok) return;
             const data = await res.json();
             
@@ -160,16 +168,42 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (data.upper_band) upperBandSeries.setData(data.upper_band);
                 if (data.lower_band) lowerBandSeries.setData(data.lower_band);
                 
-                // Add execution markers on candles if available
-                loadChartMarkers();
                 chart.timeScale().fitContent();
+            } else {
+                candleSeries.setData([]);
+                vwapSeries.setData([]);
+                upperBandSeries.setData([]);
+                lowerBandSeries.setData([]);
             }
+            
+            // Update active symbol button states
+            updateActiveSymbolControls(data.symbol, data.enabled);
+            loadChartMarkers(data.symbol);
         } catch (e) {
             console.error('Error fetching chart data:', e);
         }
     }
 
-    async function loadChartMarkers() {
+    function updateActiveSymbolControls(sym, isEnabled) {
+        if (hudSymbol) hudSymbol.innerText = sym;
+        if (radarSymbolBadge) radarSymbolBadge.innerText = sym;
+        
+        if (btnToggleActiveTrading) {
+            if (isEnabled) {
+                btnToggleActiveTrading.className = 'fleet-toggle-btn active';
+                btnToggleActiveTrading.innerText = 'TRADING: ACTIVO';
+            } else {
+                btnToggleActiveTrading.className = 'fleet-toggle-btn inactive';
+                btnToggleActiveTrading.innerText = 'TRADING: INACTIVO';
+            }
+        }
+        if (specStatus) {
+            specStatus.innerText = isEnabled ? 'ACTIVO (Operando)' : 'INACTIVO (Monitor)';
+            specStatus.style.color = isEnabled ? '#10B981' : '#94A3B8';
+        }
+    }
+
+    async function loadChartMarkers(forSymbol = activeSymbol) {
         try {
             const res = await fetch('/api/operations');
             if (!res.ok) return;
@@ -177,9 +211,9 @@ document.addEventListener('DOMContentLoaded', () => {
             const markers = [];
             
             (data.csv_records || []).forEach(record => {
-                if (record.Estado && record.Estado.includes('EJECUTADA')) {
-                    // Try to approximate timestamp or place on matching price
-                    const isLong = record.Direccion === 'LONG';
+                const recSym = record.Simbolo || 'ES';
+                if (recSym === forSymbol && record.Estado && record.Estado.includes('EJECUTADA')) {
+                    const isLong = (record.Direccion || '').toUpperCase() === 'LONG';
                     markers.push({
                         time: candleSeries.data().length > 0 ? candleSeries.data()[candleSeries.data().length - 1].time : undefined,
                         position: isLong ? 'belowBar' : 'aboveBar',
@@ -202,12 +236,9 @@ document.addEventListener('DOMContentLoaded', () => {
     // ==========================================
     function updateClocks() {
         const now = new Date();
-        
-        // UTC Time
         const utcStr = now.toISOString().slice(11, 19) + ' UTC';
         if (clockUtc) clockUtc.innerText = utcStr;
         
-        // New York Time
         const nyFormatter = new Intl.DateTimeFormat('en-US', {
             timeZone: 'America/New_York',
             hour12: false,
@@ -218,13 +249,12 @@ document.addEventListener('DOMContentLoaded', () => {
         const nyStr = nyFormatter.format(now) + ' ET';
         if (clockNy) clockNy.innerText = nyStr;
         
-        // CME Session status: Futures trade nearly 24h, break between 17:00-18:00 ET
         const nyHour = parseInt(nyFormatter.format(now).split(':')[0], 10);
         const day = now.getUTCDay();
         let isSessionOpen = true;
-        if (day === 6) isSessionOpen = false; // Saturday
-        if (day === 0 && nyHour < 18) isSessionOpen = false; // Sunday before 18:00
-        if (nyHour === 17) isSessionOpen = false; // Daily maintenance break
+        if (day === 6) isSessionOpen = false;
+        if (day === 0 && nyHour < 18) isSessionOpen = false;
+        if (nyHour === 17) isSessionOpen = false;
         
         if (marketStatusPill) {
             if (isSessionOpen) {
@@ -252,13 +282,14 @@ document.addEventListener('DOMContentLoaded', () => {
             appendTerminalLine({
                 timestamp: new Date().toLocaleTimeString(),
                 category: 'SYSTEM',
-                message: '✅ Conexión WebSocket establecida con el servidor Axiom.'
+                symbol: 'ALL',
+                message: '✅ Conexión WebSocket multi-símbolo establecida con Axiom Platform.'
             });
         };
 
         ws.onmessage = (event) => {
             try {
-                const msg = json = JSON.parse(event.data);
+                const msg = JSON.parse(event.data);
                 if (msg.type === 'welcome') {
                     updateStatusUI(msg.status);
                     if (msg.chart && msg.chart.candles) {
@@ -269,11 +300,10 @@ document.addEventListener('DOMContentLoaded', () => {
                         chart.timeScale().fitContent();
                     }
                 } else if (msg.type === 'telemetry') {
-                    updateTelemetryUI(msg.telemetry);
-                    updateMetricsUI(msg.stats, msg.running);
+                    if (msg.telemetry) updateTelemetryUI(msg.telemetry);
+                    if (msg.stats) updateMetricsUI(msg.stats, msg.running);
                 } else if (msg.type === 'log') {
                     appendTerminalLine(msg.data);
-                    // Refresh operations table on trade event
                     if (msg.data.category === 'ORDER' || msg.data.category === 'SYSTEM') {
                         loadOperations();
                     }
@@ -287,6 +317,7 @@ document.addEventListener('DOMContentLoaded', () => {
             appendTerminalLine({
                 timestamp: new Date().toLocaleTimeString(),
                 category: 'ERROR',
+                symbol: 'ALL',
                 message: '⚠️ Desconexión WebSocket. Reintentando en 3 segundos...'
             });
             setTimeout(connectWebSocket, 3000);
@@ -294,7 +325,103 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // ==========================================
-    // 5. UI UPDATERS
+    // 5. MULTI-SYMBOL FLEET STRIP & MATRIX RENDERER
+    // ==========================================
+    function renderFleetStrip(matrix) {
+        if (!fleetStrip || !matrix) return;
+        fleetStrip.innerHTML = '';
+        symbolStates = matrix;
+        
+        Object.keys(matrix).forEach(sym => {
+            const item = matrix[sym];
+            const isSelected = (sym === activeSymbol);
+            const isEnabled = item.enabled;
+            const spread = item.spread_vwap || 0;
+            const spreadClass = spread >= 0 ? 'bull' : 'bear';
+            
+            const card = document.createElement('div');
+            card.className = `fleet-card ${isSelected ? 'active-view' : ''}`;
+            card.setAttribute('data-symbol', sym);
+            
+            card.innerHTML = `
+                <div class="fleet-card-header">
+                    <span class="fleet-symbol">${sym}</span>
+                    <span class="badge-status-chip ${isEnabled ? 'active' : 'inactive'}">${isEnabled ? 'ACTIVO' : 'INACTIVO'}</span>
+                </div>
+                <div class="fleet-price">${item.price > 0 ? item.price.toLocaleString('en-US', { minimumFractionDigits: 2 }) : '--.--'}</div>
+                <div class="fleet-sub">VWAP: ${item.vwap > 0 ? item.vwap.toLocaleString('en-US', { minimumFractionDigits: 2 }) : '--.--'}</div>
+                <div class="fleet-sub ${spreadClass}">Δ: ${spread >= 0 ? '+' : ''}${spread.toFixed(2)} pts</div>
+                <button class="fleet-toggle-btn ${isEnabled ? 'active' : 'inactive'} btn-toggle-card" data-symbol="${sym}">
+                    ${isEnabled ? 'OPERANDO (ON)' : 'ACTIVAR (OFF)'}
+                </button>
+            `;
+            
+            // Clicking the card switches chart view
+            card.addEventListener('click', (e) => {
+                if (e.target.classList.contains('btn-toggle-card')) return;
+                switchSymbol(sym);
+            });
+            
+            fleetStrip.appendChild(card);
+        });
+
+        // Add toggle event listeners
+        document.querySelectorAll('.btn-toggle-card').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const s = e.target.getAttribute('data-symbol');
+                toggleSymbol(s);
+            });
+        });
+    }
+
+    function updateMatrixUI(matrix) {
+        if (!matrixTableBody || !matrix) return;
+        matrixTableBody.innerHTML = '';
+        
+        Object.keys(matrix).forEach(sym => {
+            const item = matrix[sym];
+            const isEnabled = item.enabled;
+            const spread = item.spread_vwap || 0;
+            const spreadClass = spread >= 0 ? 'bull' : 'bear';
+            const tr = document.createElement('tr');
+            
+            tr.innerHTML = `
+                <td><span class="badge-sym">${sym}</span></td>
+                <td>${item.contract || item.name || 'N/A'}</td>
+                <td>
+                    <button class="fleet-toggle-btn ${isEnabled ? 'active' : 'inactive'} btn-matrix-toggle" data-symbol="${sym}">
+                        ${isEnabled ? '● ACTIVO' : '○ INACTIVO'}
+                    </button>
+                </td>
+                <td style="font-weight:700;">${item.price > 0 ? item.price.toLocaleString('en-US', { minimumFractionDigits: 2 }) : '--.--'}</td>
+                <td style="color:var(--vwap-color);">${item.vwap > 0 ? item.vwap.toLocaleString('en-US', { minimumFractionDigits: 2 }) : '--.--'}</td>
+                <td style="color:var(--upper-band-color);">${item.upper > 0 ? item.upper.toLocaleString('en-US', { minimumFractionDigits: 2 }) : '--.--'}</td>
+                <td style="color:var(--lower-band-color);">${item.lower > 0 ? item.lower.toLocaleString('en-US', { minimumFractionDigits: 2 }) : '--.--'}</td>
+                <td class="${spreadClass}">${spread >= 0 ? '+' : ''}${spread.toFixed(2)}</td>
+                <td>${item.cooldown > 0 ? `${item.cooldown}s` : 'LISTO'}</td>
+                <td><button class="btn-small btn-switch-matrix" data-symbol="${sym}">Ver Gráfico</button></td>
+            `;
+            matrixTableBody.appendChild(tr);
+        });
+
+        document.querySelectorAll('.btn-switch-matrix').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                const s = e.target.getAttribute('data-symbol');
+                switchSymbol(s);
+            });
+        });
+
+        document.querySelectorAll('.btn-matrix-toggle').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                const s = e.target.getAttribute('data-symbol');
+                toggleSymbol(s);
+            });
+        });
+    }
+
+    // ==========================================
+    // 6. UI UPDATERS
     // ==========================================
     function updateStatusUI(status) {
         if (!status) return;
@@ -311,28 +438,30 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         }
         
-        // Highlight active symbol tab
+        // Highlight active symbol tab in chart header
+        const symbolTabs = document.querySelectorAll('.symbol-tab');
         symbolTabs.forEach(tab => {
-            if (tab.getAttribute('data-symbol') === activeSymbol) {
-                tab.classList.add('active');
-            } else {
-                tab.classList.remove('active');
-            }
+            tab.classList.toggle('active', tab.getAttribute('data-symbol') === activeSymbol);
         });
         
-        if (hudSymbol) hudSymbol.innerText = activeSymbol;
-        
-        // Update specs
         const specSym = document.getElementById('spec-symbol');
         const specContract = document.getElementById('spec-contract');
         const specAccount = document.getElementById('spec-account');
         if (specSym) specSym.innerText = activeSymbol;
-        if (specContract) specContract.innerText = status.contract_name || 'Detectando...';
         if (specAccount) specAccount.innerText = `${status.account_name} (${status.account_id})`;
+        
+        if (status.symbols_matrix) {
+            renderFleetStrip(status.symbols_matrix);
+            updateMatrixUI(status.symbols_matrix);
+            const currentItem = status.symbols_matrix[activeSymbol];
+            if (currentItem) {
+                if (specContract) specContract.innerText = currentItem.contract || 'Detectando...';
+                updateActiveSymbolControls(activeSymbol, currentItem.enabled);
+            }
+        }
         
         if (status.telemetry) updateTelemetryUI(status.telemetry);
         if (status.stats) updateMetricsUI(status.stats, isRunning);
-        if (status.symbols_matrix) updateMatrixUI(status.symbols_matrix);
     }
 
     function updateTelemetryUI(telemetry) {
@@ -350,7 +479,6 @@ document.addEventListener('DOMContentLoaded', () => {
             hudSpread.className = spread >= 0 ? 'metric-value bull' : 'metric-value bear';
         }
         
-        // Cooldown timer update
         if (metricCooldown) {
             const cd = telemetry.cooldown_remaining || 0;
             if (cd > 0) {
@@ -362,20 +490,19 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         }
         
-        // Setup checklist dynamic updates
         const checkTrend = document.getElementById('check-trend');
         const checkTouch = document.getElementById('check-touch');
         if (checkTrend) {
-            if (Math.abs(spread) < 4.0) {
+            if (Math.abs(spread) < 6.0) {
                 checkTrend.innerText = 'PROXIMIDAD ALTA';
                 checkTrend.className = 'check-indicator ready';
             } else {
-                checkTrend.innerText = 'BUSCANDO TEST';
+                checkTrend.innerText = 'EN RANGO';
                 checkTrend.className = 'check-indicator pending';
             }
         }
         if (checkTouch) {
-            checkTouch.innerText = (telemetry.high >= telemetry.vwap && telemetry.low <= telemetry.vwap) ? 'IMPACTO VWAP' : 'EN CANAL';
+            checkTouch.innerText = (telemetry.high >= telemetry.vwap && telemetry.low <= telemetry.vwap) ? 'TEST VWAP' : 'EN CANAL';
             checkTouch.className = (telemetry.high >= telemetry.vwap && telemetry.low <= telemetry.vwap) ? 'check-indicator ready' : 'check-indicator pending';
         }
     }
@@ -394,20 +521,35 @@ document.addEventListener('DOMContentLoaded', () => {
             metricTrades.innerText = `${stats.total_trades || 0} (${stats.longs || 0}L / ${stats.shorts || 0}S)`;
         }
         if (metricPosition) {
-            metricPosition.innerText = running ? 'MONITOR FLAT' : 'OFFLINE';
+            metricPosition.innerText = running ? 'MULTIACTIVO ACTIVO' : 'OFFLINE';
             metricPosition.className = running ? 'metric-value cyan' : 'metric-value dim';
+        }
+        
+        // Update fleet stats breakdown chip summary
+        if (fleetStatsSummary && stats.by_symbol) {
+            const parts = [];
+            Object.keys(stats.by_symbol).forEach(sym => {
+                const s = stats.by_symbol[sym];
+                if (s.total > 0) {
+                    parts.push(`<span><strong>${sym}:</strong> ${s.total} ops (${s.executed} ejec.)</span>`);
+                }
+            });
+            fleetStatsSummary.innerHTML = parts.length > 0 ? parts.join(' | ') : '<span>Sin operaciones aún</span>';
         }
     }
 
     // ==========================================
-    // 6. TERMINAL & LOGGING STREAM
+    // 7. DEDICATED TERMINAL & LOGS
     // ==========================================
     function appendTerminalLine(log) {
         if (!terminalLogs) return;
         
-        // Check filter
-        if (activeFilter !== 'ALL' && log.category !== activeFilter) {
-            return;
+        // Check symbol filter
+        if (selectedTerminalSymbol !== 'ALL') {
+            const logSym = (log.symbol || '').toUpperCase();
+            if (logSym !== selectedTerminalSymbol && logSym !== 'ALL' && log.category !== 'SYSTEM') {
+                return;
+            }
         }
 
         const line = document.createElement('div');
@@ -420,11 +562,26 @@ document.addEventListener('DOMContentLoaded', () => {
         else if (log.category === 'ERROR') catClass = 'term-error';
         else if (log.category === 'SYSTEM') catClass = 'term-system';
 
-        line.innerHTML = `<span class="term-time">[${log.timestamp || ''}]</span> <span class="${catClass}">${escapeHtml(log.message || '')}</span>`;
+        const symPrefix = log.symbol ? `[${log.symbol}] ` : '';
+        line.innerHTML = `<span class="term-time">[${log.timestamp || ''}]</span> <strong style="color:#38BDF8;">${escapeHtml(symPrefix)}</strong><span class="${catClass}">${escapeHtml(log.message || '')}</span>`;
         terminalLogs.appendChild(line);
 
         if (chkAutoScroll && chkAutoScroll.checked) {
             terminalLogs.scrollTop = terminalLogs.scrollHeight;
+        }
+    }
+
+    async function reloadTerminalLogsForSymbol(sym) {
+        if (!terminalLogs) return;
+        terminalLogs.innerHTML = '';
+        try {
+            const url = sym === 'ALL' ? '/api/logs?limit=150' : `/api/logs?symbol=${sym}&limit=150`;
+            const res = await fetch(url);
+            if (!res.ok) return;
+            const logs = await res.json();
+            logs.forEach(l => appendTerminalLine(l));
+        } catch (e) {
+            console.error('Error reloading terminal logs:', e);
         }
     }
 
@@ -433,82 +590,102 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // ==========================================
-    // 7. OPERATIONS TABLE LOADER
+    // 8. UNIFIED OPERATIONS BREAKDOWN LOADER
     // ==========================================
     async function loadOperations() {
         try {
             const res = await fetch('/api/operations');
             if (!res.ok) return;
             const data = await res.json();
-            
-            if (!operationsTableBody) return;
-            operationsTableBody.innerHTML = '';
-            
-            const records = (data.csv_records || []).slice().reverse(); // newest first
-            if (records.length === 0) {
-                operationsTableBody.innerHTML = '<tr><td colspan="9" style="text-align:center; color:#64748B; padding:20px;">No hay registros de operaciones en la caja negra aún.</td></tr>';
-                return;
-            }
-
-            records.forEach(r => {
-                const tr = document.createElement('tr');
-                const isExecuted = (r.Estado || '').includes('EJECUTADA');
-                const isLong = (r.Direccion || '').toUpperCase() === 'LONG';
-                
-                tr.innerHTML = `
-                    <td>${r.Fecha || ''} ${r.Hora || ''}</td>
-                    <td><span class="badge ${isExecuted ? 'badge-executed' : 'badge-rejected'}">${r.Estado || 'N/A'}</span></td>
-                    <td><span class="badge ${isLong ? 'badge-long' : 'badge-short'}">${r.Direccion || ''}</span></td>
-                    <td>${parseFloat(r.Precio_Mercado || 0).toLocaleString('en-US', { minimumFractionDigits: 2 })}</td>
-                    <td>${r.SL_Ticks || ''} ticks</td>
-                    <td>${r.TP_Ticks || ''} ticks</td>
-                    <td style="max-width:240px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${r.Condicion_Tecnica || ''}">${r.Condicion_Tecnica || ''}</td>
-                    <td>${r.Order_ID || 'N/A'}</td>
-                    <td>${r.Respuesta_Servidor || ''}</td>
-                `;
-                operationsTableBody.appendChild(tr);
-            });
+            rawOperations = data.csv_records || [];
+            renderOperationsTable();
         } catch (e) {
             console.error('Error loading operations:', e);
         }
     }
 
-    // ==========================================
-    // 8. MULTI-SYMBOL MATRIX LOADER
-    // ==========================================
-    function updateMatrixUI(matrix) {
-        if (!matrixTableBody || !matrix) return;
-        matrixTableBody.innerHTML = '';
+    function renderOperationsTable() {
+        if (!operationsTableBody) return;
+        operationsTableBody.innerHTML = '';
         
-        Object.keys(matrix).forEach(sym => {
-            const item = matrix[sym];
-            const tr = document.createElement('tr');
-            const spread = item.spread_vwap || 0;
-            const spreadClass = spread >= 0 ? 'bull' : 'bear';
-            
-            tr.innerHTML = `
-                <td><strong>${sym}</strong></td>
-                <td>${(item.price || 0).toLocaleString('en-US', { minimumFractionDigits: 2 })}</td>
-                <td style="color:var(--vwap-color);">${(item.vwap || 0).toLocaleString('en-US', { minimumFractionDigits: 2 })}</td>
-                <td style="color:var(--upper-band-color);">${(item.upper || 0).toLocaleString('en-US', { minimumFractionDigits: 2 })}</td>
-                <td style="color:var(--lower-band-color);">${(item.lower || 0).toLocaleString('en-US', { minimumFractionDigits: 2 })}</td>
-                <td class="${spreadClass}">${spread >= 0 ? '+' : ''}${spread.toFixed(2)}</td>
-                <td><button class="btn-small btn-switch-matrix" data-symbol="${sym}">Operar</button></td>
-            `;
-            matrixTableBody.appendChild(tr);
+        const filterVal = selectOpFilter ? selectOpFilter.value : 'ALL';
+        const filtered = rawOperations.slice().reverse().filter(r => {
+            if (filterVal === 'ALL') return true;
+            return (r.Simbolo || 'ES').toUpperCase() === filterVal;
         });
 
-        document.querySelectorAll('.btn-switch-matrix').forEach(btn => {
-            btn.addEventListener('click', (e) => {
-                const s = e.target.getAttribute('data-symbol');
-                switchSymbol(s);
-            });
+        if (filtered.length === 0) {
+            operationsTableBody.innerHTML = `<tr><td colspan="10" style="text-align:center; color:#64748B; padding:20px;">No hay registros de operaciones para el filtro seleccionado (${filterVal}).</td></tr>`;
+            return;
+        }
+
+        filtered.forEach(r => {
+            const tr = document.createElement('tr');
+            const isExecuted = (r.Estado || '').includes('EJECUTADA');
+            const isLong = (r.Direccion || '').toUpperCase() === 'LONG';
+            const sym = r.Simbolo || 'ES';
+            
+            tr.innerHTML = `
+                <td>${r.Fecha || ''} ${r.Hora || ''}</td>
+                <td><span class="badge-sym">${sym}</span></td>
+                <td><span class="badge ${isExecuted ? 'badge-executed' : 'badge-rejected'}">${r.Estado || 'N/A'}</span></td>
+                <td><span class="badge ${isLong ? 'badge-long' : 'badge-short'}">${r.Direccion || ''}</span></td>
+                <td>${parseFloat(r.Precio_Mercado || 0).toLocaleString('en-US', { minimumFractionDigits: 2 })}</td>
+                <td>${r.SL_Ticks || ''} ticks</td>
+                <td>${r.TP_Ticks || ''} ticks</td>
+                <td style="max-width:240px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${r.Condicion_Tecnica || ''}">${r.Condicion_Tecnica || ''}</td>
+                <td>${r.Order_ID || 'N/A'}</td>
+                <td>${r.Respuesta_Servidor || ''}</td>
+            `;
+            operationsTableBody.appendChild(tr);
         });
     }
 
     // ==========================================
-    // 9. ENGINE REST ACTIONS & CONTROLS
+    // 9. MULTI-SYMBOL CONTROLS & REST ACTIONS
     // ==========================================
+    async function switchSymbol(symbolKey) {
+        try {
+            const res = await fetch('/api/engine/symbol', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ symbol: symbolKey })
+            });
+            const data = await res.json();
+            if (data.success) {
+                activeSymbol = symbolKey;
+                // Update tabs
+                document.querySelectorAll('.symbol-tab').forEach(t => {
+                    t.classList.toggle('active', t.getAttribute('data-symbol') === symbolKey);
+                });
+                document.querySelectorAll('.fleet-card').forEach(c => {
+                    c.classList.toggle('active-view', c.getAttribute('data-symbol') === symbolKey);
+                });
+                fetchChartData(symbolKey);
+            }
+        } catch (e) {
+            alert('Error al cambiar de símbolo: ' + e);
+        }
+    }
+
+    async function toggleSymbol(symbolKey) {
+        try {
+            const res = await fetch('/api/symbol/toggle', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ symbol: symbolKey })
+            });
+            const data = await res.json();
+            if (data.success) {
+                // Refresh status
+                const st = await (await fetch('/api/status')).json();
+                updateStatusUI(st);
+            }
+        } catch (e) {
+            alert('Error al modificar estado de símbolo: ' + e);
+        }
+    }
+
     async function startEngine() {
         try {
             const res = await fetch('/api/engine/start', { method: 'POST' });
@@ -538,11 +715,15 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     async function emergencyFlatten() {
-        if (!confirm('⚠️ ¿CONFIRMAR KILL SWITCH? Se cerrarán inmediatamente todas las posiciones abiertas en TopstepX.')) {
+        if (!confirm(`⚠️ ¿CONFIRMAR KILL SWITCH? Se cerrará la posición del símbolo activo (${activeSymbol}) en TopstepX.`)) {
             return;
         }
         try {
-            const res = await fetch('/api/engine/flatten', { method: 'POST' });
+            const res = await fetch('/api/engine/flatten', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ symbol: activeSymbol })
+            });
             const data = await res.json();
             alert('Respuesta de Cierre de Emergencia: ' + JSON.stringify(data));
         } catch (e) {
@@ -550,40 +731,47 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    async function switchSymbol(symbolKey) {
-        try {
-            const res = await fetch('/api/engine/symbol', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ symbol: symbolKey })
-            });
-            const data = await res.json();
-            if (data.success) {
-                activeSymbol = symbolKey;
-                symbolTabs.forEach(t => {
-                    t.classList.toggle('active', t.getAttribute('data-symbol') === symbolKey);
-                });
-                if (hudSymbol) hudSymbol.innerText = symbolKey;
-                // Reload chart for new symbol
-                fetchChartData();
-            }
-        } catch (e) {
-            alert('Error al cambiar de símbolo: ' + e);
-        }
-    }
-
-    // Event Listeners
+    // ==========================================
+    // 10. EVENT LISTENERS
+    // ==========================================
     if (btnStart) btnStart.addEventListener('click', startEngine);
     if (btnStop) btnStop.addEventListener('click', stopEngine);
     if (btnFlatten) btnFlatten.addEventListener('click', emergencyFlatten);
     if (btnEmergencyTop) btnEmergencyTop.addEventListener('click', emergencyFlatten);
 
-    symbolTabs.forEach(tab => {
-        tab.addEventListener('click', () => {
-            const sym = tab.getAttribute('data-symbol');
-            switchSymbol(sym);
+    if (btnToggleActiveTrading) {
+        btnToggleActiveTrading.addEventListener('click', () => {
+            toggleSymbol(activeSymbol);
         });
-    });
+    }
+
+    // Chart symbol tabs
+    if (chartSymbolTabs) {
+        chartSymbolTabs.querySelectorAll('.symbol-tab').forEach(tab => {
+            tab.addEventListener('click', () => {
+                const sym = tab.getAttribute('data-symbol');
+                switchSymbol(sym);
+            });
+        });
+    }
+
+    // Operations symbol filter
+    if (selectOpFilter) {
+        selectOpFilter.addEventListener('change', renderOperationsTable);
+    }
+
+    // Dedicated terminal symbol filter buttons
+    if (terminalSymBar) {
+        terminalSymBar.querySelectorAll('.term-sym-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const sym = btn.getAttribute('data-symbol');
+                selectedTerminalSymbol = sym;
+                terminalSymBar.querySelectorAll('.term-sym-btn').forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+                reloadTerminalLogsForSymbol(sym);
+            });
+        });
+    }
 
     if (btnDownloadCsv) {
         btnDownloadCsv.addEventListener('click', () => {
@@ -597,7 +785,7 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
-    // Deck Tab Switching
+    // Deck tab switching
     deckTabs.forEach(tab => {
         tab.addEventListener('click', () => {
             const targetPaneId = tab.getAttribute('data-tab');
@@ -616,9 +804,9 @@ document.addEventListener('DOMContentLoaded', () => {
     connectWebSocket();
     loadOperations();
     
-    // Refresh operations and chart every 60 seconds as a secondary safeguard
+    // Refresh operations and chart every 45s
     setInterval(() => {
         fetchChartData();
         loadOperations();
-    }, 60000);
+    }, 45000);
 });

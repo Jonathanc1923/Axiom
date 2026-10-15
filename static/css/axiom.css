@@ -659,13 +659,186 @@ body {
   font-family: var(--font-mono);
 }
 
+/* Multi-Symbol Fleet Grid */
+.fleet-strip {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px;
+  padding: 10px 24px;
+  background: #080D17;
+  border-bottom: 1px solid var(--border-subtle);
+  overflow-x: auto;
+}
+
+.fleet-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  position: relative;
+}
+
+.fleet-card:hover {
+  border-color: rgba(0, 242, 254, 0.4);
+  background: var(--bg-card-hover);
+}
+
+.fleet-card.active-view {
+  border-color: var(--accent-cyan);
+  box-shadow: 0 0 10px rgba(0, 242, 254, 0.2);
+}
+
+.fleet-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.fleet-symbol {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 700;
+  color: #FFF;
+}
+
+.fleet-price {
+  font-family: var(--font-mono);
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text-main);
+}
+
+.fleet-sub {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-dim);
+}
+
+.fleet-toggle-btn {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 3px;
+  border: 1px solid var(--border-subtle);
+  background: transparent;
+  cursor: pointer;
+  margin-top: 4px;
+  text-align: center;
+  transition: all 0.15s;
+}
+
+.fleet-toggle-btn.active {
+  background: rgba(16, 185, 129, 0.15);
+  border-color: var(--color-bull);
+  color: var(--color-bull);
+}
+
+.fleet-toggle-btn.inactive {
+  background: rgba(100, 116, 139, 0.15);
+  border-color: #475569;
+  color: #94A3B8;
+}
+
+.badge-status-chip {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 700;
+  padding: 1px 5px;
+  border-radius: 3px;
+}
+
+.badge-status-chip.active {
+  background: rgba(16, 185, 129, 0.2);
+  color: var(--color-bull);
+  border: 1px solid rgba(16, 185, 129, 0.4);
+}
+
+.badge-status-chip.inactive {
+  background: rgba(100, 116, 139, 0.2);
+  color: #94A3B8;
+  border: 1px solid #334155;
+}
+
+/* Institutional Select Dropdown */
+.select-institutional {
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-main);
+  padding: 5px 10px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  border-radius: var(--radius-sm);
+  outline: none;
+  cursor: pointer;
+}
+
+.select-institutional:focus {
+  border-color: var(--accent-cyan);
+}
+
+/* Terminal Symbol Sub-Bar */
+.terminal-sym-bar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 8px;
+  overflow-x: auto;
+  padding-bottom: 4px;
+}
+
+.term-sym-btn {
+  background: transparent;
+  border: 1px solid var(--border-subtle);
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 3px 8px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.15s;
+}
+
+.term-sym-btn:hover {
+  color: #FFF;
+  border-color: var(--text-dim);
+}
+
+.term-sym-btn.active {
+  background: rgba(0, 242, 254, 0.15);
+  border-color: var(--accent-cyan);
+  color: var(--accent-cyan);
+  font-weight: 700;
+}
+
+/* Symbol Badges */
+.badge-sym {
+  font-family: var(--font-mono);
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 3px;
+  font-size: 10.5px;
+  display: inline-block;
+  background: rgba(30, 41, 59, 0.8);
+  border: 1px solid var(--border-subtle);
+  color: #38BDF8;
+}
+
 /* Responsive */
 @media (max-width: 1080px) {
   .metrics-ribbon { grid-template-columns: repeat(3, 1fr); }
   .main-workspace { grid-template-columns: 1fr; }
+  .fleet-strip { grid-template-columns: repeat(4, 1fr); }
 }
 
 @media (max-width: 768px) {
   .metrics-ribbon { grid-template-columns: repeat(2, 1fr); }
   .top-header { flex-direction: column; gap: 10px; align-items: flex-start; }
+  .fleet-strip { grid-template-columns: repeat(2, 1fr); }
 }
