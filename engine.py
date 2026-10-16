@@ -4,6 +4,7 @@ import io
 import csv
 import time
 import threading
+import requests
 
 # Ensure UTF-8 output encoding on Windows consoles
 if hasattr(sys.stdout, "reconfigure"):
@@ -60,6 +61,7 @@ class AxiomEngine:
                 "has_open_position": False,
                 "logged_pos_open": False,
                 "last_inoperable_reason": None,
+                "last_poll_time": 0.0,
                 "stats": {"trades": 0, "longs": 0, "shorts": 0, "executed": 0, "rejected": 0}
             }
             
@@ -245,8 +247,9 @@ class AxiomEngine:
             new_state = (not current) if enabled is None else bool(enabled)
             self.symbol_states[sym]["enabled"] = new_state
             if new_state:
-                # Reset latest_candle_time para que en el próximo pase del bucle evalúe de inmediato
+                # Reset latest_candle_time y last_poll_time para evaluar de inmediato
                 self.symbol_states[sym]["latest_candle_time"] = None
+                self.symbol_states[sym]["last_poll_time"] = 0.0
             
         estado_str = "ACTIVO (Operando)" if new_state else "INACTIVO (Solo Monitoreo)"
         self.log(f"⚙️ Estado de trading actualizado: {estado_str}", "SYSTEM", sym)
@@ -263,6 +266,8 @@ class AxiomEngine:
             raise ValueError(f"Símbolo no soportado: {sym}")
         with self.lock:
             self.active_symbol = sym
+            if sym in self.symbol_states:
+                self.symbol_states[sym]["last_poll_time"] = 0.0
         self.log(f"🖥️ Vista de gráfico cambiada a: {sym}", "SYSTEM", sym)
 
     # ==========================================
@@ -969,8 +974,9 @@ class AxiomEngine:
                     except Exception as e:
                         self.log(f"⚠️ Error en sincronización horaria de TopstepX: {e}", "ERROR")
 
-                # 1. Monitorear los símbolos habilitados y el símbolo actualmente en pantalla
+                # 1. Monitorear los símbolos con control inteligente de tasa (Rate Limit)
                 symbols_to_query = list(SUPPORTED_SYMBOLS.keys())
+                now_poll = time.time()
                 
                 for sym in symbols_to_query:
                     if self.stop_event.is_set():
@@ -983,6 +989,14 @@ class AxiomEngine:
                         
                     is_enabled = state.get("enabled", False)
                     is_active_view = (sym == self.active_symbol)
+                    
+                    # Control inteligente de frecuencia:
+                    # - Símbolos activos o en pantalla: sondeo prioritario cada 3.5 segundos.
+                    # - Símbolos inactivos (apagados): sondeo de baja frecuencia cada 60 segundos.
+                    min_interval = 3.5 if (is_enabled or is_active_view) else 60.0
+                    if (now_poll - state.get("last_poll_time", 0.0)) < min_interval:
+                        continue
+                    state["last_poll_time"] = now_poll
                     
                     # Descargamos historial de 350 velas para asegurar la sesión completa CME (reseteo 18:00 ET)
                     limit_bars = 350
@@ -1058,16 +1072,25 @@ class AxiomEngine:
                                 self.log(f"⚡ [{sym}] ¡Toque de VWAP en vela en proceso detectado ({time_str} UTC)! Abriendo {setup['direccion']} al instante...", "ORDER", sym)
                                 self.ejecutar_orden(setup, df, sym)
                     
-                    # Pausa corta entre consultas para cortesía con la API
-                    time.sleep(0.2)
+                    # Pausa de cortesía entre consultas individuales para no saturar la API
+                    time.sleep(0.35)
                     
+            except requests.exceptions.HTTPError as he:
+                if he.response is not None and he.response.status_code == 429:
+                    self.log("⏸️ TopstepX Rate Limit temporal alcanzado (HTTP 429). Pausando 6 segundos...", "SYSTEM")
+                    time.sleep(6)
+                else:
+                    self.log(f"⚠️ Excepción en el ciclo multi-símbolo: {he}", "ERROR", "ALL")
             except Exception as e:
-                self.log(f"⚠️ Excepción en el ciclo multi-símbolo: {e}", "ERROR", "ALL")
+                err_str = str(e)
+                if "429" in err_str:
+                    self.log("⏸️ TopstepX Rate Limit temporal alcanzado (HTTP 429). Pausando 6 segundos...", "SYSTEM")
+                    time.sleep(6)
+                else:
+                    self.log(f"⚠️ Excepción en el ciclo multi-símbolo: {e}", "ERROR", "ALL")
                 
-            # Intervalo dinámico entre rondas completas de sondeo en vivo (2 segundos)
-            for _ in range(2):
-                if self.stop_event.is_set():
-                    break
+            # Intervalo dinámico entre rondas completas de sondeo en vivo (1 segundo)
+            if not self.stop_event.is_set():
                 time.sleep(1)
 
         self.log("🛑 Motor multi-símbolo detenido correctamente.", "SYSTEM", "ALL")

@@ -127,22 +127,33 @@ class TopstepClient:
         }
         
         url = f"{self.base_url}/api/History/retrieveBars"
-        res = requests.post(url, json=payload, headers=self.get_headers(), timeout=20)
-        res.raise_for_status()
-        data = res.json()
-        
-        if data.get("success") and data.get("bars"):
-            df = pd.DataFrame(data["bars"])
-            df = df.rename(columns={
-                't': 'Timestamp',
-                'o': 'Open',
-                'h': 'High',
-                'l': 'Low',
-                'c': 'Close',
-                'v': 'Volume'
-            })
-            df['Timestamp'] = pd.to_datetime(df['Timestamp'], utc=True)
-            return df.sort_values(by='Timestamp').reset_index(drop=True)
+        try:
+            res = requests.post(url, json=payload, headers=self.get_headers(), timeout=20)
+            if res.status_code == 429:
+                time.sleep(2.5)
+                res = requests.post(url, json=payload, headers=self.get_headers(), timeout=20)
+            res.raise_for_status()
+            data = res.json()
+            
+            if data.get("success") and data.get("bars"):
+                df = pd.DataFrame(data["bars"])
+                df = df.rename(columns={
+                    't': 'Timestamp',
+                    'o': 'Open',
+                    'h': 'High',
+                    'l': 'Low',
+                    'c': 'Close',
+                    'v': 'Volume'
+                })
+                df['Timestamp'] = pd.to_datetime(df['Timestamp'], utc=True)
+                return df.sort_values(by='Timestamp').reset_index(drop=True)
+        except requests.exceptions.HTTPError as he:
+            if he.response is not None and he.response.status_code == 429:
+                # Retorna DataFrame vacío para permitir que el motor pause y vuelva a intentar limpiamente
+                return pd.DataFrame()
+            raise he
+        except Exception:
+            return pd.DataFrame()
         
         return pd.DataFrame()
 
