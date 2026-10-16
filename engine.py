@@ -17,7 +17,9 @@ if hasattr(sys.stderr, "reconfigure"):
     except Exception:
         pass
 
-from datetime import datetime, timezone
+import json
+from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
 from typing import Dict, Any, List, Optional, Callable
 import pandas as pd
 import numpy as np
@@ -54,14 +56,22 @@ class AxiomEngine:
                 "latest_df": pd.DataFrame(),
                 "cooldown_until": 0,
                 "latest_candle_time": None,
+                "last_executed_candle_ts": None,
+                "has_open_position": False,
+                "logged_pos_open": False,
+                "last_inoperable_reason": None,
                 "stats": {"trades": 0, "longs": 0, "shorts": 0, "executed": 0, "rejected": 0}
             }
             
-        # Dedicated Real-time Logs per Symbol
+        # Dedicated Real-time Logs per Symbol (Retención Estricta de 24 Horas)
+        self.logs_file_path = os.path.join(DATA_DIR, "logs_history_24h.jsonl")
         self.symbol_logs: Dict[str, List[Dict[str, Any]]] = {sym: [] for sym in SUPPORTED_SYMBOLS}
         self.log_history: List[Dict[str, Any]] = [] # Global combined stream
-        self.max_logs: int = 400
+        self.max_logs: int = 50000 # Límite superior amplio para conservar 24 horas continuas
         self.log_listeners: List[Callable[[Dict[str, Any]], None]] = []
+        
+        # Cargar historial previo de logs de las últimas 24 horas desde disco
+        self.load_persisted_logs()
         
         # Hourly Topstep API Synchronization Clock
         self.last_sync_time: float = 0
@@ -89,11 +99,53 @@ class AxiomEngine:
         }
 
     # ==========================================
-    # LOGGING & TERMINAL EVENT BROADCASTER
+    # LOGGING & 24-HOUR TERMINAL EVENT BROADCASTER
     # ==========================================
+    def load_persisted_logs(self):
+        """Carga en memoria los logs de las últimas 24 horas guardados en disco."""
+        if not os.path.isfile(self.logs_file_path):
+            return
+            
+        cutoff = time.time() - 86400 # 24 horas
+        valid_entries = []
+        try:
+            with open(self.logs_file_path, "r", encoding="utf-8") as lf:
+                for line in lf:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        entry = json.loads(line)
+                        if entry.get("epoch", 0) >= cutoff:
+                            valid_entries.append(entry)
+                    except Exception:
+                        continue
+                        
+            with self.lock:
+                self.log_history = valid_entries[-30000:]
+                for entry in valid_entries:
+                    s = entry.get("symbol", "ALL")
+                    if s == "ALL":
+                        for sym_k in self.symbol_logs:
+                            self.symbol_logs[sym_k].append(entry)
+                    elif s in self.symbol_logs:
+                        self.symbol_logs[s].append(entry)
+                        
+            # Reescribir archivo podado estrictamente a las últimas 24 horas
+            with open(self.logs_file_path, "w", encoding="utf-8") as lf:
+                for entry in valid_entries:
+                    lf.write(json.dumps(entry) + "\n")
+                    
+            print(f"✅ [AXIOM LOGS] Restaurados {len(valid_entries)} logs de las últimas 24h.", flush=True)
+        except Exception as e:
+            print(f"⚠️ Error cargando logs persistidos de 24h: {e}", flush=True)
+
     def log(self, message: str, category: str = "INFO", symbol: Optional[str] = None):
-        """Emite un log estructurado global y hacia la terminal dedicada del símbolo."""
-        now_str = datetime.now().strftime('%H:%M:%S')
+        """Emite un log estructurado global y hacia la terminal dedicada del símbolo con retención de 24 horas."""
+        now_dt = datetime.now()
+        now_str = now_dt.strftime('%H:%M:%S')
+        now_ts = time.time()
+        
         if symbol is None:
             sym = "ALL" if category in ["SYSTEM", "ALERT", "ERROR"] else self.active_symbol.upper()
         else:
@@ -101,6 +153,8 @@ class AxiomEngine:
         
         log_entry = {
             "timestamp": now_str,
+            "full_timestamp": now_dt.strftime('%Y-%m-%d %H:%M:%S'),
+            "epoch": now_ts,
             "category": category,
             "message": message,
             "symbol": sym
@@ -108,22 +162,22 @@ class AxiomEngine:
         
         print(f"[{now_str}] [{sym}] {message}", flush=True)
         
+        cutoff = now_ts - 86400 # Retención estricta: 24 horas (86,400 segundos)
+        
         with self.lock:
-            # 1. Global log history
+            # 1. Global log history (últimas 24h)
             self.log_history.append(log_entry)
+            while self.log_history and self.log_history[0].get("epoch", 0) < cutoff:
+                self.log_history.pop(0)
             if len(self.log_history) > self.max_logs:
                 self.log_history.pop(0)
                 
-            # 2. Dedicated symbol log history (ALL distributes to every symbol tab)
-            if sym == "ALL":
-                for s_sym in self.symbol_logs:
-                    self.symbol_logs[s_sym].append(log_entry)
-                    if len(self.symbol_logs[s_sym]) > 250:
-                        self.symbol_logs[s_sym].pop(0)
-            elif sym in self.symbol_logs:
-                self.symbol_logs[sym].append(log_entry)
-                if len(self.symbol_logs[sym]) > 250:
-                    self.symbol_logs[sym].pop(0)
+            # 2. Dedicated symbol log history (ALL distribuye a todos los tabs)
+            target_syms = list(self.symbol_logs.keys()) if sym == "ALL" else ([sym] if sym in self.symbol_logs else [])
+            for s_sym in target_syms:
+                self.symbol_logs[s_sym].append(log_entry)
+                while self.symbol_logs[s_sym] and self.symbol_logs[s_sym][0].get("epoch", 0) < cutoff:
+                    self.symbol_logs[s_sym].pop(0)
                     
             listeners_copy = list(self.log_listeners)
             
@@ -132,6 +186,13 @@ class AxiomEngine:
                 listener(log_entry)
             except Exception:
                 pass
+
+        # Persistir a disco en tiempo real para evitar pérdidas de historial ante reinicios
+        try:
+            with open(self.logs_file_path, "a", encoding="utf-8") as lf:
+                lf.write(json.dumps(log_entry) + "\n")
+        except Exception:
+            pass
 
     def add_log_listener(self, callback: Callable[[Dict[str, Any]], None]):
         with self.lock:
@@ -337,12 +398,90 @@ class AxiomEngine:
             return ticks_sl_abs, -ticks_tp_abs, precio_sl, precio_tp
 
     # ==========================================
+    # RISK FILTERS & EXECUTION GUARDS
+    # ==========================================
+    def es_horario_operable(self) -> tuple[bool, str]:
+        """
+        Evalúa si el mercado CME está en horario operable según las reglas institucionales:
+        1. Cierre de fin de semana (Viernes 17:00 ET a Domingo 18:00 ET).
+        2. Receso diario de mantenimiento CME (Lunes a Jueves 17:00 a 18:00 ET).
+        3. Filtro de apertura de sesión: Primeras 2 horas tras la apertura (18:00 a 20:00 ET) suspendidas.
+        """
+        try:
+            ny_time = datetime.now(ZoneInfo("America/New_York"))
+        except Exception:
+            utc_now = datetime.now(timezone.utc)
+            ny_time = utc_now - timedelta(hours=4)
+            
+        weekday = ny_time.weekday() # 0=Lunes, 4=Viernes, 5=Sábado, 6=Domingo
+        hour = ny_time.hour
+        minute = ny_time.minute
+        time_str = f"{hour:02d}:{minute:02d} ET"
+        
+        # 1. Fin de semana
+        if weekday == 5:
+            return False, f"Mercado CME cerrado por fin de semana (Sábado - {time_str})"
+        if weekday == 6 and hour < 18:
+            return False, f"Mercado CME cerrado por fin de semana (Domingo pre-apertura - {time_str})"
+        if weekday == 4 and hour >= 17:
+            return False, f"Mercado CME cerrado por fin de semana (Viernes post-cierre - {time_str})"
+            
+        # 2. Receso diario de mantenimiento CME (17:00 a 18:00 ET)
+        if hour == 17:
+            return False, f"Receso diario de mantenimiento CME (17:00-18:00 ET - {time_str})"
+            
+        # 3. Filtro de apertura institucional: Primeras 2 horas tras la apertura (18:00 a 20:00 ET)
+        if 18 <= hour < 20:
+            return False, f"Filtro de apertura de sesión activo (Primeras 2 horas: 18:00-20:00 ET | Actual: {time_str})"
+            
+        return True, f"Sesión regular activa ({time_str})"
+
+    def tiene_posicion_abierta(self, sym: str) -> bool:
+        """
+        Verifica en tiempo real si el símbolo ya tiene una posición abierta activa
+        para no permitir más de una operación abierta a la vez por símbolo.
+        """
+        state = self.symbol_states.get(sym, {})
+        contract_id = state.get("contract_id")
+        
+        try:
+            if self.account_id:
+                positions = self.client.get_open_positions(self.account_id)
+                for pos in positions:
+                    pos_cid = str(pos.get("contractId", ""))
+                    pos_size = abs(int(pos.get("size", 0)))
+                    pos_sym = self.resolve_symbol_from_contract(pos_cid)
+                    if pos_size > 0 and (pos_cid == contract_id or pos_sym == sym):
+                        state["has_open_position"] = True
+                        return True
+                        
+                # Si TopstepX respondió exitosamente y no hay posición con size > 0:
+                state["has_open_position"] = False
+                return False
+        except Exception as e:
+            # Fallback seguro: consultar estado local previo si la API tuvo un timeout transitorio
+            return state.get("has_open_position", False)
+            
+        return state.get("has_open_position", False)
+
+    # ==========================================
     # EXECUTION ENGINE: ORDER DISPATCH
     # ==========================================
     def ejecutar_orden(self, setup: Dict[str, Any], df: pd.DataFrame, sym: str):
         # Validación de seguridad estricta: el setup debe pertenecer al símbolo que se está ejecutando
         if setup.get("simbolo") != sym:
             self.log(f"❌ Error de seguridad crítico: discrepancia de símbolo setup={setup.get('simbolo')} vs sym={sym}", "ERROR", sym)
+            return
+
+        # Validación 1: Filtro de horario de sesión CME (primeras 2 horas de apertura suspendidas)
+        is_operable, motivo_horario = self.es_horario_operable()
+        if not is_operable:
+            self.log(f"⏸️ [{sym}] Orden CANCELADA: {motivo_horario}.", "SETUP", sym)
+            return
+
+        # Validación 2: Máximo 1 operación abierta por símbolo a la vez
+        if self.tiene_posicion_abierta(sym):
+            self.log(f"🛡️ [{sym}] Orden CANCELADA: Ya existe una posición abierta en mercado para {sym} (Máx 1 permitida).", "SETUP", sym)
             return
             
         direccion = setup["direccion"]
@@ -377,6 +516,7 @@ class AxiomEngine:
             
             if res.get("success"):
                 order_id = res.get("orderId", "N/A")
+                self.symbol_states[sym]["has_open_position"] = True
                 self.log(f"✅ Ejecución exitosa en TopstepX. Order ID: {order_id}", "ORDER", sym)
                 self.registrar_en_csv(
                     simbolo=sym,
@@ -386,17 +526,18 @@ class AxiomEngine:
                     ticks_tp=ticks_tp,
                     condicion=condicion_str,
                     exito=True,
-                    mensaje_servidor="Orden colocada con éxito",
-                    error_code="N/A",
+                    mensaje_servidor="Orden colocada con éxito en TopstepX",
+                    error_code="0",
                     order_id=order_id
                 )
                 self.symbol_states[sym]["stats"]["executed"] += 1
                 self.symbol_states[sym]["cooldown_until"] = time.time() + 300
                 self.log("⏸️ Pausa estratégica de 5 minutos activada para este símbolo.", "SYSTEM", sym)
             else:
-                error_msg = res.get('errorMessage', 'Error desconocido')
-                error_code = res.get('errorCode', 'N/A')
-                self.log(f"❌ Orden rechazada: {error_msg} (Código: {error_code})", "ERROR", sym)
+                error_msg = res.get('errorMessage') or res.get('message') or res.get('error') or 'Rechazo no especificado por API'
+                error_code = str(res.get('errorCode') or res.get('code') or 'REJECTED')
+                self.symbol_states[sym]["has_open_position"] = False
+                self.log(f"❌ Orden RECHAZADA por TopstepX API en {sym}: {error_msg} (Código API: {error_code})", "ERROR", sym)
                 self.registrar_en_csv(
                     simbolo=sym,
                     direccion=direccion,
@@ -412,7 +553,8 @@ class AxiomEngine:
                 self.symbol_states[sym]["stats"]["rejected"] += 1
                 
         except Exception as e:
-            self.log(f"❌ Excepción crítica al colocar orden: {e}", "ERROR", sym)
+            self.symbol_states[sym]["has_open_position"] = False
+            self.log(f"❌ Excepción crítica al colocar orden en {sym}: {e}", "ERROR", sym)
             self.registrar_en_csv(
                 simbolo=sym,
                 direccion=direccion,
@@ -421,7 +563,7 @@ class AxiomEngine:
                 ticks_tp=ticks_tp,
                 condicion=condicion_str,
                 exito=False,
-                mensaje_servidor=str(e),
+                mensaje_servidor=f"Excepción: {str(e)}",
                 error_code="EXCEPTION",
                 order_id="N/A"
             )
@@ -447,20 +589,28 @@ class AxiomEngine:
         return "ES"
 
     def registrar_en_csv(self, simbolo, direccion, precio, ticks_sl, ticks_tp, condicion, exito, mensaje_servidor, error_code, order_id):
-        """Guarda la orden emitida en el archivo CSV institucional."""
+        """Guarda la orden emitida en el archivo CSV institucional con motivo claro de rechazo según la API."""
         try:
             os.makedirs(os.path.dirname(os.path.abspath(CSV_PATH)), exist_ok=True)
             archivo_existe = os.path.isfile(CSV_PATH)
             
             fecha_actual = datetime.now().strftime('%Y-%m-%d')
             hora_actual = datetime.now().strftime('%H:%M:%S')
-            estado = "EN CURSO (OCO)" if exito else "RECHAZADA"
+            
+            if exito:
+                estado = "EN CURSO (OCO)"
+                motivo = "Aceptada"
+                cod_err = "0"
+            else:
+                motivo = str(mensaje_servidor) if mensaje_servidor else "Rechazada por TopstepX"
+                cod_err = str(error_code) if error_code else "N/A"
+                estado = f"RECHAZADA: {motivo}"
             
             fieldnames = [
                 'Fecha', 'Hora', 'Simbolo', 'Estado', 'Direccion', 'Precio_Mercado',
                 'Precio_Entrada_Real', 'Precio_Salida_Real', 'SL_Ticks', 'TP_Ticks',
                 'PnL_Bruto_USD', 'Comisiones_USD', 'PnL_Neto_USD', 'Order_ID',
-                'Exit_Order_ID', 'Condicion_Tecnica', 'Ultima_Actualizacion'
+                'Exit_Order_ID', 'Motivo_Rechazo', 'Codigo_Error', 'Condicion_Tecnica', 'Ultima_Actualizacion'
             ]
             
             with open(CSV_PATH, mode='a', newline='', encoding='utf-8') as file:
@@ -484,6 +634,8 @@ class AxiomEngine:
                     'PnL_Neto_USD': "0.00",
                     'Order_ID': order_id,
                     'Exit_Order_ID': "PENDIENTE" if exito else "N/A",
+                    'Motivo_Rechazo': motivo if not exito else "N/A",
+                    'Codigo_Error': cod_err if not exito else "N/A",
                     'Condicion_Tecnica': condicion,
                     'Ultima_Actualizacion': f"{fecha_actual} {hora_actual}"
                 })
@@ -592,6 +744,8 @@ class AxiomEngine:
                     "PnL_Neto_USD": f"{net_pnl:.2f}",
                     "Order_ID": order_id,
                     "Exit_Order_ID": exit_order_id,
+                    "Motivo_Rechazo": "N/A",
+                    "Codigo_Error": "N/A",
                     "Condicion_Tecnica": "Rechazo VWAP TopstepX Confirmado",
                     "Ultima_Actualizacion": sync_str
                 })
@@ -627,6 +781,8 @@ class AxiomEngine:
                     "PnL_Neto_USD": "0.00",
                     "Order_ID": oid,
                     "Exit_Order_ID": "PENDIENTE",
+                    "Motivo_Rechazo": "N/A",
+                    "Codigo_Error": "N/A",
                     "Condicion_Tecnica": "Posición en mercado TopstepX",
                     "Ultima_Actualizacion": sync_str
                 })
@@ -662,11 +818,15 @@ class AxiomEngine:
                     pt["SL_Ticks"] = old["SL_Ticks"]
                 if old.get("TP_Ticks"):
                     pt["TP_Ticks"] = old["TP_Ticks"]
+                if old.get("Motivo_Rechazo"):
+                    pt["Motivo_Rechazo"] = old["Motivo_Rechazo"]
+                if old.get("Codigo_Error"):
+                    pt["Codigo_Error"] = old["Codigo_Error"]
             final_csv_rows.append(pt)
 
         for r_row in rejected_rows:
-            for col in ['Precio_Entrada_Real', 'Precio_Salida_Real', 'PnL_Bruto_USD', 'Comisiones_USD', 'PnL_Neto_USD', 'Exit_Order_ID']:
-                if col not in r_row:
+            for col in ['Precio_Entrada_Real', 'Precio_Salida_Real', 'PnL_Bruto_USD', 'Comisiones_USD', 'PnL_Neto_USD', 'Exit_Order_ID', 'Motivo_Rechazo', 'Codigo_Error']:
+                if col not in r_row or not r_row[col]:
                     r_row[col] = "0.00" if "USD" in col else "N/A"
             if "Ultima_Actualizacion" not in r_row:
                 r_row["Ultima_Actualizacion"] = sync_str
@@ -676,7 +836,7 @@ class AxiomEngine:
             'Fecha', 'Hora', 'Simbolo', 'Estado', 'Direccion', 'Precio_Mercado',
             'Precio_Entrada_Real', 'Precio_Salida_Real', 'SL_Ticks', 'TP_Ticks',
             'PnL_Bruto_USD', 'Comisiones_USD', 'PnL_Neto_USD', 'Order_ID',
-            'Exit_Order_ID', 'Condicion_Tecnica', 'Ultima_Actualizacion'
+            'Exit_Order_ID', 'Motivo_Rechazo', 'Codigo_Error', 'Condicion_Tecnica', 'Ultima_Actualizacion'
         ]
         try:
             os.makedirs(os.path.dirname(os.path.abspath(CSV_PATH)), exist_ok=True)
@@ -870,6 +1030,17 @@ class AxiomEngine:
                                 state["latest_candle_time"] = vela_cerrada_ts
                                 self.log(f"⏱️ [{sym}] Nueva vela 5m confirmada ({time_str} UTC). Evaluando rechazo VWAP institucional...", "SETUP", sym)
                                 
+                                # 1. Filtro institucional de sesión CME (primeras 2 horas tras la apertura: 18:00-20:00 ET y receso diario)
+                                is_operable, motivo_horario = self.es_horario_operable()
+                                if not is_operable:
+                                    self.log(f"⏸️ [{sym}] {motivo_horario}. Entradas suspendidas durante esta vela.", "SETUP", sym)
+                                    continue
+
+                                # 2. Filtro de sobreexposición: Máximo 1 operación abierta por símbolo a la vez
+                                if self.tiene_posicion_abierta(sym):
+                                    self.log(f"🛡️ [{sym}] Posición activa en mercado detectada. Escáner en espera hasta su liquidación (Máx 1 pos/símbolo).", "SETUP", sym)
+                                    continue
+
                                 if time.time() < state["cooldown_until"]:
                                     restante = int(state["cooldown_until"] - time.time())
                                     self.log(f"⏳ Cooldown activo para {sym}. Restan {restante}s.", "SYSTEM", sym)

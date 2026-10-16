@@ -168,9 +168,35 @@ class TopstepClient:
             payload["takeProfitBracket"] = {"ticks": int(tp_ticks), "type": 1} # Type 1 = Limit
             
         url = f"{self.base_url}/api/Order/place"
-        res = requests.post(url, json=payload, headers=self.get_headers(), timeout=15)
-        res.raise_for_status()
-        return res.json()
+        try:
+            res = requests.post(url, json=payload, headers=self.get_headers(), timeout=15)
+            try:
+                data = res.json()
+            except Exception:
+                data = {
+                    "success": False,
+                    "errorMessage": res.text or f"HTTP {res.status_code}",
+                    "errorCode": str(res.status_code)
+                }
+            if res.status_code != 200:
+                data["success"] = False
+                if not data.get("errorMessage"):
+                    data["errorMessage"] = f"HTTP {res.status_code}: {res.text}"
+                if not data.get("errorCode"):
+                    data["errorCode"] = str(res.status_code)
+            return data
+        except requests.exceptions.RequestException as e:
+            return {
+                "success": False,
+                "errorMessage": f"Error de red/conexión: {str(e)}",
+                "errorCode": "NETWORK_ERROR"
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "errorMessage": f"Excepción interna: {str(e)}",
+                "errorCode": "CLIENT_EXCEPTION"
+            }
 
     def search_open_orders(self, account_id: int) -> List[Dict[str, Any]]:
         url = f"{self.base_url}/api/Order/searchOpen"

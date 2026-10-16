@@ -3,6 +3,7 @@ import sys
 import io
 import json
 import asyncio
+import time
 
 # Ensure UTF-8 output encoding on Windows consoles
 if hasattr(sys.stdout, "reconfigure"):
@@ -218,12 +219,15 @@ def download_csv():
     raise HTTPException(status_code=404, detail="El archivo de registro aún no ha sido generado.")
 
 @app.get("/api/logs")
-def get_logs(symbol: Optional[str] = None, limit: int = Query(default=100, le=500)):
+def get_logs(symbol: Optional[str] = None, limit: int = Query(default=2000, le=20000)):
     with engine.lock:
+        cutoff = time.time() - 86400
         sym = symbol.upper() if symbol else None
         if sym and sym in engine.symbol_logs:
-            return engine.symbol_logs[sym][-limit:]
-        return engine.log_history[-limit:]
+            filtered = [l for l in engine.symbol_logs[sym] if l.get("epoch", time.time()) >= cutoff]
+            return filtered[-limit:]
+        filtered = [l for l in engine.log_history if l.get("epoch", time.time()) >= cutoff]
+        return filtered[-limit:]
 
 @app.get("/api/symbols")
 def get_symbols():

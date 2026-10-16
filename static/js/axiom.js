@@ -656,7 +656,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!terminalLogs) return;
         terminalLogs.innerHTML = '';
         try {
-            const url = sym === 'ALL' ? '/api/logs?limit=150' : `/api/logs?symbol=${sym}&limit=150`;
+            const url = sym === 'ALL' ? '/api/logs?limit=2500' : `/api/logs?symbol=${sym}&limit=2500`;
             const res = await fetch(url);
             if (!res.ok) return;
             const logs = await res.json();
@@ -697,7 +697,7 @@ document.addEventListener('DOMContentLoaded', () => {
         });
 
         if (filtered.length === 0) {
-            operationsTableBody.innerHTML = `<tr><td colspan="12" style="text-align:center; color:#64748B; padding:20px;">No hay registros de operaciones para el filtro seleccionado (${filterVal}).</td></tr>`;
+            operationsTableBody.innerHTML = `<tr><td colspan="13" style="text-align:center; color:#64748B; padding:20px;">No hay registros de operaciones para el filtro seleccionado (${filterVal}).</td></tr>`;
             return;
         }
 
@@ -706,6 +706,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const estadoRaw = (r.Estado || '').toUpperCase();
             const isClosed = estadoRaw.includes('CERRADA');
             const isExecuted = estadoRaw.includes('EJECUTADA') || estadoRaw.includes('EN CURSO') || estadoRaw.includes('ABIERTA');
+            const isRejected = estadoRaw.includes('RECHAZADA');
             const isLong = (r.Direccion || '').toUpperCase() === 'LONG';
             const sym = r.Simbolo || 'ES';
             
@@ -725,6 +726,18 @@ document.addEventListener('DOMContentLoaded', () => {
                 ? parseFloat(r.Precio_Salida_Real).toLocaleString('en-US', { minimumFractionDigits: 2 })
                 : (r.Precio_Salida_Real || '--.--');
             
+            let motivoRechazo = '--';
+            if (isRejected) {
+                if (r.Motivo_Rechazo && r.Motivo_Rechazo !== 'N/A') {
+                    const cod = (r.Codigo_Error && r.Codigo_Error !== 'N/A') ? ` [Cod: ${r.Codigo_Error}]` : '';
+                    motivoRechazo = `${r.Motivo_Rechazo}${cod}`;
+                } else if (r.Estado && r.Estado.includes(':')) {
+                    motivoRechazo = r.Estado.split(':')[1].trim();
+                } else {
+                    motivoRechazo = 'Rechazo TopstepX';
+                }
+            }
+            
             tr.innerHTML = `
                 <td>${r.Fecha || ''} ${r.Hora || ''}</td>
                 <td><span class="badge-sym">${sym}</span></td>
@@ -737,7 +750,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 <td style="color:${netPnl >= 0 ? 'var(--bull-color)' : 'var(--bear-color)'}; font-weight:700;">${netPnl >= 0 ? '+' : ''}$${netPnl.toFixed(2)}</td>
                 <td>${r.Order_ID || 'N/A'}</td>
                 <td>${r.Exit_Order_ID || 'N/A'}</td>
-                <td style="max-width:220px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${escapeHtml(r.Condicion_Tecnica || '')}">${escapeHtml(r.Condicion_Tecnica || '')}</td>
+                <td style="color:${isRejected ? '#EF4444' : '#94A3B8'}; font-weight:${isRejected ? '600' : '400'}; max-width:210px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${escapeHtml(motivoRechazo)}">${escapeHtml(motivoRechazo)}</td>
+                <td style="max-width:210px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${escapeHtml(r.Condicion_Tecnica || '')}">${escapeHtml(r.Condicion_Tecnica || '')}</td>
             `;
             operationsTableBody.appendChild(tr);
         });
