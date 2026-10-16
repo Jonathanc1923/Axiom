@@ -298,77 +298,89 @@ class AxiomEngine:
         return df
 
     # ==========================================
-    # LOGICAL ENGINE: SETUP DETECTION (PRICE ACTION REJECTION)
+    # LOGICAL ENGINE: REAL-TIME IN-PROGRESS VWAP TOUCH
     # ==========================================
     def verificar_setup_vwap(self, df: pd.DataFrame, sym: str) -> Optional[Dict[str, Any]]:
         """
-        Detecta rechazo estricto por mecha (Wick Rejection) en VWAP para todos los símbolos.
-        REGLAS INSTITUCIONALES (ESTRICTAS):
-        1. Vela evaluada: La vela cerrada más reciente confirmada (cuyo cierre ya ocurrió en tiempo real).
-        2. Color de vela: Indiferente (no necesariamente debe ser verde o roja).
-        3. Mecha vs VWAP: La mecha DEBE tocar o pasar el VWAP:
-           - LONG: Low <= VWAP (la mecha inferior toca o cruza hacia abajo el VWAP).
-           - SHORT: High >= VWAP (la mecha superior toca o cruza hacia arriba el VWAP).
-        4. Cuerpo vs VWAP: El cuerpo NO PUEDE pasar el VWAP (la operación queda invalidada si el cuerpo lo cruza):
-           - LONG: min(Open, Close) > VWAP (todo el cuerpo queda estrictamente por encima del VWAP).
-           - SHORT: max(Open, Close) < VWAP (todo el cuerpo queda estrictamente por debajo del VWAP).
-        5. Stop Loss:
-           - LONG: Exactamente 10 ticks por debajo del precio más bajo de la vela de rechazo (Low - 10 ticks).
-           - SHORT: Exactamente 10 ticks por encima del precio más alto de la vela de rechazo (High + 10 ticks).
+        Detecta en tiempo real (mientras la vela más reciente está aún en proceso)
+        el momento exacto en que el precio toca o pasa la línea VWAP.
+        
+        1. Vela evaluada: La vela más reciente (en proceso / tiempo real).
+        2. Apertura instantánea: Apenas el precio toca o pasa el VWAP, se abre la operación.
+        3. Dirección:
+           - LONG: El precio viene por encima de VWAP y desciende hasta tocar o cruzar VWAP (Low <= VWAP).
+           - SHORT: El precio viene por debajo de VWAP y asciende hasta tocar o cruzar VWAP (High >= VWAP).
         """
-        if len(df) < 4:
+        if len(df) < 3:
             return None
             
-        now_utc = datetime.now(timezone.utc)
-        # Filtramos estrictamente velas cuyo intervalo de 5m ya haya cerrado por completo:
-        df_cerradas = df[df['Timestamp'] + pd.Timedelta(minutes=5) <= now_utc]
-        if df_cerradas.empty or len(df_cerradas) < 2:
-            return None
-            
-        vela = df_cerradas.iloc[-1]
-        vwap_val = float(vela['VWAP'])
-        cuerpo_bajo = min(float(vela['Open']), float(vela['Close']))
-        cuerpo_alto = max(float(vela['Open']), float(vela['Close']))
-        low_val = float(vela['Low'])
-        high_val = float(vela['High'])
+        spec = SUPPORTED_SYMBOLS.get(sym, {"tickSize": 0.25})
+        tick_size = spec.get("tickSize", 0.25)
+        
+        # Vela en proceso (la más reciente) y vela previa cerrada
+        vela_actual = df.iloc[-1]
+        vela_previa = df.iloc[-2]
+        
+        vwap_val = float(vela_actual['VWAP'])
+        open_val = float(vela_actual['Open'])
+        close_val = float(vela_actual['Close'])
+        low_val = float(vela_actual['Low'])
+        high_val = float(vela_actual['High'])
+        
+        prev_close = float(vela_previa['Close'])
+        prev_vwap = float(vela_previa['VWAP'])
         
         # 1. EVALUAR SETUP LONG (Compras)
-        # Mecha inferior toca/pasa VWAP y todo el cuerpo permanece estrictamente por encima de VWAP
-        if low_val <= vwap_val and cuerpo_bajo > vwap_val:
+        # La vela abrió por encima de VWAP o la vela previa cerró por encima
+        viene_de_arriba = (open_val > vwap_val) or (open_val >= vwap_val and prev_close >= prev_vwap)
+        toco_o_paso_vwap_long = (low_val <= vwap_val)
+        
+        # Proximidad activa al VWAP (para disparar inmediatamente en el toque o cruce)
+        en_zona_toque_long = (close_val <= vwap_val + (8 * tick_size))
+        
+        if viene_de_arriba and toco_o_paso_vwap_long and en_zona_toque_long:
+            extremo = min(low_val, vwap_val)
             return {
                 "direccion": "LONG",
                 "simbolo": sym,
-                "vela_cruce": vela,
-                "extremo_precio": low_val,  # Mínimo de la mecha de rechazo
+                "vela_cruce": vela_actual,
+                "extremo_precio": extremo,  # Nivel de VWAP / extremo del toque
                 "vwap_cruce": vwap_val,
-                "upper_band": float(vela['Upper_Band']),
-                "lower_band": float(vela['Lower_Band'])
+                "upper_band": float(vela_actual['Upper_Band']),
+                "lower_band": float(vela_actual['Lower_Band'])
             }
 
         # 2. EVALUAR SETUP SHORT (Ventas)
-        # Mecha superior toca/pasa VWAP y todo el cuerpo permanece estrictamente por debajo de VWAP
-        if high_val >= vwap_val and cuerpo_alto < vwap_val:
+        # La vela abrió por debajo de VWAP o la vela previa cerró por debajo
+        viene_de_abajo = (open_val < vwap_val) or (open_val <= vwap_val and prev_close <= prev_vwap)
+        toco_o_paso_vwap_short = (high_val >= vwap_val)
+        
+        # Proximidad activa al VWAP (para disparar inmediatamente en el toque o cruce)
+        en_zona_toque_short = (close_val >= vwap_val - (8 * tick_size))
+        
+        if viene_de_abajo and toco_o_paso_vwap_short and en_zona_toque_short:
+            extremo = max(high_val, vwap_val)
             return {
                 "direccion": "SHORT",
                 "simbolo": sym,
-                "vela_cruce": vela,
-                "extremo_precio": high_val,  # Máximo de la mecha de rechazo
+                "vela_cruce": vela_actual,
+                "extremo_precio": extremo,  # Nivel de VWAP / extremo del toque
                 "vwap_cruce": vwap_val,
-                "upper_band": float(vela['Upper_Band']),
-                "lower_band": float(vela['Lower_Band'])
+                "upper_band": float(vela_actual['Upper_Band']),
+                "lower_band": float(vela_actual['Lower_Band'])
             }
 
         return None
 
     # ==========================================
-    # RISK ENGINE: SL A 10 TICKS DEL EXTREMO
+    # RISK ENGINE: SL A 10 TICKS Y TP AL 60% DE LA DISTANCIA
     # ==========================================
     def calcular_riesgo_dinamico(self, direccion: str, precio_entrada: float, extremo_precio: float,
                                  upper_band: float, lower_band: float, sym: str) -> tuple[int, int, float, float]:
         """
         Calcula SL y TP:
-        - LONG: SL a 10 ticks por debajo del precio más bajo de la última vela que cruzó o tocó el VWAP.
-        - SHORT: SL a 10 ticks por encima del precio más alto de la última vela que cruzó o tocó el VWAP.
+        - SL: Exactamente 10 ticks por debajo (LONG) o por encima (SHORT) del VWAP / extremo del toque.
+        - TP: Exactamente al 60% de la distancia desde el precio de entrada hasta la banda correspondiente.
         """
         spec = SUPPORTED_SYMBOLS.get(sym, {"tickSize": 0.25})
         tick_size = spec.get("tickSize", 0.25)
@@ -378,7 +390,8 @@ class AxiomEngine:
             distancia_sl_puntos = abs(precio_entrada - precio_sl)
             ticks_sl_abs = max(round(distancia_sl_puntos / tick_size), 10)
             
-            distancia_tp_puntos = max(abs(upper_band - precio_entrada) * 0.75, (ticks_sl_abs * 1.5) * tick_size)
+            # TP al 60% de la distancia a la banda superior
+            distancia_tp_puntos = abs(upper_band - precio_entrada) * 0.60
             ticks_tp_abs = max(round(distancia_tp_puntos / tick_size), 10)
             precio_tp = precio_entrada + (ticks_tp_abs * tick_size)
             
@@ -390,7 +403,8 @@ class AxiomEngine:
             distancia_sl_puntos = abs(precio_sl - precio_entrada)
             ticks_sl_abs = max(round(distancia_sl_puntos / tick_size), 10)
             
-            distancia_tp_puntos = max(abs(precio_entrada - lower_band) * 0.75, (ticks_sl_abs * 1.5) * tick_size)
+            # TP al 60% de la distancia a la banda inferior
+            distancia_tp_puntos = abs(precio_entrada - lower_band) * 0.60
             ticks_tp_abs = max(round(distancia_tp_puntos / tick_size), 10)
             precio_tp = precio_entrada - (ticks_tp_abs * tick_size)
             
@@ -1004,65 +1018,54 @@ class AxiomEngine:
                         if is_enabled or is_active_view:
                             self.log(f"📊 {sym}: {vela_actual['Close']:,.2f} | 🔴 Sup: {vela_actual['Upper_Band']:,.2f} | 🔵 VWAP: {vela_actual['VWAP']:,.2f} | 🟢 Inf: {vela_actual['Lower_Band']:,.2f} | Dist: {dist_vwap:+.2f} pts", "TELEMETRY", sym)
                         
-                        # 2. Evaluación de Trading Autónomo (solo si el símbolo está HABILITADO)
+                        # 2. Evaluación de Trading Autónomo en Tiempo Real (mientras la vela está en proceso)
                         if is_enabled:
-                            now_utc = datetime.now(timezone.utc)
-                            # En futuros CME 5m, una vela con timestamp T cierra a las T + 5 minutos.
-                            # Filtramos estrictamente todas las velas cuyo intervalo de 5m ya haya cerrado por completo:
-                            df_cerradas = df[df['Timestamp'] + pd.Timedelta(minutes=5) <= now_utc]
-                            if df_cerradas.empty or len(df_cerradas) < 2:
-                                continue
-                                
-                            vela_cerrada = df_cerradas.iloc[-1]
-                            vela_cerrada_ts = vela_cerrada['Timestamp']
-                            time_str = vela_cerrada_ts.strftime('%H:%M')
+                            vela_actual = df.iloc[-1]
+                            vela_ts = vela_actual['Timestamp']
+                            time_str = vela_ts.strftime('%H:%M')
                             
-                            # Si es la primera vez que se evalúa (recién activado o al inicio):
-                            # Establecemos la vela actual como línea base para NUNCA disparar en velas pasadas.
-                            if state["latest_candle_time"] is None:
-                                state["latest_candle_time"] = vela_cerrada_ts
-                                state["last_executed_candle_ts"] = vela_cerrada_ts
-                                self.log(f"🔍 Escáner activo para {sym}. Línea base fijada en vela {time_str} UTC. Esperando próximo cierre de vela 5m para evaluar...", "SETUP", sym)
+                            # Si detectamos una nueva vela 5m iniciada, emitimos notificación
+                            if state.get("current_active_candle_ts") != vela_ts:
+                                state["current_active_candle_ts"] = vela_ts
+                                self.log(f"🕯️ [{sym}] Vela 5m activa ({time_str} UTC). Monitoreando toque en tiempo real al VWAP...", "SETUP", sym)
+
+                            # 1. Filtro institucional de sesión CME (primeras 2 horas tras la apertura: 18:00-20:00 ET y receso diario)
+                            is_operable, motivo_horario = self.es_horario_operable()
+                            if not is_operable:
+                                if state.get("last_inoperable_reason") != motivo_horario:
+                                    state["last_inoperable_reason"] = motivo_horario
+                                    self.log(f"⏸️ [{sym}] {motivo_horario}. Entradas suspendidas.", "SETUP", sym)
                                 continue
-                            
-                            # Solo evaluamos cuando una NUEVA vela se ha confirmado en tiempo real
-                            if state["latest_candle_time"] != vela_cerrada_ts:
-                                state["latest_candle_time"] = vela_cerrada_ts
-                                self.log(f"⏱️ [{sym}] Nueva vela 5m confirmada ({time_str} UTC). Evaluando rechazo VWAP institucional...", "SETUP", sym)
-                                
-                                # 1. Filtro institucional de sesión CME (primeras 2 horas tras la apertura: 18:00-20:00 ET y receso diario)
-                                is_operable, motivo_horario = self.es_horario_operable()
-                                if not is_operable:
-                                    self.log(f"⏸️ [{sym}] {motivo_horario}. Entradas suspendidas durante esta vela.", "SETUP", sym)
-                                    continue
+                            else:
+                                state["last_inoperable_reason"] = None
 
-                                # 2. Filtro de sobreexposición: Máximo 1 operación abierta por símbolo a la vez
-                                if self.tiene_posicion_abierta(sym):
-                                    self.log(f"🛡️ [{sym}] Posición activa en mercado detectada. Escáner en espera hasta su liquidación (Máx 1 pos/símbolo).", "SETUP", sym)
-                                    continue
+                            # 2. Filtro de sobreexposición: Máximo 1 operación abierta por símbolo a la vez
+                            if self.tiene_posicion_abierta(sym):
+                                continue
 
-                                if time.time() < state["cooldown_until"]:
-                                    restante = int(state["cooldown_until"] - time.time())
-                                    self.log(f"⏳ Cooldown activo para {sym}. Restan {restante}s.", "SYSTEM", sym)
-                                else:
-                                    setup = self.verificar_setup_vwap(df, sym)
-                                    if setup:
-                                        if state.get("last_executed_candle_ts") != vela_cerrada_ts:
-                                            state["last_executed_candle_ts"] = vela_cerrada_ts
-                                            self.ejecutar_orden(setup, df, sym)
-                                        else:
-                                            self.log(f"ℹ️ [{sym}] Setup presente, pero ya ejecutado previamente en vela {time_str} UTC.", "SETUP", sym)
-                                    else:
-                                        self.log(f"🔍 [{sym}] Filtro VWAP ({time_str} UTC): Sin rechazo válido por mecha (Cuerpo no cruzado). Disciplina activa.", "SETUP", sym)
+                            # 3. Control de ejecución: Máximo 1 operación por vela
+                            if state.get("last_executed_candle_ts") == vela_ts:
+                                continue
+
+                            # 4. Cooldown activo
+                            if time.time() < state["cooldown_until"]:
+                                continue
+
+                            # 5. Evaluación de toque/cruce en tiempo real mientras la vela más reciente está en proceso
+                            setup = self.verificar_setup_vwap(df, sym)
+                            if setup:
+                                state["last_executed_candle_ts"] = vela_ts
+                                self.log(f"⚡ [{sym}] ¡Toque de VWAP en vela en proceso detectado ({time_str} UTC)! Abriendo {setup['direccion']} al instante...", "ORDER", sym)
+                                self.ejecutar_orden(setup, df, sym)
                     
                     # Pausa corta entre consultas para cortesía con la API
-                    time.sleep(0.3)
+                    time.sleep(0.2)
                     
             except Exception as e:
                 self.log(f"⚠️ Excepción en el ciclo multi-símbolo: {e}", "ERROR", "ALL")
                 
-            # Intervalo entre rondas completas de sondeo
-            for _ in range(12):
+            # Intervalo dinámico entre rondas completas de sondeo en vivo (2 segundos)
+            for _ in range(2):
                 if self.stop_event.is_set():
                     break
                 time.sleep(1)
