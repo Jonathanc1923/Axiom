@@ -346,8 +346,11 @@ class AxiomEngine:
         p2_vwap = float(vela_prev2['VWAP'])
         
         # 1. EVALUAR SETUP LONG (Compras)
-        # Las 2 velas anteriores confirmadas cerraron por encima de VWAP
-        previas_confirman_long = (p2_close > p2_vwap) and (p1_close > p1_vwap)
+        # Las 2 velas anteriores confirmadas deben tener TODO su cuerpo por encima del VWAP
+        t2_arriba = min(float(vela_prev2['Open']), p2_close) > p2_vwap
+        t1_arriba = min(float(vela_prev1['Open']), p1_close) > p1_vwap
+        previas_confirman_long = t2_arriba and t1_arriba
+        
         # Vela actual abrió por encima o sobre el VWAP
         abrio_arriba = (open_val >= vwap_val - (1 * tick_size))
         # Toca o pasa la línea del VWAP hacia abajo
@@ -368,8 +371,11 @@ class AxiomEngine:
             }
 
         # 2. EVALUAR SETUP SHORT (Ventas)
-        # Las 2 velas anteriores confirmadas cerraron por debajo de VWAP
-        previas_confirman_short = (p2_close < p2_vwap) and (p1_close < p1_vwap)
+        # Las 2 velas anteriores confirmadas deben tener TODO su cuerpo por debajo del VWAP
+        t2_abajo = max(float(vela_prev2['Open']), p2_close) < p2_vwap
+        t1_abajo = max(float(vela_prev1['Open']), p1_close) < p1_vwap
+        previas_confirman_short = t2_abajo and t1_abajo
+        
         # Vela actual abrió por debajo o sobre el VWAP
         abrio_abajo = (open_val <= vwap_val + (1 * tick_size))
         # Toca o pasa la línea del VWAP hacia arriba

@@ -165,7 +165,10 @@ def verificar_setup_vwap(df):
     p2_vwap = float(vela_prev2['VWAP'])
     
     # 1. SETUP LONG (Compras)
-    previas_confirman_long = (p2_close > p2_vwap) and (p1_close > p1_vwap)
+    t2_arriba = min(float(vela_prev2['Open']), p2_close) > p2_vwap
+    t1_arriba = min(float(vela_prev1['Open']), p1_close) > p1_vwap
+    previas_confirman_long = t2_arriba and t1_arriba
+    
     abrio_arriba = (open_val >= vwap_val - (1 * TICK_SIZE))
     paso_vwap_long = (low_val <= vwap_val)
     en_zona_inmediata_long = (vwap_val - (6 * TICK_SIZE) <= close_val <= vwap_val + (2 * TICK_SIZE))
@@ -181,7 +184,10 @@ def verificar_setup_vwap(df):
         }
 
     # 2. SETUP SHORT (Ventas)
-    previas_confirman_short = (p2_close < p2_vwap) and (p1_close < p1_vwap)
+    t2_abajo = max(float(vela_prev2['Open']), p2_close) < p2_vwap
+    t1_abajo = max(float(vela_prev1['Open']), p1_close) < p1_vwap
+    previas_confirman_short = t2_abajo and t1_abajo
+    
     abrio_abajo = (open_val <= vwap_val + (1 * TICK_SIZE))
     paso_vwap_short = (high_val >= vwap_val)
     en_zona_inmediata_short = (vwap_val - (2 * TICK_SIZE) <= close_val <= vwap_val + (6 * TICK_SIZE))
