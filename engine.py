@@ -303,24 +303,35 @@ class AxiomEngine:
         return df
 
     # ==========================================
-    # LOGICAL ENGINE: WICK REJECTION IN LAST MINUTE (WITH 2-CANDLE CONFIRMATION)
+    # LOGICAL ENGINE: REAL-TIME WICK REJECTION (WITH 2-CANDLE CONFIRMATION)
     # ==========================================
     def verificar_setup_vwap(self, df: pd.DataFrame, sym: str, ignore_time_window: bool = False) -> Optional[Dict[str, Any]]:
         """
-        Detecta en tiempo real (durante el último minuto de formación de la vela de 5m)
-        la presencia de una mecha que toque o pase el VWAP sin que el cuerpo cruce el VWAP.
+        Detecta en tiempo real segundo a segundo, en cualquier momento durante la formación
+        de la vela de 5m, la presencia confirmada de una MECHA que haya tocado o perforado el VWAP
+        sin que el cuerpo haya cruzado al otro lado (bajas posibilidades de que sea un cuerpo).
         
-        REGLAS:
+        REGLAS INSTITUCIONALES:
         1. Confirmación de tendencia previa (2 velas cerradas anteriores t-2 y t-1 en toda su extensión):
            - LONG: Ambas velas previas estuvieron 100% por encima del VWAP (Low > VWAP).
            - SHORT: Ambas velas previas estuvieron 100% por debajo del VWAP (High < VWAP).
-        2. Ventana de tiempo:
-           - Se evalúa estrictamente durante el ÚLTIMO MINUTO de la vela de 5m en formación (segundos 238 a 305).
-        3. Formación de mecha sin cruce de cuerpo en la vela actual (t):
-           - LONG: Formó mecha inferior tocando/pasando el VWAP (Low <= VWAP), pero su cuerpo NO pasó sobre el VWAP
-                   (cuerpo_bajo = min(Open, Close) >= VWAP - 1 tick).
-           - SHORT: Formó mecha superior tocando/pasando el VWAP (High >= VWAP), pero su cuerpo NO pasó sobre el VWAP
-                    (cuerpo_alto = max(Open, Close) <= VWAP + 1 tick).
+        2. Análisis continuo de la vela actual en formación (t):
+           - Se evalúa en cualquier momento desde los primeros segundos de formación (elapsed >= 8s hasta 305s).
+        3. Distinción matemática estricta: MECHA vs CUERPO:
+           - LONG:
+             * Abrió por encima de VWAP: Open >= VWAP - (0.5 * tick_size).
+             * Tocó o perforó el VWAP: Low <= VWAP.
+             * El cuerpo NO cruzó el VWAP: min(Open, Close) >= VWAP - (0.5 * tick_size).
+             * Mecha formada sustancial: min(Open, Close) - Low >= 2 * tick_size.
+             * Rebote activo confirmado: Close - Low >= 2 * tick_size y Close >= VWAP + (1 * tick_size).
+             * Patrón de rechazo absorbido: Close >= Open o mecha_inferior >= tamano_cuerpo * 0.5.
+           - SHORT:
+             * Abrió por debajo de VWAP: Open <= VWAP + (0.5 * tick_size).
+             * Tocó o perforó el VWAP: High >= VWAP.
+             * El cuerpo NO cruzó el VWAP: max(Open, Close) <= VWAP + (0.5 * tick_size).
+             * Mecha formada sustancial: High - max(Open, Close) >= 2 * tick_size.
+             * Rechazo activo confirmado: High - Close >= 2 * tick_size y Close <= VWAP - (1 * tick_size).
+             * Patrón de rechazo absorbido: Close <= Open o mecha_superior >= tamano_cuerpo * 0.5.
         """
         if len(df) < 4:
             return None
@@ -333,7 +344,7 @@ class AxiomEngine:
         vela_prev1 = df.iloc[-2]  # Vela previa (t-1)
         vela_prev2 = df.iloc[-3]  # Vela anteprevia (t-2)
         
-        # 1. Filtro temporal: Debe encontrarse en el ÚLTIMO MINUTO de la vela de 5m (entre 238s y 305s desde su apertura)
+        # 1. Filtro temporal: La vela debe tener al menos 8 segundos de vida y no haber expirado (> 305s)
         if not ignore_time_window:
             now_utc = datetime.now(timezone.utc)
             vela_ts = vela_actual['Timestamp']
@@ -341,8 +352,8 @@ class AxiomEngine:
                 vela_ts = vela_ts.replace(tzinfo=timezone.utc)
             elapsed_sec = (now_utc - vela_ts).total_seconds()
             
-            # Si no ha llegado al último minuto (< 238s) o la vela expiró (> 305s), esperar
-            if elapsed_sec < 238 or elapsed_sec > 305:
+            # Apertura operable en cualquier segundo desde que arranca la vela (mínimo 8s para asentar datos)
+            if elapsed_sec < 8 or elapsed_sec > 305:
                 return None
         
         vwap_val = float(vela_actual['VWAP'])
@@ -351,9 +362,7 @@ class AxiomEngine:
         low_val = float(vela_actual['Low'])
         high_val = float(vela_actual['High'])
         
-        p1_close = float(vela_prev1['Close'])
         p1_vwap = float(vela_prev1['VWAP'])
-        p2_close = float(vela_prev2['Close'])
         p2_vwap = float(vela_prev2['VWAP'])
         
         # 1. EVALUAR SETUP LONG (Compras)
@@ -362,15 +371,30 @@ class AxiomEngine:
         t1_arriba = float(vela_prev1['Low']) > p1_vwap
         previas_confirman_long = t2_arriba and t1_arriba
         
-        # Vela actual: mecha inferior tocó o perforó el VWAP
+        # A. La vela abrió por encima del VWAP
+        abrio_arriba = (open_val >= vwap_val - (0.5 * tick_size))
+        
+        # B. En algún momento transcurrido, tocó o perforó el VWAP
         mecha_toco_vwap_long = (low_val <= vwap_val)
-        # El cuerpo NO puede cruzar el VWAP hacia abajo (todo el cuerpo permanece por encima)
+        
+        # C. El cuerpo actual NO está cruzando el VWAP (todo el cuerpo está por encima)
         cuerpo_bajo = min(open_val, close_val)
-        cuerpo_no_cruzo_long = (cuerpo_bajo >= vwap_val - (1 * tick_size))
-        # Proximidad de entrada: el precio actual no se ha ido excesivamente lejos del VWAP
+        cuerpo_no_cruzo_long = (cuerpo_bajo >= vwap_val - (0.5 * tick_size))
+        
+        # D. Confirmación de MECHA vs CUERPO (Bajas posibilidades de que sea cuerpo):
+        mecha_inferior = cuerpo_bajo - low_val
+        mecha_sustancial_long = (mecha_inferior >= 2 * tick_size)
+        rebote_confirmado_long = (close_val - low_val >= 2 * tick_size)
+        precio_seguro_long = (close_val >= vwap_val + (1 * tick_size))
+        tamano_cuerpo_long = abs(close_val - open_val)
+        patron_rechazo_long = (close_val >= open_val) or (mecha_inferior >= tamano_cuerpo_long * 0.5)
+        
+        # E. Proximidad de entrada: el precio actual no se ha ido excesivamente lejos del VWAP
         en_zona_entrada_long = (close_val <= vwap_val + max(12 * tick_size, abs(float(vela_actual['Upper_Band']) - vwap_val) * 0.40))
         
-        if previas_confirman_long and mecha_toco_vwap_long and cuerpo_no_cruzo_long and en_zona_entrada_long:
+        if (previas_confirman_long and abrio_arriba and mecha_toco_vwap_long and 
+            cuerpo_no_cruzo_long and mecha_sustancial_long and rebote_confirmado_long and 
+            precio_seguro_long and patron_rechazo_long and en_zona_entrada_long):
             extremo = min(low_val, vwap_val)
             return {
                 "direccion": "LONG",
@@ -379,7 +403,8 @@ class AxiomEngine:
                 "extremo_precio": extremo,
                 "vwap_cruce": vwap_val,
                 "upper_band": float(vela_actual['Upper_Band']),
-                "lower_band": float(vela_actual['Lower_Band'])
+                "lower_band": float(vela_actual['Lower_Band']),
+                "mecha_pts": mecha_inferior
             }
 
         # 2. EVALUAR SETUP SHORT (Ventas)
@@ -388,15 +413,30 @@ class AxiomEngine:
         t1_abajo = float(vela_prev1['High']) < p1_vwap
         previas_confirman_short = t2_abajo and t1_abajo
         
-        # Vela actual: mecha superior tocó o perforó el VWAP
+        # A. La vela abrió por debajo del VWAP
+        abrio_abajo = (open_val <= vwap_val + (0.5 * tick_size))
+        
+        # B. En algún momento transcurrido, tocó o perforó el VWAP
         mecha_toco_vwap_short = (high_val >= vwap_val)
-        # El cuerpo NO puede cruzar el VWAP hacia arriba (todo el cuerpo permanece por debajo)
+        
+        # C. El cuerpo actual NO está cruzando el VWAP (todo el cuerpo está por debajo)
         cuerpo_alto = max(open_val, close_val)
-        cuerpo_no_cruzo_short = (cuerpo_alto <= vwap_val + (1 * tick_size))
-        # Proximidad de entrada: el precio actual no se ha ido excesivamente lejos del VWAP
+        cuerpo_no_cruzo_short = (cuerpo_alto <= vwap_val + (0.5 * tick_size))
+        
+        # D. Confirmación de MECHA vs CUERPO (Bajas posibilidades de que sea cuerpo):
+        mecha_superior = high_val - cuerpo_alto
+        mecha_sustancial_short = (mecha_superior >= 2 * tick_size)
+        rechazo_confirmado_short = (high_val - close_val >= 2 * tick_size)
+        precio_seguro_short = (close_val <= vwap_val - (1 * tick_size))
+        tamano_cuerpo_short = abs(close_val - open_val)
+        patron_rechazo_short = (close_val <= open_val) or (mecha_superior >= tamano_cuerpo_short * 0.5)
+        
+        # E. Proximidad de entrada: el precio actual no se ha ido excesivamente lejos del VWAP
         en_zona_entrada_short = (close_val >= vwap_val - max(12 * tick_size, abs(vwap_val - float(vela_actual['Lower_Band'])) * 0.40))
         
-        if previas_confirman_short and mecha_toco_vwap_short and cuerpo_no_cruzo_short and en_zona_entrada_short:
+        if (previas_confirman_short and abrio_abajo and mecha_toco_vwap_short and 
+            cuerpo_no_cruzo_short and mecha_sustancial_short and rechazo_confirmado_short and 
+            precio_seguro_short and patron_rechazo_short and en_zona_entrada_short):
             extremo = max(high_val, vwap_val)
             return {
                 "direccion": "SHORT",
@@ -405,7 +445,8 @@ class AxiomEngine:
                 "extremo_precio": extremo,
                 "vwap_cruce": vwap_val,
                 "upper_band": float(vela_actual['Upper_Band']),
-                "lower_band": float(vela_actual['Lower_Band'])
+                "lower_band": float(vela_actual['Lower_Band']),
+                "mecha_pts": mecha_superior
             }
 
         return None
@@ -564,7 +605,7 @@ class AxiomEngine:
         self.log(f"🚨 DISPARANDO {direccion} | Entrada: {precio_entrada:,.2f} | {info_sl} | {info_tp}", "ORDER", sym)
         
         side = 1 if direccion == "SHORT" else 0
-        condicion_str = f"Mecha VWAP {setup['vwap_cruce']:.2f} (Últ. Minuto | 2V Confirmadas). SL: 10 ticks VWAP ({precio_sl:.2f}) | TP 40% Banda: {abs(ticks_tp)} ticks ({precio_tp:.2f})"
+        condicion_str = f"Mecha VWAP {setup['vwap_cruce']:.2f} ({setup.get('mecha_pts', 0)/tick_size:.0f}t Mecha Confirmada | 2V Previas). SL: 10t VWAP ({precio_sl:.2f}) | TP 40% Banda: {abs(ticks_tp)}t ({precio_tp:.2f})"
         
         try:
             res = self.client.place_order(
@@ -1035,9 +1076,9 @@ class AxiomEngine:
                     is_active_view = (sym == self.active_symbol)
                     
                     # Control inteligente de frecuencia:
-                    # - Símbolos activos o en pantalla: sondeo prioritario cada 3.5 segundos.
+                    # - Símbolos activos o en pantalla: sondeo prioritario cada 2.0 segundos (alta frecuencia segundo a segundo).
                     # - Símbolos inactivos (apagados): sondeo de baja frecuencia cada 60 segundos.
-                    min_interval = 3.5 if (is_enabled or is_active_view) else 60.0
+                    min_interval = 2.0 if (is_enabled or is_active_view) else 60.0
                     if (now_poll - state.get("last_poll_time", 0.0)) < min_interval:
                         continue
                     state["last_poll_time"] = now_poll
@@ -1085,7 +1126,7 @@ class AxiomEngine:
                             # Si detectamos una nueva vela 5m iniciada, emitimos notificación
                             if state.get("current_active_candle_ts") != vela_ts:
                                 state["current_active_candle_ts"] = vela_ts
-                                self.log(f"🕯️ [{sym}] Vela 5m activa ({time_str} UTC). Monitoreando mecha vs VWAP (último minuto)...", "SETUP", sym)
+                                self.log(f"🕯️ [{sym}] Vela 5m activa ({time_str} UTC). Escaneando rechazo por mecha en VWAP segundo a segundo...", "SETUP", sym)
 
                             # 1. Filtro institucional de sesión CME (primeras 2 horas tras la apertura: 18:00-20:00 ET y receso diario)
                             is_operable, motivo_horario = self.es_horario_operable()
@@ -1109,11 +1150,11 @@ class AxiomEngine:
                             if time.time() < state["cooldown_until"]:
                                 continue
 
-                            # 5. Evaluación de mecha en VWAP durante el último minuto de formación de la vela
+                            # 5. Evaluación continua segundo a segundo: confirmación de mecha en VWAP
                             setup = self.verificar_setup_vwap(df, sym)
                             if setup:
                                 state["last_executed_candle_ts"] = vela_ts
-                                self.log(f"⚡ [{sym}] ¡Rechazo por mecha en VWAP validado en último minuto ({time_str} UTC)! Abriendo {setup['direccion']}...", "ORDER", sym)
+                                self.log(f"⚡ [{sym}] ¡Mecha de rechazo en VWAP confirmada en tiempo real ({time_str} UTC)! Abriendo {setup['direccion']}...", "ORDER", sym)
                                 self.ejecutar_orden(setup, df, sym)
                     
                     # Pausa de cortesía entre consultas individuales para no saturar la API
