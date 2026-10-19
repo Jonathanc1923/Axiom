@@ -1,9 +1,17 @@
+import sys
 import time
 import requests
 from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, List, Optional
 import pandas as pd
-from config import TOPSTEP_BASE_URL, TOPSTEP_USERNAME, TOPSTEP_API_KEY, ACCOUNT_FILTER, SUPPORTED_SYMBOLS
+
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
+from config import TOPSTEP_BASE_URL, TOPSTEP_USERNAME, TOPSTEP_API_KEY, ACCOUNT_NAME, ACCOUNT_FILTER, SUPPORTED_SYMBOLS
 
 class TopstepClient:
     def __init__(self, base_url: str = TOPSTEP_BASE_URL, username: str = TOPSTEP_USERNAME, api_key: str = TOPSTEP_API_KEY):
@@ -45,29 +53,71 @@ class TopstepClient:
             return self.authenticate()
         return self.token
 
-    def get_practice_account(self, filter_prefix: str = ACCOUNT_FILTER) -> Dict[str, Any]:
-        """Obtiene la cuenta activa de práctica/simulación según el filtro seguro."""
+    def get_practice_account(self, filter_prefix: str = ACCOUNT_FILTER, target_name: Optional[str] = None) -> Dict[str, Any]:
+        """Obtiene la cuenta activa de práctica/simulación según nombre específico o filtro seguro."""
         url = f"{self.base_url}/api/Account/search"
+        target = (target_name or ACCOUNT_NAME or "").strip().upper()
+        
+        # 1. Consultar cuentas activas en TopstepX
         res = requests.post(url, json={"onlyActiveAccounts": True}, headers=self.get_headers(), timeout=15)
         res.raise_for_status()
-        data = res.json()
+        active_accounts = res.json().get("accounts", [])
         
-        accounts = data.get("accounts", [])
-        if not accounts:
-            raise RuntimeError("No se detectaron cuentas activas en TopstepX.")
-        
+        # 2. Consultar lista completa (incluyendo recién reseteadas o no marcadas)
+        all_accounts = active_accounts
+        try:
+            res_all = requests.post(url, json={"onlyActiveAccounts": False}, headers=self.get_headers(), timeout=15)
+            if res_all.status_code == 200:
+                all_accounts = res_all.json().get("accounts", []) or active_accounts
+        except Exception:
+            pass
+
+        # Intento 1: Coincidencia por nombre específico configurado
         matched = None
-        for acc in accounts:
-            name_upper = acc.get("name", "").upper()
-            if filter_prefix in name_upper or "PRACTICE" in name_upper:
-                matched = acc
-                break
-        
-        if not matched:
-            # Fallback if no specific PRAC named account, but select the first active account if it permits trading
-            matched = accounts[0]
+        if target:
+            # Buscar en lista activa primero si canTrade == True
+            for acc in active_accounts:
+                n = acc.get("name", "").upper()
+                if (target in n or n in target) and acc.get("canTrade", False):
+                    matched = acc
+                    break
             
+            # Si no está en las activas, buscar en all_accounts
+            if not matched:
+                for acc in all_accounts:
+                    n = acc.get("name", "").upper()
+                    if target in n or n in target:
+                        if acc.get("canTrade", False):
+                            matched = acc
+                            break
+                        else:
+                            print(f"⚠️ [TOPSTEP] Cuenta solicitada {acc.get('name')} detectada pero 'canTrade' es False.", flush=True)
+
+        # Intento 2: Si la cuenta específica no puede operar o no se definió, buscar la cuenta activa de práctica
+        if not matched:
+            for acc in active_accounts:
+                name_upper = acc.get("name", "").upper()
+                can_trade = acc.get("canTrade", False)
+                if (filter_prefix in name_upper or "PRACTICE" in name_upper) and can_trade:
+                    matched = acc
+                    break
+
+        # Intento 3: Fallback a cualquier cuenta con filtro PRAC en activas
+        if not matched:
+            for acc in active_accounts:
+                name_upper = acc.get("name", "").upper()
+                if filter_prefix in name_upper or "PRACTICE" in name_upper:
+                    matched = acc
+                    break
+
+        if not matched and active_accounts:
+            matched = active_accounts[0]
+
+        if not matched:
+            raise RuntimeError("No se detectaron cuentas activas operables en TopstepX.")
+
         self.account_cache = matched
+        print(f"✅ [TOPSTEP] Cuenta vinculada: {matched.get('name')} (ID: {matched.get('id')}) | Balance: ${float(matched.get('balance', 0.0)):,.2f} | canTrade: {matched.get('canTrade')}", flush=True)
         return matched
 
     def resolve_contract(self, symbol_key: str) -> Dict[str, Any]:

@@ -66,12 +66,17 @@ def get_headers():
 def inicializar_entorno():
     global ACCOUNT_ID, CONTRACT_ID
     
-    # Buscar Cuenta (Filtro PRAC estricto)
+    # Buscar Cuenta (Filtro PRAC con cuenta específica)
+    TARGET_ACCOUNT = "PRAC-V2-460183-51765674"
     res_acc = requests.post(f"{API_BASE_URL}/api/Account/search", json={"onlyActiveAccounts": True}, headers=get_headers())
     cuentas = res_acc.json().get("accounts", [])
     if not cuentas: raise Exception("No se encontraron cuentas activas.")
     
-    cuenta_seleccionada = next((c for c in cuentas if "PRAC" in c["name"].upper() or "PRACTICE" in c["name"].upper()), None)
+    cuenta_seleccionada = next((c for c in cuentas if TARGET_ACCOUNT in c["name"].upper() and c.get("canTrade", False)), None)
+    if not cuenta_seleccionada:
+        cuenta_seleccionada = next((c for c in cuentas if ("PRAC" in c["name"].upper() or "PRACTICE" in c["name"].upper()) and c.get("canTrade", False)), None)
+    if not cuenta_seleccionada:
+        cuenta_seleccionada = next((c for c in cuentas if "PRAC" in c["name"].upper() or "PRACTICE" in c["name"].upper()), None)
     if not cuenta_seleccionada: raise Exception("Seguridad: No se detectó tu cuenta PRACTICE.")
         
     ACCOUNT_ID = cuenta_seleccionada["id"]
