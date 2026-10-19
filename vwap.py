@@ -138,80 +138,84 @@ def calcular_vwap_sesion(df):
     return df
 
 # ==========================================
-# 5. MOTOR LÓGICO DE RECHAZO (MECHA TOCA/PASA VWAP - CUERPO NO PASA)
+# 5. MOTOR LÓGICO DE RECHAZO (OPCIÓN B: TOQUE AL PASAR VWAP CON 2 VELAS CONFIRMADAS)
 # ==========================================
 def verificar_setup_vwap(df):
     """
-    Detecta rechazo estricto por mecha (Wick Rejection) en VWAP para todos los símbolos.
-    REGLA:
-    - La mecha de la vela más reciente debe tocar o pasar el VWAP.
-    - El cuerpo de la vela NO puede pasar el VWAP (la operación queda invalidada si el cuerpo lo cruza).
-    - LONG: Mecha inferior toca/pasa el VWAP (Low <= VWAP), pero todo el cuerpo queda por encima (min(Open, Close) > VWAP).
-    - SHORT: Mecha superior toca/pasa el VWAP (High >= VWAP), pero todo el cuerpo queda por debajo (max(Open, Close) < VWAP).
+    Detecta en tiempo real al pasar la línea VWAP con confirmación estricta
+    de que las 2 velas previas cerradas venían en la dirección de la tendencia.
     """
-    if len(df) < 4: return None
-        
-    now_utc = datetime.now(timezone.utc)
-    df_cerradas = df[df['Timestamp'] + pd.Timedelta(minutes=5) <= now_utc]
-    if df_cerradas.empty or len(df_cerradas) < 2:
+    if len(df) < 4:
         return None
         
-    vela = df_cerradas.iloc[-1]
-    vwap_val = float(vela['VWAP'])
-    cuerpo_bajo = min(float(vela['Open']), float(vela['Close']))
-    cuerpo_alto = max(float(vela['Open']), float(vela['Close']))
-    low_val = float(vela['Low'])
-    high_val = float(vela['High'])
+    TICK_SIZE = 0.25
+    vela_actual = df.iloc[-1]
+    vela_prev1 = df.iloc[-2]  # Vela t-1
+    vela_prev2 = df.iloc[-3]  # Vela t-2
+    
+    vwap_val = float(vela_actual['VWAP'])
+    open_val = float(vela_actual['Open'])
+    close_val = float(vela_actual['Close'])
+    low_val = float(vela_actual['Low'])
+    high_val = float(vela_actual['High'])
+    
+    p1_close = float(vela_prev1['Close'])
+    p1_vwap = float(vela_prev1['VWAP'])
+    p2_close = float(vela_prev2['Close'])
+    p2_vwap = float(vela_prev2['VWAP'])
     
     # 1. SETUP LONG (Compras)
-    if low_val <= vwap_val and cuerpo_bajo > vwap_val:
+    previas_confirman_long = (p2_close > p2_vwap) and (p1_close > p1_vwap)
+    abrio_arriba = (open_val >= vwap_val - (1 * TICK_SIZE))
+    paso_vwap_long = (low_val <= vwap_val)
+    en_zona_inmediata_long = (vwap_val - (6 * TICK_SIZE) <= close_val <= vwap_val + (2 * TICK_SIZE))
+    
+    if previas_confirman_long and abrio_arriba and paso_vwap_long and en_zona_inmediata_long:
         return {
             "direccion": "LONG",
-            "vela_cruce": vela,
-            "extremo_precio": low_val, # Mínimo de la mecha
+            "vela_cruce": vela_actual,
+            "extremo_precio": min(low_val, vwap_val),
             "vwap_cruce": vwap_val,
-            "upper_band": float(vela['Upper_Band']),
-            "lower_band": float(vela['Lower_Band'])
+            "upper_band": float(vela_actual['Upper_Band']),
+            "lower_band": float(vela_actual['Lower_Band'])
         }
 
     # 2. SETUP SHORT (Ventas)
-    if high_val >= vwap_val and cuerpo_alto < vwap_val:
+    previas_confirman_short = (p2_close < p2_vwap) and (p1_close < p1_vwap)
+    abrio_abajo = (open_val <= vwap_val + (1 * TICK_SIZE))
+    paso_vwap_short = (high_val >= vwap_val)
+    en_zona_inmediata_short = (vwap_val - (2 * TICK_SIZE) <= close_val <= vwap_val + (6 * TICK_SIZE))
+    
+    if previas_confirman_short and abrio_abajo and paso_vwap_short and en_zona_inmediata_short:
         return {
             "direccion": "SHORT",
-            "vela_cruce": vela,
-            "extremo_precio": high_val, # Máximo de la mecha
+            "vela_cruce": vela_actual,
+            "extremo_precio": max(high_val, vwap_val),
             "vwap_cruce": vwap_val,
-            "upper_band": float(vela['Upper_Band']),
-            "lower_band": float(vela['Lower_Band'])
+            "upper_band": float(vela_actual['Upper_Band']),
+            "lower_band": float(vela_actual['Lower_Band'])
         }
 
     return None
 
 # ==========================================
-# 6. MOTOR DE EJECUCIÓN (CON SL A 5 TICKS DEL EXTREMO)
+# 6. MOTOR DE EJECUCIÓN (CON SL A 10 TICKS Y TP AL 50% DISTANCIA VWAP-BANDA)
 # ==========================================
-def calcular_riesgo_dinamico(direccion, precio_entrada, extremo_precio, upper_band, lower_band):
+def calcular_riesgo_dinamico(direccion, precio_entrada, extremo_precio, upper_band, lower_band, vwap_val=None):
     TICK_SIZE = 0.25
+    ticks_sl_abs = 10
+    ref_vwap = vwap_val if vwap_val is not None else precio_entrada
     
-    # REGLA EXACTA:
-    # Compras: SL 10 ticks por debajo del precio más bajo de la última vela que cruzó/tocó el VWAP
-    # Ventas: SL 10 ticks por encima del precio más alto de la última vela que cruzó/tocó el VWAP
     if direccion == "LONG":
-        precio_sl = extremo_precio - (10 * TICK_SIZE)
-        distancia_sl = abs(precio_entrada - precio_sl)
-        ticks_sl_abs = max(round(distancia_sl / TICK_SIZE), 10)
-        
-        distancia_tp = max(abs(upper_band - precio_entrada) * 0.75, (ticks_sl_abs * 1.5) * TICK_SIZE)
+        precio_sl = precio_entrada - (ticks_sl_abs * TICK_SIZE)
+        distancia_tp = max(abs(upper_band - ref_vwap) * 0.50, (ticks_sl_abs * TICK_SIZE))
         ticks_tp_abs = max(round(distancia_tp / TICK_SIZE), 10)
         precio_tp = precio_entrada + (ticks_tp_abs * TICK_SIZE)
         
         return -ticks_sl_abs, ticks_tp_abs, precio_sl, precio_tp
     else:
-        precio_sl = extremo_precio + (10 * TICK_SIZE)
-        distancia_sl = abs(precio_sl - precio_entrada)
-        ticks_sl_abs = max(round(distancia_sl / TICK_SIZE), 10)
-        
-        distancia_tp = max(abs(precio_entrada - lower_band) * 0.75, (ticks_sl_abs * 1.5) * TICK_SIZE)
+        precio_sl = precio_entrada + (ticks_sl_abs * TICK_SIZE)
+        distancia_tp = max(abs(ref_vwap - lower_band) * 0.50, (ticks_sl_abs * TICK_SIZE))
         ticks_tp_abs = max(round(distancia_tp / TICK_SIZE), 10)
         precio_tp = precio_entrada - (ticks_tp_abs * TICK_SIZE)
         
@@ -220,16 +224,18 @@ def calcular_riesgo_dinamico(direccion, precio_entrada, extremo_precio, upper_ba
 def ejecutar_orden(setup, df):
     direccion = setup["direccion"]
     extremo_precio = setup["extremo_precio"]
+    vwap_cruce = setup.get("vwap_cruce")
     vela_cruce = setup["vela_cruce"]
     precio_entrada = float(df.iloc[-1]['Close'])
     
     ticks_sl, ticks_tp, precio_sl, precio_tp = calcular_riesgo_dinamico(
         direccion, precio_entrada, extremo_precio,
         float(setup['upper_band']),
-        float(setup['lower_band'])
+        float(setup['lower_band']),
+        vwap_cruce
     )
     
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] 🚨 DISPARANDO {direccion} | Entrada: {precio_entrada:,.2f} | SL: {ticks_sl} ticks ({precio_sl:,.2f}, 10 ticks de extremo {extremo_precio:,.2f}) | TP: {ticks_tp} ticks ({precio_tp:,.2f})", flush=True)
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] 🚨 DISPARANDO {direccion} | Entrada: {precio_entrada:,.2f} | SL: {ticks_sl} ticks ({precio_sl:,.2f}) | TP: {ticks_tp} ticks ({precio_tp:,.2f})", flush=True)
     
     payload = {
         "accountId": ACCOUNT_ID,
@@ -241,7 +247,7 @@ def ejecutar_orden(setup, df):
         "takeProfitBracket": {"ticks": ticks_tp, "type": 1}
     }
     
-    condicion_str = f"Rechazo VWAP {setup['vwap_cruce']:.2f}. Extremo vela: {extremo_precio:.2f}. SL 10 ticks: {precio_sl:.2f}"
+    condicion_str = f"Rechazo VWAP {setup['vwap_cruce']:.2f} (2V Confirmadas). SL: 10 ticks ({precio_sl:.2f}) | TP 50% Banda: {abs(ticks_tp)} ticks ({precio_tp:.2f})"
     
     res = requests.post(f"{API_BASE_URL}/api/Order/place", json=payload, headers=get_headers())
     data = res.json()

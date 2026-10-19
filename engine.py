@@ -303,28 +303,36 @@ class AxiomEngine:
         return df
 
     # ==========================================
-    # LOGICAL ENGINE: REAL-TIME IN-PROGRESS VWAP TOUCH
+    # LOGICAL ENGINE: REAL-TIME VWAP PASS WITH 2-CANDLE CONFIRMATION
     # ==========================================
     def verificar_setup_vwap(self, df: pd.DataFrame, sym: str) -> Optional[Dict[str, Any]]:
         """
         Detecta en tiempo real (mientras la vela más reciente está aún en proceso)
-        el momento exacto en que el precio toca o pasa la línea VWAP.
+        la apertura instantánea al pasar la línea VWAP con confirmación estricta
+        de que las 2 velas previas cerradas venían en la dirección de la tendencia.
         
-        1. Vela evaluada: La vela más reciente (en proceso / tiempo real).
-        2. Apertura instantánea: Apenas el precio toca o pasa el VWAP, se abre la operación.
-        3. Dirección:
-           - LONG: El precio viene por encima de VWAP y desciende hasta tocar o cruzar VWAP (Low <= VWAP).
-           - SHORT: El precio viene por debajo de VWAP y asciende hasta tocar o cruzar VWAP (High >= VWAP).
+        REGLAS INSTITUCIONALES (OPCIÓN B):
+        1. Confirmación de tendencia previa (2 velas cerradas anteriores):
+           - LONG: Ambas velas previas (t-2 y t-1) deben haber cerrado por encima de su VWAP (Close > VWAP).
+           - SHORT: Ambas velas previas (t-2 y t-1) deben haber cerrado por debajo de su VWAP (Close < VWAP).
+        2. Vela actual en formación (t):
+           - LONG: Abrió por encima o sobre el VWAP (Open >= VWAP - 1 tick). Apenas pasa hacia abajo la línea VWAP (Low <= VWAP),
+                   y el precio actual está en la zona de paso inmediato (entre VWAP - 6 ticks y VWAP + 2 ticks).
+           - SHORT: Abrió por debajo o sobre el VWAP (Open <= VWAP + 1 tick). Apenas pasa hacia arriba la línea VWAP (High >= VWAP),
+                    y el precio actual está en la zona de paso inmediato (entre VWAP - 2 ticks y VWAP + 6 ticks).
+        3. Suposición de rechazo: Se asume rebote en la línea de VWAP, colocando SL a 10 ticks y TP al 50%
+           de la distancia entre el VWAP y la banda correspondiente.
         """
-        if len(df) < 3:
+        if len(df) < 4:
             return None
             
         spec = SUPPORTED_SYMBOLS.get(sym, {"tickSize": 0.25})
         tick_size = spec.get("tickSize", 0.25)
         
-        # Vela en proceso (la más reciente) y vela previa cerrada
+        # Vela en proceso (la más reciente) y las 2 velas previas cerradas
         vela_actual = df.iloc[-1]
-        vela_previa = df.iloc[-2]
+        vela_prev1 = df.iloc[-2]  # Vela previa (t-1)
+        vela_prev2 = df.iloc[-3]  # Vela anteprevia (t-2)
         
         vwap_val = float(vela_actual['VWAP'])
         open_val = float(vela_actual['Open'])
@@ -332,44 +340,50 @@ class AxiomEngine:
         low_val = float(vela_actual['Low'])
         high_val = float(vela_actual['High'])
         
-        prev_close = float(vela_previa['Close'])
-        prev_vwap = float(vela_previa['VWAP'])
+        p1_close = float(vela_prev1['Close'])
+        p1_vwap = float(vela_prev1['VWAP'])
+        p2_close = float(vela_prev2['Close'])
+        p2_vwap = float(vela_prev2['VWAP'])
         
         # 1. EVALUAR SETUP LONG (Compras)
-        # La vela abrió por encima de VWAP o la vela previa cerró por encima
-        viene_de_arriba = (open_val > vwap_val) or (open_val >= vwap_val and prev_close >= prev_vwap)
-        toco_o_paso_vwap_long = (low_val <= vwap_val)
+        # Las 2 velas anteriores confirmadas cerraron por encima de VWAP
+        previas_confirman_long = (p2_close > p2_vwap) and (p1_close > p1_vwap)
+        # Vela actual abrió por encima o sobre el VWAP
+        abrio_arriba = (open_val >= vwap_val - (1 * tick_size))
+        # Toca o pasa la línea del VWAP hacia abajo
+        paso_vwap_long = (low_val <= vwap_val)
+        # Zona inmediata de paso: apenas pasa la línea (máximo 6 ticks de tolerancia para no comprar en caída libre)
+        en_zona_inmediata_long = (vwap_val - (6 * tick_size) <= close_val <= vwap_val + (2 * tick_size))
         
-        # Proximidad activa al VWAP (para disparar inmediatamente en el toque o cruce)
-        en_zona_toque_long = (close_val <= vwap_val + (8 * tick_size))
-        
-        if viene_de_arriba and toco_o_paso_vwap_long and en_zona_toque_long:
+        if previas_confirman_long and abrio_arriba and paso_vwap_long and en_zona_inmediata_long:
             extremo = min(low_val, vwap_val)
             return {
                 "direccion": "LONG",
                 "simbolo": sym,
                 "vela_cruce": vela_actual,
-                "extremo_precio": extremo,  # Nivel de VWAP / extremo del toque
+                "extremo_precio": extremo,
                 "vwap_cruce": vwap_val,
                 "upper_band": float(vela_actual['Upper_Band']),
                 "lower_band": float(vela_actual['Lower_Band'])
             }
 
         # 2. EVALUAR SETUP SHORT (Ventas)
-        # La vela abrió por debajo de VWAP o la vela previa cerró por debajo
-        viene_de_abajo = (open_val < vwap_val) or (open_val <= vwap_val and prev_close <= prev_vwap)
-        toco_o_paso_vwap_short = (high_val >= vwap_val)
+        # Las 2 velas anteriores confirmadas cerraron por debajo de VWAP
+        previas_confirman_short = (p2_close < p2_vwap) and (p1_close < p1_vwap)
+        # Vela actual abrió por debajo o sobre el VWAP
+        abrio_abajo = (open_val <= vwap_val + (1 * tick_size))
+        # Toca o pasa la línea del VWAP hacia arriba
+        paso_vwap_short = (high_val >= vwap_val)
+        # Zona inmediata de paso: apenas pasa la línea (máximo 6 ticks de tolerancia para no vender en subida descontrolada)
+        en_zona_inmediata_short = (vwap_val - (2 * tick_size) <= close_val <= vwap_val + (6 * tick_size))
         
-        # Proximidad activa al VWAP (para disparar inmediatamente en el toque o cruce)
-        en_zona_toque_short = (close_val >= vwap_val - (8 * tick_size))
-        
-        if viene_de_abajo and toco_o_paso_vwap_short and en_zona_toque_short:
+        if previas_confirman_short and abrio_abajo and paso_vwap_short and en_zona_inmediata_short:
             extremo = max(high_val, vwap_val)
             return {
                 "direccion": "SHORT",
                 "simbolo": sym,
                 "vela_cruce": vela_actual,
-                "extremo_precio": extremo,  # Nivel de VWAP / extremo del toque
+                "extremo_precio": extremo,
                 "vwap_cruce": vwap_val,
                 "upper_band": float(vela_actual['Upper_Band']),
                 "lower_band": float(vela_actual['Lower_Band'])
@@ -378,25 +392,27 @@ class AxiomEngine:
         return None
 
     # ==========================================
-    # RISK ENGINE: SL A 10 TICKS Y TP AL 60% DE LA DISTANCIA
+    # RISK ENGINE: SL A 10 TICKS Y TP AL 50% DISTANCIA VWAP-BANDA
     # ==========================================
     def calcular_riesgo_dinamico(self, direccion: str, precio_entrada: float, extremo_precio: float,
-                                 upper_band: float, lower_band: float, sym: str) -> tuple[int, int, float, float]:
+                                 upper_band: float, lower_band: float, sym: str,
+                                 vwap_val: Optional[float] = None) -> tuple[int, int, float, float]:
         """
         Calcula SL y TP:
-        - SL: Exactamente 10 ticks por debajo (LONG) o por encima (SHORT) del VWAP / extremo del toque.
-        - TP: Exactamente al 60% de la distancia desde el precio de entrada hasta la banda correspondiente.
+        - SL: Exactamente 10 ticks fijos desde el precio de entrada.
+        - TP: Exactamente al 50% de la distancia entre el VWAP y la siguiente banda correspondiente
+              (Upper Band para LONG, Lower Band para SHORT). Mínimo 10 ticks.
         """
         spec = SUPPORTED_SYMBOLS.get(sym, {"tickSize": 0.25})
         tick_size = spec.get("tickSize", 0.25)
+        ticks_sl_abs = 10
+        ref_vwap = vwap_val if vwap_val is not None else precio_entrada
         
         if direccion == "LONG":
-            precio_sl = extremo_precio - (10 * tick_size)
-            distancia_sl_puntos = abs(precio_entrada - precio_sl)
-            ticks_sl_abs = max(round(distancia_sl_puntos / tick_size), 10)
+            precio_sl = precio_entrada - (ticks_sl_abs * tick_size)
             
-            # TP al 60% de la distancia a la banda superior
-            distancia_tp_puntos = abs(upper_band - precio_entrada) * 0.60
+            # TP al 50% de la distancia entre VWAP y banda superior
+            distancia_tp_puntos = max(abs(upper_band - ref_vwap) * 0.50, (ticks_sl_abs * tick_size))
             ticks_tp_abs = max(round(distancia_tp_puntos / tick_size), 10)
             precio_tp = precio_entrada + (ticks_tp_abs * tick_size)
             
@@ -404,12 +420,10 @@ class AxiomEngine:
             return -ticks_sl_abs, ticks_tp_abs, precio_sl, precio_tp
             
         else: # SHORT
-            precio_sl = extremo_precio + (10 * tick_size)
-            distancia_sl_puntos = abs(precio_sl - precio_entrada)
-            ticks_sl_abs = max(round(distancia_sl_puntos / tick_size), 10)
+            precio_sl = precio_entrada + (ticks_sl_abs * tick_size)
             
-            # TP al 60% de la distancia a la banda inferior
-            distancia_tp_puntos = abs(precio_entrada - lower_band) * 0.60
+            # TP al 50% de la distancia entre VWAP y banda inferior
+            distancia_tp_puntos = max(abs(ref_vwap - lower_band) * 0.50, (ticks_sl_abs * tick_size))
             ticks_tp_abs = max(round(distancia_tp_puntos / tick_size), 10)
             precio_tp = precio_entrada - (ticks_tp_abs * tick_size)
             
@@ -505,6 +519,7 @@ class AxiomEngine:
             
         direccion = setup["direccion"]
         extremo_precio = setup["extremo_precio"]
+        vwap_cruce = setup.get("vwap_cruce")
         contract_id = self.symbol_states[sym]["contract_id"]
         precio_entrada = float(df.iloc[-1]['Close'])
         
@@ -512,15 +527,16 @@ class AxiomEngine:
             direccion, precio_entrada, extremo_precio,
             float(setup['upper_band']),
             float(setup['lower_band']),
-            sym
+            sym,
+            vwap_cruce
         )
         
-        info_sl = f"SL: {ticks_sl} ticks ({precio_sl:,.2f} | Margen: 10 ticks de extremo {extremo_precio:,.2f})"
-        info_tp = f"TP: {ticks_tp} ticks ({precio_tp:,.2f})"
+        info_sl = f"SL: {ticks_sl} ticks ({precio_sl:,.2f} | 10 ticks fijos)"
+        info_tp = f"TP: {ticks_tp} ticks ({precio_tp:,.2f} | 50% distancia VWAP a Banda)"
         self.log(f"🚨 DISPARANDO {direccion} | Entrada: {precio_entrada:,.2f} | {info_sl} | {info_tp}", "ORDER", sym)
         
         side = 1 if direccion == "SHORT" else 0
-        condicion_str = f"Rechazo VWAP {setup['vwap_cruce']:.2f}. Extremo vela: {extremo_precio:.2f}. SL 10 ticks: {precio_sl:.2f}"
+        condicion_str = f"Rechazo VWAP {setup['vwap_cruce']:.2f} (2V Confirmadas). SL: 10 ticks ({precio_sl:.2f}) | TP 50% Banda: {abs(ticks_tp)} ticks ({precio_tp:.2f})"
         
         try:
             res = self.client.place_order(
@@ -1069,7 +1085,7 @@ class AxiomEngine:
                             setup = self.verificar_setup_vwap(df, sym)
                             if setup:
                                 state["last_executed_candle_ts"] = vela_ts
-                                self.log(f"⚡ [{sym}] ¡Toque de VWAP en vela en proceso detectado ({time_str} UTC)! Abriendo {setup['direccion']} al instante...", "ORDER", sym)
+                                self.log(f"⚡ [{sym}] ¡Paso de VWAP con 2 velas previas de confirmación detectado ({time_str} UTC)! Abriendo {setup['direccion']} al instante...", "ORDER", sym)
                                 self.ejecutar_orden(setup, df, sym)
                     
                     # Pausa de cortesía entre consultas individuales para no saturar la API
