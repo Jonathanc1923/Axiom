@@ -591,6 +591,8 @@ class AxiomEngine:
         direccion = setup["direccion"]
         extremo_precio = setup["extremo_precio"]
         vwap_cruce = setup.get("vwap_cruce")
+        spec = SUPPORTED_SYMBOLS.get(sym, {"tickSize": 0.25})
+        tick_size = spec.get("tickSize", 0.25)
         contract_id = self.symbol_states[sym]["contract_id"]
         precio_entrada = float(df.iloc[-1]['Close'])
         
@@ -607,7 +609,9 @@ class AxiomEngine:
         self.log(f"🚨 DISPARANDO {direccion} | Entrada: {precio_entrada:,.2f} | {info_sl} | {info_tp}", "ORDER", sym)
         
         side = 1 if direccion == "SHORT" else 0
-        condicion_str = f"Mecha VWAP {setup['vwap_cruce']:.2f} ({setup.get('mecha_pts', 0)/tick_size:.0f}t Mecha | Extremo {extremo_precio:.2f}). SL: 10t Mecha ({precio_sl:.2f}) | TP 40% Banda: {abs(ticks_tp)}t ({precio_tp:.2f})"
+        mecha_pts = setup.get("mecha_pts", 0.0)
+        mecha_ticks = round(mecha_pts / tick_size) if tick_size > 0 else 0
+        condicion_str = f"Mecha VWAP {setup['vwap_cruce']:.2f} ({mecha_ticks}t Mecha | Extremo {extremo_precio:.2f}). SL: 10t Mecha ({precio_sl:.2f}) | TP 40% Banda: {abs(ticks_tp)}t ({precio_tp:.2f})"
         
         try:
             res = self.client.place_order(

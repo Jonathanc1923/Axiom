@@ -328,6 +328,7 @@ def calcular_riesgo_dinamico(direccion, precio_entrada, extremo_precio, upper_ba
         return ticks_sl_abs, -ticks_tp_abs, precio_sl, precio_tp
 
 def ejecutar_orden(setup, df):
+    TICK_SIZE = 0.25
     direccion = setup["direccion"]
     extremo_precio = setup["extremo_precio"]
     vwap_cruce = setup.get("vwap_cruce")
