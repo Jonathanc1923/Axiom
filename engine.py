@@ -452,16 +452,16 @@ class AxiomEngine:
         return None
 
     # ==========================================
-    # RISK ENGINE: SL A 10 TICKS DEL VWAP Y TP AL 40% DISTANCIA VWAP-BANDA
+    # RISK ENGINE: SL A 10 TICKS DEL EXTREMO DE LA MECHA Y TP AL 40% DISTANCIA VWAP-BANDA
     # ==========================================
     def calcular_riesgo_dinamico(self, direccion: str, precio_entrada: float, extremo_precio: float,
                                  upper_band: float, lower_band: float, sym: str,
                                  vwap_val: Optional[float] = None) -> tuple[int, int, float, float]:
         """
         Calcula SL y TP:
-        - SL: Exactamente 10 ticks sobre o debajo del VWAP del momento:
-              LONG: 10 ticks por debajo del VWAP (precio_sl = vwap - 10 ticks).
-              SHORT: 10 ticks por encima del VWAP (precio_sl = vwap + 10 ticks).
+        - SL: Exactamente 10 ticks sobre el extremo que alcanzó la mecha:
+              LONG: 10 ticks por debajo del precio más bajo alcanzado por la mecha (precio_sl = low_mecha - 10 ticks).
+              SHORT: 10 ticks por encima del precio más alto alcanzado por la mecha (precio_sl = high_mecha + 10 ticks).
         - TP: 40% de la distancia entre la línea VWAP y la siguiente banda
               si es superior a 10 ticks; de lo contrario, TP estático de 10 ticks.
         """
@@ -470,8 +470,9 @@ class AxiomEngine:
         ref_vwap = vwap_val if vwap_val is not None else precio_entrada
         
         if direccion == "LONG":
-            # SL: 10 ticks por debajo del VWAP del momento
-            precio_sl = ref_vwap - (10 * tick_size)
+            # SL: 10 ticks por debajo del precio más bajo que haya alcanzado la mecha
+            ref_extremo = extremo_precio if extremo_precio is not None else (precio_entrada - (10 * tick_size))
+            precio_sl = ref_extremo - (10 * tick_size)
             distancia_sl_puntos = abs(precio_entrada - precio_sl)
             ticks_sl_abs = max(round(distancia_sl_puntos / tick_size), 10)
             
@@ -485,8 +486,9 @@ class AxiomEngine:
             return -ticks_sl_abs, ticks_tp_abs, precio_sl, precio_tp
             
         else: # SHORT
-            # SL: 10 ticks por encima del VWAP del momento
-            precio_sl = ref_vwap + (10 * tick_size)
+            # SL: 10 ticks por encima del precio más alto que haya alcanzado la mecha
+            ref_extremo = extremo_precio if extremo_precio is not None else (precio_entrada + (10 * tick_size))
+            precio_sl = ref_extremo + (10 * tick_size)
             distancia_sl_puntos = abs(precio_sl - precio_entrada)
             ticks_sl_abs = max(round(distancia_sl_puntos / tick_size), 10)
             
@@ -600,12 +602,12 @@ class AxiomEngine:
             vwap_cruce
         )
         
-        info_sl = f"SL: {abs(ticks_sl)} ticks ({precio_sl:,.2f} | 10 ticks desde VWAP)"
+        info_sl = f"SL: {abs(ticks_sl)} ticks ({precio_sl:,.2f} | 10 ticks desde extremo de mecha)"
         info_tp = f"TP: {abs(ticks_tp)} ticks ({precio_tp:,.2f} | 40% distancia VWAP a Banda / Mín 10t)"
         self.log(f"🚨 DISPARANDO {direccion} | Entrada: {precio_entrada:,.2f} | {info_sl} | {info_tp}", "ORDER", sym)
         
         side = 1 if direccion == "SHORT" else 0
-        condicion_str = f"Mecha VWAP {setup['vwap_cruce']:.2f} ({setup.get('mecha_pts', 0)/tick_size:.0f}t Mecha Confirmada | 2V Previas). SL: 10t VWAP ({precio_sl:.2f}) | TP 40% Banda: {abs(ticks_tp)}t ({precio_tp:.2f})"
+        condicion_str = f"Mecha VWAP {setup['vwap_cruce']:.2f} ({setup.get('mecha_pts', 0)/tick_size:.0f}t Mecha | Extremo {extremo_precio:.2f}). SL: 10t Mecha ({precio_sl:.2f}) | TP 40% Banda: {abs(ticks_tp)}t ({precio_tp:.2f})"
         
         try:
             res = self.client.place_order(

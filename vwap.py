@@ -284,14 +284,14 @@ def verificar_setup_vwap(df, ignore_time_window=False):
     return None
 
 # ==========================================
-# 6. MOTOR DE EJECUCIÓN (SL A 10 TICKS DEL VWAP Y TP AL 40% DISTANCIA VWAP-BANDA)
+# 6. MOTOR DE EJECUCIÓN (SL A 10 TICKS DEL EXTREMO DE LA MECHA Y TP AL 40% DISTANCIA VWAP-BANDA)
 # ==========================================
 def calcular_riesgo_dinamico(direccion, precio_entrada, extremo_precio, upper_band, lower_band, vwap_val=None):
     """
     Calcula SL y TP:
-    - SL: Exactamente 10 ticks sobre o debajo del VWAP del momento:
-          LONG: 10 ticks por debajo del VWAP (precio_sl = vwap - 10 ticks).
-          SHORT: 10 ticks por encima del VWAP (precio_sl = vwap + 10 ticks).
+    - SL: Exactamente 10 ticks sobre el extremo que alcanzó la mecha:
+          LONG: 10 ticks por debajo del precio más bajo alcanzado por la mecha (precio_sl = low_mecha - 10 ticks).
+          SHORT: 10 ticks por encima del precio más alto alcanzado por la mecha (precio_sl = high_mecha + 10 ticks).
     - TP: 40% de la distancia entre la línea VWAP y la siguiente banda
           si es superior a 10 ticks; de lo contrario, TP estático de 10 ticks.
     """
@@ -299,8 +299,9 @@ def calcular_riesgo_dinamico(direccion, precio_entrada, extremo_precio, upper_ba
     ref_vwap = vwap_val if vwap_val is not None else precio_entrada
     
     if direccion == "LONG":
-        # SL: 10 ticks por debajo del VWAP del momento
-        precio_sl = ref_vwap - (10 * TICK_SIZE)
+        # SL: 10 ticks por debajo del precio más bajo que haya alcanzado la mecha
+        ref_extremo = extremo_precio if extremo_precio is not None else (precio_entrada - (10 * TICK_SIZE))
+        precio_sl = ref_extremo - (10 * TICK_SIZE)
         distancia_sl_puntos = abs(precio_entrada - precio_sl)
         ticks_sl_abs = max(round(distancia_sl_puntos / TICK_SIZE), 10)
         
@@ -312,8 +313,9 @@ def calcular_riesgo_dinamico(direccion, precio_entrada, extremo_precio, upper_ba
         
         return -ticks_sl_abs, ticks_tp_abs, precio_sl, precio_tp
     else:
-        # SL: 10 ticks por encima del VWAP del momento
-        precio_sl = ref_vwap + (10 * TICK_SIZE)
+        # SL: 10 ticks por encima del precio más alto que haya alcanzado la mecha
+        ref_extremo = extremo_precio if extremo_precio is not None else (precio_entrada + (10 * TICK_SIZE))
+        precio_sl = ref_extremo + (10 * TICK_SIZE)
         distancia_sl_puntos = abs(precio_sl - precio_entrada)
         ticks_sl_abs = max(round(distancia_sl_puntos / TICK_SIZE), 10)
         
@@ -339,7 +341,7 @@ def ejecutar_orden(setup, df):
         vwap_cruce
     )
     
-    info_sl = f"SL: {abs(ticks_sl)} ticks ({precio_sl:,.2f} | 10 ticks desde VWAP)"
+    info_sl = f"SL: {abs(ticks_sl)} ticks ({precio_sl:,.2f} | 10 ticks desde extremo de mecha)"
     info_tp = f"TP: {abs(ticks_tp)} ticks ({precio_tp:,.2f} | 40% distancia VWAP-Banda / Mín 10t)"
     print(f"[{datetime.now().strftime('%H:%M:%S')}] 🚨 DISPARANDO {direccion} | Entrada: {precio_entrada:,.2f} | {info_sl} | {info_tp}", flush=True)
     
@@ -353,7 +355,7 @@ def ejecutar_orden(setup, df):
         "takeProfitBracket": {"ticks": ticks_tp, "type": 1}
     }
     
-    condicion_str = f"Mecha VWAP {setup['vwap_cruce']:.2f} ({setup.get('mecha_pts', 0)/TICK_SIZE:.0f}t Mecha Confirmada | 2V Previas). SL: 10t VWAP ({precio_sl:.2f}) | TP 40% Banda: {abs(ticks_tp)}t ({precio_tp:.2f})"
+    condicion_str = f"Mecha VWAP {setup['vwap_cruce']:.2f} ({setup.get('mecha_pts', 0)/TICK_SIZE:.0f}t Mecha | Extremo {extremo_precio:.2f}). SL: 10t Mecha ({precio_sl:.2f}) | TP 40% Banda: {abs(ticks_tp)}t ({precio_tp:.2f})"
     
     res = requests.post(f"{API_BASE_URL}/api/Order/place", json=payload, headers=get_headers())
     data = res.json()
