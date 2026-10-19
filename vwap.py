@@ -165,8 +165,8 @@ def verificar_setup_vwap(df):
     p2_vwap = float(vela_prev2['VWAP'])
     
     # 1. SETUP LONG (Compras)
-    t2_arriba = min(float(vela_prev2['Open']), p2_close) > p2_vwap
-    t1_arriba = min(float(vela_prev1['Open']), p1_close) > p1_vwap
+    t2_arriba = float(vela_prev2['Low']) > p2_vwap
+    t1_arriba = float(vela_prev1['Low']) > p1_vwap
     previas_confirman_long = t2_arriba and t1_arriba
     
     abrio_arriba = (open_val >= vwap_val - (1 * TICK_SIZE))
@@ -184,8 +184,8 @@ def verificar_setup_vwap(df):
         }
 
     # 2. SETUP SHORT (Ventas)
-    t2_abajo = max(float(vela_prev2['Open']), p2_close) < p2_vwap
-    t1_abajo = max(float(vela_prev1['Open']), p1_close) < p1_vwap
+    t2_abajo = float(vela_prev2['High']) < p2_vwap
+    t1_abajo = float(vela_prev1['High']) < p1_vwap
     previas_confirman_short = t2_abajo and t1_abajo
     
     abrio_abajo = (open_val <= vwap_val + (1 * TICK_SIZE))
