@@ -58,6 +58,8 @@ class AxiomEngine:
                 "cooldown_until": 0,
                 "latest_candle_time": None,
                 "last_executed_candle_ts": None,
+                "last_executed_1m_ts": None,
+                "last_evaluated_1m_ts": None,
                 "has_open_position": False,
                 "logged_pos_open": False,
                 "last_inoperable_reason": None,
@@ -303,153 +305,181 @@ class AxiomEngine:
         return df
 
     # ==========================================
-    # LOGICAL ENGINE: REAL-TIME WICK REJECTION (WITH 2-CANDLE CONFIRMATION)
+    # LOGICAL ENGINE: 1-MINUTE VWAP ABSORPTION & VOLUME EFFORT
     # ==========================================
-    def verificar_setup_vwap(self, df: pd.DataFrame, sym: str, ignore_time_window: bool = False) -> Optional[Dict[str, Any]]:
+    def verificar_absorcion_vwap_1m(self, df_5m: pd.DataFrame, sym: str, df_1m_override: Optional[pd.DataFrame] = None) -> Optional[Dict[str, Any]]:
         """
-        Detecta en tiempo real segundo a segundo, en cualquier momento durante la formación
-        de la vela de 5m, la presencia confirmada de una MECHA que haya tocado o perforado el VWAP
-        sin que el cuerpo haya cruzado al otro lado (bajas posibilidades de que sea un cuerpo).
+        Estrategia de Absorción Institucional en VWAP (1 Minuto + Esfuerzo de Volumen):
         
-        REGLAS INSTITUCIONALES:
-        1. Confirmación de tendencia previa (2 velas cerradas anteriores t-2 y t-1 en toda su extensión):
-           - LONG: Ambas velas previas estuvieron 100% por encima del VWAP (Low > VWAP).
-           - SHORT: Ambas velas previas estuvieron 100% por debajo del VWAP (High < VWAP).
-        2. Análisis continuo de la vela actual en formación (t):
-           - Se evalúa en cualquier momento desde los primeros segundos de formación (elapsed >= 8s hasta 305s).
-        3. Distinción matemática estricta: MECHA vs CUERPO:
-           - LONG:
-             * Abrió por encima de VWAP: Open >= VWAP - (0.5 * tick_size).
-             * Tocó o perforó el VWAP: Low <= VWAP.
-             * El cuerpo NO cruzó el VWAP: min(Open, Close) >= VWAP - (0.5 * tick_size).
-             * Mecha formada sustancial: min(Open, Close) - Low >= 2 * tick_size.
-             * Rebote activo confirmado: Close - Low >= 2 * tick_size y Close >= VWAP + (1 * tick_size).
-             * Patrón de rechazo absorbido: Close >= Open o mecha_inferior >= tamano_cuerpo * 0.5.
-           - SHORT:
-             * Abrió por debajo de VWAP: Open <= VWAP + (0.5 * tick_size).
-             * Tocó o perforó el VWAP: High >= VWAP.
-             * El cuerpo NO cruzó el VWAP: max(Open, Close) <= VWAP + (0.5 * tick_size).
-             * Mecha formada sustancial: High - max(Open, Close) >= 2 * tick_size.
-             * Rechazo activo confirmado: High - Close >= 2 * tick_size y Close <= VWAP - (1 * tick_size).
-             * Patrón de rechazo absorbido: Close <= Open o mecha_superior >= tamano_cuerpo * 0.5.
+        Cuando el precio se aproxima al VWAP (+-3 ticks), se analiza la última vela cerrada
+        de 1 minuto y se compara su volumen con el promedio de las últimas 10 velas de 1m.
+        
+        CONDICIÓN PARA COMPRA (LONG):
+        1. El precio entró a la zona (mínimo de la vela 1m <= VWAP + 3 ticks).
+        2. Volumen de la vela cerrada >= 1.10 x Promedio de las últimas 10 velas de 1m (+10% esfuerzo).
+        3. RECHAZO CONFIRMADO: La vela cerró POR ENCIMA del VWAP (Close >= VWAP)
+           y dejó mecha inferior (Close > Low + 2 ticks).
+        -> Significado: Hubo esfuerzo vendedor (+10%), pero los compradores absorbieron todo
+           y el precio cerró arriba.
+        -> STOP LOSS: A 10 ticks por debajo del mínimo de esa vela (extremo_precio = Low).
+        
+        CONDICIÓN PARA VENTA (SHORT):
+        1. El precio entró a la zona (máximo de la vela 1m >= VWAP - 3 ticks).
+        2. Volumen de la vela cerrada >= 1.10 x Promedio de las últimas 10 velas de 1m (+10% esfuerzo).
+        3. RECHAZO CONFIRMADO: La vela cerró POR DEBAJO del VWAP (Close <= VWAP)
+           y dejó mecha superior (High - Close >= 2 ticks).
+        -> Significado: Hubo esfuerzo comprador (+10%), pero los vendedores absorbieron todo
+           y el precio cerró abajo.
+        -> STOP LOSS: A 10 ticks por encima del máximo de esa vela (extremo_precio = High).
         """
-        if len(df) < 4:
+        if df_5m is None or len(df_5m) < 1:
             return None
             
         spec = SUPPORTED_SYMBOLS.get(sym, {"tickSize": 0.25})
         tick_size = spec.get("tickSize", 0.25)
         
-        # Vela en proceso (la más reciente) y las 2 velas previas cerradas
-        vela_actual = df.iloc[-1]
-        vela_prev1 = df.iloc[-2]  # Vela previa (t-1)
-        vela_prev2 = df.iloc[-3]  # Vela anteprevia (t-2)
+        vela_5m = df_5m.iloc[-1]
+        vwap_val = float(vela_5m['VWAP'])
+        zona_ticks = 3 * tick_size
         
-        # 1. Filtro temporal: La vela debe tener al menos 8 segundos de vida y no haber expirado (> 305s)
-        if not ignore_time_window:
-            now_utc = datetime.now(timezone.utc)
-            vela_ts = vela_actual['Timestamp']
-            if getattr(vela_ts, 'tzinfo', None) is None:
-                vela_ts = vela_ts.replace(tzinfo=timezone.utc)
-            elapsed_sec = (now_utc - vela_ts).total_seconds()
+        # 1. Filtro previo de Zona Caliente en 5m:
+        # Verificar si la vela actual de 5m ha tocado o está dentro de VWAP +- 3 ticks
+        en_zona_5m_long = float(vela_5m['Low']) <= vwap_val + zona_ticks
+        en_zona_5m_short = float(vela_5m['High']) >= vwap_val - zona_ticks
+        if not (en_zona_5m_long or en_zona_5m_short):
+            return None
             
-            # Apertura operable en cualquier segundo desde que arranca la vela (mínimo 8s para asentar datos)
-            if elapsed_sec < 8 or elapsed_sec > 305:
+        # 2. Obtener velas de 1 minuto (TopstepX History o test override)
+        if df_1m_override is not None:
+            df_1m = df_1m_override
+        else:
+            state = self.symbol_states.get(sym, {})
+            contract_id = state.get("contract_id")
+            if not contract_id:
                 return None
+            df_1m = self.client.retrieve_bars(contract_id, unit=2, unit_number=1, limit=18, days_back=1)
+            
+        if df_1m is None or df_1m.empty or len(df_1m) < 11:
+            return None
+            
+        # TopstepX retrieve_bars con includePartialBar=True retorna la vela en formación en el último índice [-1].
+        # La vela cerrada que acaba de completarse es [-2] si len >= 12, o [-1] si se pasa un dataset sin vela parcial.
+        if df_1m_override is not None and len(df_1m) == 11:
+            vela_cerrada = df_1m.iloc[-1]
+            ventana_10 = df_1m.iloc[-11:-1]
+        else:
+            vela_cerrada = df_1m.iloc[-2]
+            ventana_10 = df_1m.iloc[-12:-2]
+            
+        vela_ts = vela_cerrada['Timestamp']
+        state = self.symbol_states.get(sym, {})
         
-        vwap_val = float(vela_actual['VWAP'])
-        open_val = float(vela_actual['Open'])
-        close_val = float(vela_actual['Close'])
-        low_val = float(vela_actual['Low'])
-        high_val = float(vela_actual['High'])
+        # Deduplicación: evitar re-evaluar la misma vela de 1m cerrada en múltiples consultas por segundo
+        if df_1m_override is None:
+            if state.get("last_evaluated_1m_ts") == vela_ts:
+                return None
+            if state.get("last_executed_1m_ts") == vela_ts:
+                return None
+
+        # 3. MÓDULO DE VOLUMEN (Esfuerzo en contratos):
+        # Promedio de las últimas 10 velas cerradas previas
+        promedio_vol_10 = float(ventana_10['Volume'].mean())
+        vol_cerrada = float(vela_cerrada['Volume'])
         
-        p1_vwap = float(vela_prev1['VWAP'])
-        p2_vwap = float(vela_prev2['VWAP'])
+        # Umbral: al menos 10% más contratos que el promedio de las 10 velas previas
+        umbral_esfuerzo = 1.10 * promedio_vol_10
+        esfuerzo_grande = (vol_cerrada >= umbral_esfuerzo) if promedio_vol_10 > 0 else True
         
-        # 1. EVALUAR SETUP LONG (Compras)
-        # 2 velas previas 100% por encima de VWAP en toda su extensión
-        t2_arriba = float(vela_prev2['Low']) > p2_vwap
-        t1_arriba = float(vela_prev1['Low']) > p1_vwap
-        previas_confirman_long = t2_arriba and t1_arriba
+        if not esfuerzo_grande:
+            if df_1m_override is None:
+                state["last_evaluated_1m_ts"] = vela_ts
+            return None
+            
+        # 4. MÓDULO DE ACCIÓN DE PRECIO (Mecha y Rechazo):
+        o_1m = float(vela_cerrada['Open'])
+        h_1m = float(vela_cerrada['High'])
+        l_1m = float(vela_cerrada['Low'])
+        c_1m = float(vela_cerrada['Close'])
+        rvol = (vol_cerrada / promedio_vol_10) if promedio_vol_10 > 0 else 1.0
+
+        # CASO COMPRA (LONG):
+        # 1. El precio entró a la zona: mínimo <= VWAP + 3 ticks
+        # 2. Cerró por encima del VWAP y el cuerpo no cruzó hacia abajo: min(Open, Close) >= VWAP
+        # 3. Dejó mecha inferior: Close > Low + 2 ticks
+        toco_zona_long = (l_1m <= vwap_val + zona_ticks)
+        cerro_arriba_long = (min(o_1m, c_1m) >= vwap_val - (0.5 * tick_size))
+        mecha_inf = c_1m - l_1m
+        mecha_confirmada_long = (mecha_inf >= 2 * tick_size)
         
-        # A. La vela abrió por encima del VWAP
-        abrio_arriba = (open_val >= vwap_val - (0.5 * tick_size))
+        # CASO VENTA (SHORT):
+        # 1. El precio entró a la zona: máximo >= VWAP - 3 ticks
+        # 2. Cerró por debajo del VWAP y el cuerpo no cruzó hacia arriba: max(Open, Close) <= VWAP
+        # 3. Dejó mecha superior: High - Close >= 2 ticks
+        toco_zona_short = (h_1m >= vwap_val - zona_ticks)
+        cerro_abajo_short = (max(o_1m, c_1m) <= vwap_val + (0.5 * tick_size))
+        mecha_sup = h_1m - c_1m
+        mecha_confirmada_short = (mecha_sup >= 2 * tick_size)
         
-        # B. En algún momento transcurrido, tocó o perforó el VWAP
-        mecha_toco_vwap_long = (low_val <= vwap_val)
+        es_long = toco_zona_long and cerro_arriba_long and mecha_confirmada_long
+        es_short = toco_zona_short and cerro_abajo_short and mecha_confirmada_short
         
-        # C. El cuerpo actual NO está cruzando el VWAP (todo el cuerpo está por encima)
-        cuerpo_bajo = min(open_val, close_val)
-        cuerpo_no_cruzo_long = (cuerpo_bajo >= vwap_val - (0.5 * tick_size))
-        
-        # D. Confirmación de MECHA vs CUERPO (Bajas posibilidades de que sea cuerpo):
-        mecha_inferior = cuerpo_bajo - low_val
-        mecha_sustancial_long = (mecha_inferior >= 2 * tick_size)
-        rebote_confirmado_long = (close_val - low_val >= 2 * tick_size)
-        precio_seguro_long = (close_val >= vwap_val + (1 * tick_size))
-        tamano_cuerpo_long = abs(close_val - open_val)
-        patron_rechazo_long = (close_val >= open_val) or (mecha_inferior >= tamano_cuerpo_long * 0.5)
-        
-        # E. Proximidad de entrada: el precio actual no se ha ido excesivamente lejos del VWAP
-        en_zona_entrada_long = (close_val <= vwap_val + max(12 * tick_size, abs(float(vela_actual['Upper_Band']) - vwap_val) * 0.40))
-        
-        if (previas_confirman_long and abrio_arriba and mecha_toco_vwap_long and 
-            cuerpo_no_cruzo_long and mecha_sustancial_long and rebote_confirmado_long and 
-            precio_seguro_long and patron_rechazo_long and en_zona_entrada_long):
-            extremo = min(low_val, vwap_val)
+        # Si ambas fueran técnicamente verdaderas, desempatar por el lado hacia donde cerró la vela
+        if es_long and es_short:
+            if c_1m > vwap_val:
+                es_short = False
+            elif c_1m < vwap_val:
+                es_long = False
+            elif mecha_inf >= mecha_sup:
+                es_short = False
+            else:
+                es_long = False
+                
+        if es_long:
+            if df_1m_override is None:
+                state["last_evaluated_1m_ts"] = vela_ts
             return {
                 "direccion": "LONG",
                 "simbolo": sym,
-                "vela_cruce": vela_actual,
-                "extremo_precio": extremo,
+                "vela_cruce": vela_cerrada,
+                "vela_5m": vela_5m,
+                "extremo_precio": l_1m, # Mínimo de la vela para el Stop Loss
                 "vwap_cruce": vwap_val,
-                "upper_band": float(vela_actual['Upper_Band']),
-                "lower_band": float(vela_actual['Lower_Band']),
-                "mecha_pts": mecha_inferior
+                "upper_band": float(vela_5m['Upper_Band']),
+                "lower_band": float(vela_5m['Lower_Band']),
+                "volumen_1m": vol_cerrada,
+                "promedio_vol_10": promedio_vol_10,
+                "rvol": rvol,
+                "mecha_pts": mecha_inf,
+                "timestamp_1m": vela_ts
             }
-
-        # 2. EVALUAR SETUP SHORT (Ventas)
-        # 2 velas previas 100% por debajo de VWAP en toda su extensión
-        t2_abajo = float(vela_prev2['High']) < p2_vwap
-        t1_abajo = float(vela_prev1['High']) < p1_vwap
-        previas_confirman_short = t2_abajo and t1_abajo
-        
-        # A. La vela abrió por debajo del VWAP
-        abrio_abajo = (open_val <= vwap_val + (0.5 * tick_size))
-        
-        # B. En algún momento transcurrido, tocó o perforó el VWAP
-        mecha_toco_vwap_short = (high_val >= vwap_val)
-        
-        # C. El cuerpo actual NO está cruzando el VWAP (todo el cuerpo está por debajo)
-        cuerpo_alto = max(open_val, close_val)
-        cuerpo_no_cruzo_short = (cuerpo_alto <= vwap_val + (0.5 * tick_size))
-        
-        # D. Confirmación de MECHA vs CUERPO (Bajas posibilidades de que sea cuerpo):
-        mecha_superior = high_val - cuerpo_alto
-        mecha_sustancial_short = (mecha_superior >= 2 * tick_size)
-        rechazo_confirmado_short = (high_val - close_val >= 2 * tick_size)
-        precio_seguro_short = (close_val <= vwap_val - (1 * tick_size))
-        tamano_cuerpo_short = abs(close_val - open_val)
-        patron_rechazo_short = (close_val <= open_val) or (mecha_superior >= tamano_cuerpo_short * 0.5)
-        
-        # E. Proximidad de entrada: el precio actual no se ha ido excesivamente lejos del VWAP
-        en_zona_entrada_short = (close_val >= vwap_val - max(12 * tick_size, abs(vwap_val - float(vela_actual['Lower_Band'])) * 0.40))
-        
-        if (previas_confirman_short and abrio_abajo and mecha_toco_vwap_short and 
-            cuerpo_no_cruzo_short and mecha_sustancial_short and rechazo_confirmado_short and 
-            precio_seguro_short and patron_rechazo_short and en_zona_entrada_short):
-            extremo = max(high_val, vwap_val)
+            
+        if es_short:
+            if df_1m_override is None:
+                state["last_evaluated_1m_ts"] = vela_ts
             return {
                 "direccion": "SHORT",
                 "simbolo": sym,
-                "vela_cruce": vela_actual,
-                "extremo_precio": extremo,
+                "vela_cruce": vela_cerrada,
+                "vela_5m": vela_5m,
+                "extremo_precio": h_1m, # Máximo de la vela para el Stop Loss
                 "vwap_cruce": vwap_val,
-                "upper_band": float(vela_actual['Upper_Band']),
-                "lower_band": float(vela_actual['Lower_Band']),
-                "mecha_pts": mecha_superior
+                "upper_band": float(vela_5m['Upper_Band']),
+                "lower_band": float(vela_5m['Lower_Band']),
+                "volumen_1m": vol_cerrada,
+                "promedio_vol_10": promedio_vol_10,
+                "rvol": rvol,
+                "mecha_pts": mecha_sup,
+                "timestamp_1m": vela_ts
             }
-
+            
+        if df_1m_override is None:
+            state["last_evaluated_1m_ts"] = vela_ts
+            
         return None
+
+    def verificar_setup_vwap(self, df: pd.DataFrame, sym: str, ignore_time_window: bool = False) -> Optional[Dict[str, Any]]:
+        """Fallback compatible hacia el motor de absorción institucional de 1 minuto."""
+        return self.verificar_absorcion_vwap_1m(df, sym)
 
     # ==========================================
     # RISK ENGINE: SL A 10 TICKS DEL EXTREMO DE LA MECHA Y TP AL 40% DISTANCIA VWAP-BANDA
@@ -611,7 +641,8 @@ class AxiomEngine:
         side = 1 if direccion == "SHORT" else 0
         mecha_pts = setup.get("mecha_pts", 0.0)
         mecha_ticks = round(mecha_pts / tick_size) if tick_size > 0 else 0
-        condicion_str = f"Mecha VWAP {setup['vwap_cruce']:.2f} ({mecha_ticks}t Mecha | Extremo {extremo_precio:.2f}). SL: 10t Mecha ({precio_sl:.2f}) | TP 40% Banda: {abs(ticks_tp)}t ({precio_tp:.2f})"
+        rvol_info = f" | +{(setup['rvol']-1.0)*100:.1f}% Vol" if "rvol" in setup else ""
+        condicion_str = f"Absorcion VWAP 1m {setup['vwap_cruce']:.2f} ({mecha_ticks}t Mecha{rvol_info} | Extremo {extremo_precio:.2f}). SL: 10t Mecha ({precio_sl:.2f}) | TP 40% Banda: {abs(ticks_tp)}t ({precio_tp:.2f})"
         
         try:
             res = self.client.place_order(
@@ -1148,7 +1179,7 @@ class AxiomEngine:
                             if self.tiene_posicion_abierta(sym):
                                 continue
 
-                            # 3. Control de ejecución: Máximo 1 operación por vela
+                            # 3. Control de ejecución: Máximo 1 operación por ciclo
                             if state.get("last_executed_candle_ts") == vela_ts:
                                 continue
 
@@ -1156,11 +1187,19 @@ class AxiomEngine:
                             if time.time() < state["cooldown_until"]:
                                 continue
 
-                            # 5. Evaluación continua segundo a segundo: confirmación de mecha en VWAP
-                            setup = self.verificar_setup_vwap(df, sym)
+                            # 5. Evaluación de Absorción Institucional en VWAP (1m + Esfuerzo Volumen >= 1.10x)
+                            setup = self.verificar_absorcion_vwap_1m(df, sym)
                             if setup:
                                 state["last_executed_candle_ts"] = vela_ts
-                                self.log(f"⚡ [{sym}] ¡Mecha de rechazo en VWAP confirmada en tiempo real ({time_str} UTC)! Abriendo {setup['direccion']}...", "ORDER", sym)
+                                state["last_executed_1m_ts"] = setup.get("timestamp_1m")
+                                time_1m = setup["timestamp_1m"].strftime('%H:%M') if setup.get("timestamp_1m") else time_str
+                                rvol_pct = (setup.get("rvol", 1.0) - 1.0) * 100
+                                self.log(
+                                    f"⚡ [{sym}] ¡Absorción en VWAP confirmada en vela 1m ({time_1m} UTC)! "
+                                    f"Vol: {setup['volumen_1m']:,.0f} vs Prom(10m): {setup['promedio_vol_10']:,.0f} ({rvol_pct:+.1f}%). "
+                                    f"Extremo: {setup['extremo_precio']:.2f}. Abriendo {setup['direccion']}...",
+                                    "ORDER", sym
+                                )
                                 self.ejecutar_orden(setup, df, sym)
                     
                     # Pausa de cortesía entre consultas individuales para no saturar la API
