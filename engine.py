@@ -749,6 +749,161 @@ class AxiomEngine:
     # ==========================================
     # ACTIVE TRADE MANAGEMENT & BREAK-EVEN ENGINE
     # ==========================================
+    def sincronizar_posiciones_activas_cuenta(self):
+        """
+        Sondeo global de posiciones abiertas en la cuenta TopstepX (cada 2 segundos).
+        Actualiza has_open_position en cada símbolo y vincula contratos activos dinámicamente.
+        """
+        if not self.account_id:
+            return
+            
+        now = time.time()
+        if now - getattr(self, "_last_pos_sync", 0.0) < 2.0:
+            return
+        self._last_pos_sync = now
+        
+        try:
+            positions = self.client.get_open_positions(self.account_id)
+            active_symbols = set()
+            for p in positions:
+                raw_size = abs(int(p.get("size", 0)))
+                if raw_size > 0:
+                    cid = str(p.get("contractId", ""))
+                    sym = self.resolve_symbol_from_contract(cid)
+                    active_symbols.add(sym)
+                    if sym in self.symbol_states:
+                        st = self.symbol_states[sym]
+                        st["has_open_position"] = True
+                        if not st.get("contract_id"):
+                            st["contract_id"] = cid
+                            
+            for sym, st in self.symbol_states.items():
+                if sym not in active_symbols:
+                    if st.get("has_open_position") and not st.get("active_trade"):
+                        st["has_open_position"] = False
+        except Exception:
+            pass
+
+    def adoptar_posicion_abierta(self, sym: str, df: Optional[pd.DataFrame] = None) -> Optional[Dict[str, Any]]:
+        """
+        Adopta y vincula automáticamente cualquier posición abierta existente en TopstepX para el símbolo dado,
+        incluso si fue abierta manualmente desde la web de TopstepX o si el bot acaba de reiniciarse.
+        """
+        if not self.account_id:
+            return None
+            
+        state = self.symbol_states.get(sym, {})
+        spec = SUPPORTED_SYMBOLS.get(sym, {"tickSize": 0.25})
+        tick_size = spec.get("tickSize", 0.25)
+        
+        try:
+            positions = self.client.get_open_positions(self.account_id)
+            target_pos = None
+            for p in positions:
+                cid = str(p.get("contractId", ""))
+                psym = self.resolve_symbol_from_contract(cid)
+                psize = abs(int(p.get("size", 0)))
+                if psize > 0 and (psym == sym or cid == state.get("contract_id")):
+                    target_pos = p
+                    break
+                    
+            if not target_pos:
+                state["has_open_position"] = False
+                return None
+                
+            contract_id = target_pos.get("contractId")
+            entry_price = float(target_pos.get("averagePrice", 0.0))
+            raw_size = int(target_pos.get("size", 0))
+            pos_type = int(target_pos.get("type", 0))
+            
+            direccion = "LONG" if (pos_type == 1 or raw_size > 0) else "SHORT"
+            
+            # Buscar órdenes Stop (SL) y Limit (TP) asociadas en TopstepX
+            open_orders = self.client.search_open_orders(self.account_id)
+            sl_order = None
+            tp_order = None
+            
+            for o in open_orders:
+                if str(o.get("contractId", "")) == str(contract_id):
+                    otype = int(o.get("type", 0))
+                    if otype == 4:
+                        sl_order = o
+                    elif otype == 1:
+                        tp_order = o
+                        
+            # Determinar precio de SL y TP
+            if sl_order and sl_order.get("stopPrice") is not None:
+                current_sl_price = float(sl_order["stopPrice"])
+                sl_order_id = sl_order.get("id")
+            else:
+                default_sl_pts = spec.get("defaultSlPoints", 5 * tick_size)
+                current_sl_price = (entry_price - default_sl_pts) if direccion == "LONG" else (entry_price + default_sl_pts)
+                sl_order_id = "N/A"
+                
+            if tp_order and tp_order.get("limitPrice") is not None:
+                tp_price = float(tp_order["limitPrice"])
+                tp_order_id = tp_order.get("id")
+            else:
+                default_tp_pts = 10 * tick_size
+                tp_price = (entry_price + default_tp_pts) if direccion == "LONG" else (entry_price - default_tp_pts)
+                tp_order_id = "N/A"
+                
+            recorrido_tp_pts = abs(tp_price - entry_price)
+            tp_ticks = round(recorrido_tp_pts / tick_size) if tick_size > 0 else 0
+            sl_ticks = round(abs(entry_price - current_sl_price) / tick_size) if tick_size > 0 else 0
+            
+            # Evaluar si el SL actual ya corresponde a algún hito avanzado
+            initial_stage = 0
+            if recorrido_tp_pts > 0:
+                if direccion == "LONG":
+                    if current_sl_price >= entry_price + (recorrido_tp_pts * 0.55):
+                        initial_stage = 3
+                    elif current_sl_price >= entry_price + (recorrido_tp_pts * 0.30):
+                        initial_stage = 2
+                    elif current_sl_price >= entry_price:
+                        initial_stage = 1
+                else: # SHORT
+                    if current_sl_price <= entry_price - (recorrido_tp_pts * 0.55):
+                        initial_stage = 3
+                    elif current_sl_price <= entry_price - (recorrido_tp_pts * 0.30):
+                        initial_stage = 2
+                    elif current_sl_price <= entry_price:
+                        initial_stage = 1
+                        
+            adopted_trade = {
+                "symbol": sym,
+                "contract_id": contract_id,
+                "direction": direccion,
+                "entry_price": entry_price,
+                "tp_price": tp_price,
+                "initial_sl_price": current_sl_price,
+                "current_sl_price": current_sl_price,
+                "sl_ticks": sl_ticks,
+                "tp_ticks": tp_ticks,
+                "sl_stage": initial_stage,
+                "order_id": target_pos.get("id", "ADOPTADO"),
+                "sl_order_id": sl_order_id,
+                "tp_order_id": tp_order_id,
+                "size": abs(raw_size),
+                "last_check_time": 0.0,
+                "adopted": True
+            }
+            
+            state["active_trade"] = adopted_trade
+            state["has_open_position"] = True
+            state["contract_id"] = contract_id
+            
+            self.log(
+                f"🎯 [{sym}] ¡Posición abierta adoptada automáticamente en TopstepX! "
+                f"Dirección: {direccion} | Entrada: {entry_price:.2f} | SL: {current_sl_price:.2f} | TP: {tp_price:.2f} "
+                f"(Hito inicial: {initial_stage}) | Contrato: {contract_id}.",
+                "ORDER", sym
+            )
+            return adopted_trade
+        except Exception as e:
+            self.log(f"⚠️ Error al intentar adoptar posición abierta para {sym}: {e}", "ERROR", sym)
+            return None
+
     def monitorear_posicion_abierta(self, sym: str, df: pd.DataFrame):
         """
         Analiza cada 2 segundos de manera independiente la operación abierta del símbolo:
@@ -763,8 +918,12 @@ class AxiomEngine:
         """
         state = self.symbol_states.get(sym, {})
         trade = state.get("active_trade")
+        
+        # Si no hay trade en memoria, verificar si existe una posición abierta en TopstepX para adoptarla
         if not trade:
-            return
+            trade = self.adoptar_posicion_abierta(sym, df)
+            if not trade:
+                return
 
         now = time.time()
         if now - trade.get("last_check_time", 0.0) < 1.8:
@@ -779,10 +938,15 @@ class AxiomEngine:
             state["has_open_position"] = False
             return
 
-        if df is None or df.empty:
+        precio_actual = None
+        if df is not None and not df.empty:
+            precio_actual = float(df.iloc[-1]['Close'])
+        elif state.get("telemetry", {}).get("close"):
+            precio_actual = float(state["telemetry"]["close"])
+
+        if precio_actual is None:
             return
 
-        precio_actual = float(df.iloc[-1]['Close'])
         trade["current_price"] = precio_actual
         direccion = trade["direction"]
         precio_entrada = trade["entry_price"]
@@ -836,7 +1000,15 @@ class AxiomEngine:
             nuevo_stage = 1
             motivo_hito = f"HITO 1 (40% TP) | Moviendo SL a Break-Even ({sl_h1:.2f}) | Riesgo Cero"
 
+        # Validación estricta: Jamás retroceder el Stop Loss
+        es_mejora = False
         if nuevo_sl is not None and nuevo_stage > sl_stage:
+            if direccion == "LONG" and (sl_actual is None or nuevo_sl > sl_actual):
+                es_mejora = True
+            elif direccion == "SHORT" and (sl_actual is None or nuevo_sl < sl_actual):
+                es_mejora = True
+
+        if es_mejora:
             trade["sl_stage"] = nuevo_stage
             trade["current_sl_price"] = nuevo_sl
             contract_id = trade["contract_id"]
@@ -871,7 +1043,7 @@ class AxiomEngine:
                 return
 
     def mover_sl_en_topstep(self, contract_id: str, nuevo_sl: float, sym: str) -> bool:
-        """Localiza la orden Stop activa en TopstepX para el contrato y modifica su precio a nuevo_sl."""
+        """Localiza la orden Stop activa en TopstepX para el contrato y modifica su stopPrice a nuevo_sl."""
         if not self.account_id:
             return False
             
@@ -892,15 +1064,15 @@ class AxiomEngine:
                 res = self.client.modify_order(
                     account_id=self.account_id,
                     order_id=order_id,
-                    price=nuevo_sl,
-                    trigger_price=nuevo_sl,
+                    stop_price=nuevo_sl,
                     size=size
                 )
                 if res.get("success"):
                     self.log(f"✅ [{sym}] Orden Stop #{order_id} modificada con éxito en TopstepX a {nuevo_sl:.2f}.", "ORDER", sym)
                     return True
                 else:
-                    self.log(f"⚠️ [{sym}] Respuesta al modificar orden #{order_id} en TopstepX: {res.get('errorMessage')}", "ERROR", sym)
+                    err_msg = res.get('errorMessage') or f"Código {res.get('errorCode')}"
+                    self.log(f"⚠️ [{sym}] Respuesta al modificar orden #{order_id} en TopstepX: {err_msg}", "ERROR", sym)
             else:
                 self.log(f"ℹ️ [{sym}] No se encontró orden Stop abierta en TopstepX. Nivel protegido resguardado por software en {nuevo_sl:.2f}.", "SYSTEM", sym)
         except Exception as e:
@@ -956,16 +1128,19 @@ class AxiomEngine:
     # BLACK BOX RECORDING & REAL TOPSTEP SYNCHRONIZATION
     # ==========================================
     def resolve_symbol_from_contract(self, contract_id: str) -> str:
-        """Determina el símbolo estándar (ES, NQ, GC, CL, etc.) a partir del contractId de TopstepX."""
+        """Determina el símbolo estándar (ES, NQ, GC, CL, MCL, etc.) a partir del contractId de TopstepX."""
         c = str(contract_id).upper()
         for sym, state in self.symbol_states.items():
-            if state.get("contract_id") and state["contract_id"] == contract_id:
+            if state.get("contract_id") and str(state["contract_id"]).upper() == c:
                 return sym
                 
         prefix_map = [
             (".EP.", "ES"), (".MES.", "MES"), (".ENQ.", "NQ"), (".MNQ.", "MNQ"),
             (".YM.", "YM"), (".MYM.", "MYM"), (".RTY.", "RTY"), (".M2K.", "M2K"),
-            (".GCE.", "GC"), (".MGC.", "MGC"), (".CLE.", "CL"), (".MCLE.", "MCL")
+            (".GCE.", "GC"), (".MGC.", "MGC"), (".CLE.", "CL"), (".MCLE.", "MCL"),
+            ("MCLE", "MCL"), ("CLE", "CL"), ("MGC", "MGC"), ("GCE", "GC"),
+            ("M2K", "M2K"), ("RTY", "RTY"), ("MYM", "MYM"), ("YM", "YM"),
+            ("MNQ", "MNQ"), ("ENQ", "NQ"), ("MES", "MES"), ("EP", "ES"), ("MCL", "MCL")
         ]
         for pfx, s in prefix_map:
             if pfx in c:
@@ -1339,7 +1514,10 @@ class AxiomEngine:
                     except Exception as e:
                         self.log(f"⚠️ Error en sincronización horaria de TopstepX: {e}", "ERROR")
 
-                # 1. Monitorear los símbolos con control inteligente de tasa (Rate Limit)
+                # 1. Sincronización global rápida de posiciones en la cuenta TopstepX
+                self.sincronizar_posiciones_activas_cuenta()
+
+                # 2. Monitorear los símbolos con control inteligente de tasa (Rate Limit)
                 symbols_to_query = list(SUPPORTED_SYMBOLS.keys())
                 now_poll = time.time()
                 
@@ -1354,11 +1532,12 @@ class AxiomEngine:
                         
                     is_enabled = state.get("enabled", False)
                     is_active_view = (sym == self.active_symbol)
+                    has_open_pos = state.get("has_open_position", False) or (state.get("active_trade") is not None)
                     
                     # Control inteligente de frecuencia:
-                    # - Símbolos activos o en pantalla: sondeo prioritario cada 2.0 segundos (alta frecuencia segundo a segundo).
-                    # - Símbolos inactivos (apagados): sondeo de baja frecuencia cada 60 segundos.
-                    min_interval = 2.0 if (is_enabled or is_active_view) else 60.0
+                    # - Símbolos activos, en pantalla o con POSICIÓN ABIERTA: sondeo prioritario cada 2.0 segundos.
+                    # - Símbolos inactivos sin posición: sondeo de baja frecuencia cada 60 segundos.
+                    min_interval = 2.0 if (is_enabled or is_active_view or has_open_pos) else 60.0
                     if (now_poll - state.get("last_poll_time", 0.0)) < min_interval:
                         continue
                     state["last_poll_time"] = now_poll
@@ -1397,21 +1576,15 @@ class AxiomEngine:
                         if is_enabled or is_active_view:
                             self.log(f"📊 {sym}: {vela_actual['Close']:,.2f} | 🔴 Sup: {vela_actual['Upper_Band']:,.2f} | 🔵 VWAP: {vela_actual['VWAP']:,.2f} | 🟢 Inf: {vela_actual['Lower_Band']:,.2f} | Dist: {dist_vwap:+.2f} pts", "TELEMETRY", sym)
                         
-                        # 2. Evaluación de Trading Autónomo en Tiempo Real (mientras la vela está en proceso)
+                        # 2. Evaluación de Trading Autónomo y Gestión de Posición
+                        # A. Monitoreo prioritario de operaciones abiertas (cada 2 segundos de forma independiente para CUALQUIER símbolo con posición)
+                        if has_open_pos or self.tiene_posicion_abierta(sym):
+                            self.monitorear_posicion_abierta(sym, df)
+                            continue
+
+                        # B. Evaluación de NUEVAS operaciones para símbolos habilitados:
                         if is_enabled:
                             vela_actual = df.iloc[-1]
-                            vela_ts = vela_actual['Timestamp']
-                            time_str = vela_ts.strftime('%H:%M')
-                            
-                            # Si detectamos una nueva vela 5m iniciada, emitimos notificación
-                            if state.get("current_active_candle_ts") != vela_ts:
-                                state["current_active_candle_ts"] = vela_ts
-                                self.log(f"🕯️ [{sym}] Vela 5m activa ({time_str} UTC). Monitoreando zona VWAP y absorción...", "SETUP", sym)
-
-                            # A. Monitoreo prioritario de operaciones abiertas (cada 2 segundos de forma independiente)
-                            if state.get("active_trade") or self.tiene_posicion_abierta(sym):
-                                self.monitorear_posicion_abierta(sym, df)
-                                continue
 
                             # B. Filtros de entrada para NUEVAS operaciones:
                             # 1. Filtro institucional de sesión CME (primeras 2 horas tras la apertura: 18:00-20:00 ET y receso diario)

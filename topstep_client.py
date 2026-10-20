@@ -274,18 +274,30 @@ class TopstepClient:
         res.raise_for_status()
         return res.json()
 
-    def modify_order(self, account_id: int, order_id: int, price: Optional[float] = None,
-                     trigger_price: Optional[float] = None, size: int = 1) -> Dict[str, Any]:
-        """Modifica una orden existente en TopstepX (por ejemplo, para mover el Stop Loss a Break-Even)."""
+    def modify_order(self, account_id: int, order_id: int, 
+                     stop_price: Optional[float] = None,
+                     limit_price: Optional[float] = None,
+                     price: Optional[float] = None,
+                     trigger_price: Optional[float] = None,
+                     size: int = 1) -> Dict[str, Any]:
+        """
+        Modifica una orden existente en TopstepX según el esquema oficial Swagger:
+        - Para órdenes Stop (Tipo 4): envía 'stopPrice'.
+        - Para órdenes Limit (Tipo 1): envía 'limitPrice'.
+        """
         payload = {
             "accountId": int(account_id),
             "orderId": int(order_id),
             "size": int(size)
         }
-        if price is not None:
-            payload["price"] = float(price)
-        if trigger_price is not None:
-            payload["triggerPrice"] = float(trigger_price)
+        
+        target_stop = stop_price if stop_price is not None else trigger_price
+        target_limit = limit_price if limit_price is not None else price
+        
+        if target_stop is not None:
+            payload["stopPrice"] = float(target_stop)
+        if target_limit is not None:
+            payload["limitPrice"] = float(target_limit)
             
         url = f"{self.base_url}/api/Order/modify"
         try:

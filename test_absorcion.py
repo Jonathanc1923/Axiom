@@ -223,5 +223,71 @@ class TestAbsorcionVWAP(unittest.TestCase):
         self.assertIsNone(self.engine.symbol_states["ES"]["active_trade"])
         self.assertFalse(self.engine.symbol_states["ES"]["has_open_position"])
 
+    def test_auto_adopcion_posicion_manual_mcl(self):
+        """
+        Verifica el caso exacto reportado por el usuario:
+        Una operación Short en MCL abierta en 98.12 con SL en 98.32 y TP en 97.50.
+        El bot la detecta y adopta automáticamente, y al llegar el precio a 97.77 (>50% de TP),
+        dispara el Hito 1 moviendo el SL a Break-Even + 1 tick (98.11) enviando stopPrice a TopstepX.
+        """
+        contract_mcl = "CON.F.US.MCLE.Z26"
+        self.mock_client.get_open_positions.return_value = [{
+            "id": 11111,
+            "accountId": 12345,
+            "contractId": contract_mcl,
+            "type": 2, # Short
+            "size": -1,
+            "averagePrice": 98.12
+        }]
+        self.mock_client.search_open_orders.return_value = [
+            {"id": 3663652569, "contractId": contract_mcl, "type": 4, "size": 1, "stopPrice": 98.32},
+            {"id": 3663652570, "contractId": contract_mcl, "type": 1, "size": 1, "limitPrice": 97.50}
+        ]
+        self.mock_client.modify_order.return_value = {"success": True, "errorCode": 0}
+
+        # Inicialmente no hay active_trade en memoria
+        self.engine.symbol_states["MCL"]["active_trade"] = None
+        self.engine.symbol_states["MCL"]["has_open_position"] = True
+
+        # Precio de mercado llega a 97.77 (98.12 - 97.77 = 0.35 pts de ganancia; TP total es 98.12 - 97.50 = 0.62 pts; 56.5% de avance)
+        df_mcl = pd.DataFrame([{'Close': 97.77}])
+        self.engine.monitorear_posicion_abierta("MCL", df_mcl)
+
+        trade = self.engine.symbol_states["MCL"]["active_trade"]
+        self.assertIsNotNone(trade, "La posición en MCL debe haber sido adoptada automáticamente")
+        self.assertEqual(trade["direction"], "SHORT")
+        self.assertEqual(trade["entry_price"], 98.12)
+        self.assertEqual(trade["tp_price"], 97.50)
+        self.assertEqual(trade["sl_stage"], 1, "Debe alcanzar Hito 1 (avance 56.5% >= 40%)")
+        self.assertEqual(trade["current_sl_price"], 98.11, "SL en SHORT debe ser Entrada - 1 tick = 98.11")
+
+        # Verificar que modify_order fue llamado con stop_price=98.11
+        self.mock_client.modify_order.assert_called_with(
+            account_id=12345,
+            order_id=3663652569,
+            stop_price=98.11,
+            size=1
+        )
+
+    def test_modify_order_payload_structure(self):
+        """Verifica que TopstepClient.modify_order serialice stopPrice y limitPrice correctamente."""
+        from unittest.mock import patch
+        client = TopstepClient()
+        client.token = "mock_token"
+        client.token_expiry = 9999999999.0
+        
+        with patch("requests.post") as mock_post:
+            mock_post.return_value.status_code = 200
+            mock_post.return_value.json.return_value = {"success": True, "errorCode": 0}
+            
+            client.modify_order(account_id=12345, order_id=9876, stop_price=20005.25, size=1)
+            mock_post.assert_called_once()
+            call_kwargs = mock_post.call_args[1]
+            json_payload = call_kwargs["json"]
+            self.assertEqual(json_payload["accountId"], 12345)
+            self.assertEqual(json_payload["orderId"], 9876)
+            self.assertEqual(json_payload["stopPrice"], 20005.25)
+            self.assertNotIn("price", json_payload)
+
 if __name__ == '__main__':
     unittest.main()
