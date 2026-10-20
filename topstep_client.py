@@ -274,6 +274,29 @@ class TopstepClient:
         res.raise_for_status()
         return res.json()
 
+    def modify_order(self, account_id: int, order_id: int, price: Optional[float] = None,
+                     trigger_price: Optional[float] = None, size: int = 1) -> Dict[str, Any]:
+        """Modifica una orden existente en TopstepX (por ejemplo, para mover el Stop Loss a Break-Even)."""
+        payload = {
+            "accountId": int(account_id),
+            "orderId": int(order_id),
+            "size": int(size)
+        }
+        if price is not None:
+            payload["price"] = float(price)
+        if trigger_price is not None:
+            payload["triggerPrice"] = float(trigger_price)
+            
+        url = f"{self.base_url}/api/Order/modify"
+        try:
+            res = requests.post(url, json=payload, headers=self.get_headers(), timeout=15)
+            if res.status_code == 200:
+                data = res.json()
+                return data
+            return {"success": False, "errorMessage": f"HTTP {res.status_code}: {res.text}"}
+        except Exception as e:
+            return {"success": False, "errorMessage": str(e)}
+
     def close_contract_position(self, account_id: int, contract_id: str) -> Dict[str, Any]:
         """Cierre de emergencia / Flatten de la posición en el contrato."""
         url = f"{self.base_url}/api/Position/closeContract"

@@ -60,6 +60,7 @@ class AxiomEngine:
                 "last_executed_candle_ts": None,
                 "last_executed_1m_ts": None,
                 "last_evaluated_1m_ts": None,
+                "active_trade": None,
                 "has_open_position": False,
                 "logged_pos_open": False,
                 "last_inoperable_reason": None,
@@ -482,50 +483,61 @@ class AxiomEngine:
         return self.verificar_absorcion_vwap_1m(df, sym)
 
     # ==========================================
-    # RISK ENGINE: SL A 10 TICKS DEL EXTREMO DE LA MECHA Y TP AL 40% DISTANCIA VWAP-BANDA
+    # RISK ENGINE: SL A 5 TICKS DEL EXTREMO Y TP DINÁMICO POR VOLUMEN (PISO 5t, TECHO 60% BANDA)
     # ==========================================
     def calcular_riesgo_dinamico(self, direccion: str, precio_entrada: float, extremo_precio: float,
                                  upper_band: float, lower_band: float, sym: str,
-                                 vwap_val: Optional[float] = None) -> tuple[int, int, float, float]:
+                                 vwap_val: Optional[float] = None,
+                                 rvol: Optional[float] = None) -> tuple[int, int, float, float]:
         """
-        Calcula SL y TP:
-        - SL: Exactamente 10 ticks sobre el extremo que alcanzó la mecha:
-              LONG: 10 ticks por debajo del precio más bajo alcanzado por la mecha (precio_sl = low_mecha - 10 ticks).
-              SHORT: 10 ticks por encima del precio más alto alcanzado por la mecha (precio_sl = high_mecha + 10 ticks).
-        - TP: 40% de la distancia entre la línea VWAP y la siguiente banda
-              si es superior a 10 ticks; de lo contrario, TP estático de 10 ticks.
+        Calcula SL y TP según las reglas cuantitativas de absorción:
+        - SL: Exactamente 5 ticks sobre el extremo que alcanzó la mecha de 1m:
+              LONG: 5 ticks por debajo del precio más bajo alcanzado por la mecha (precio_sl = low_mecha - 5 ticks).
+              SHORT: 5 ticks por encima del precio más alto alcanzado por la mecha (precio_sl = high_mecha + 5 ticks).
+              Piso mínimo de SL: 5 ticks.
+        - TP: Dinámico según el porcentaje de exceso de volumen institucional detectado:
+              Ticks de TP = % Exceso de Volumen (ej. +25% vol -> 25 ticks).
+              Piso mínimo: 5 ticks.
+              Techo máximo: 60% de la distancia entre la línea VWAP y la banda correspondiente.
         """
         spec = SUPPORTED_SYMBOLS.get(sym, {"tickSize": 0.25})
         tick_size = spec.get("tickSize", 0.25)
         ref_vwap = vwap_val if vwap_val is not None else precio_entrada
         
+        # 1. Base de Take Profit por porcentaje de volumen
+        rvol_val = float(rvol) if rvol is not None else 1.10
+        pct_vol = round((rvol_val - 1.0) * 100)
+        ticks_vol = max(5, pct_vol) # Piso mínimo de 5 ticks
+        
         if direccion == "LONG":
-            # SL: 10 ticks por debajo del precio más bajo que haya alcanzado la mecha
-            ref_extremo = extremo_precio if extremo_precio is not None else (precio_entrada - (10 * tick_size))
-            precio_sl = ref_extremo - (10 * tick_size)
+            # SL: 5 ticks por debajo del precio más bajo que haya alcanzado la mecha
+            ref_extremo = extremo_precio if extremo_precio is not None else (precio_entrada - (5 * tick_size))
+            precio_sl = ref_extremo - (5 * tick_size)
             distancia_sl_puntos = abs(precio_entrada - precio_sl)
-            ticks_sl_abs = max(round(distancia_sl_puntos / tick_size), 10)
+            ticks_sl_abs = max(round(distancia_sl_puntos / tick_size), 5)
             
-            # TP: 40% de distancia entre VWAP y Banda Superior (min 10 ticks)
+            # Techo máximo: 60% de distancia entre VWAP y Banda Superior (min 5 ticks)
             distancia_banda = abs(upper_band - ref_vwap)
-            ticks_40_pct = round((distancia_banda * 0.40) / tick_size)
-            ticks_tp_abs = ticks_40_pct if ticks_40_pct > 10 else 10
+            techo_60_pct = max(round((distancia_banda * 0.60) / tick_size), 5)
+            ticks_tp_abs = min(ticks_vol, techo_60_pct)
+            ticks_tp_abs = max(ticks_tp_abs, 5) # Garantizar piso mínimo de 5 ticks
             precio_tp = precio_entrada + (ticks_tp_abs * tick_size)
             
             # Convención de signos TopstepX: LONG -> SL negativo (-), TP positivo (+)
             return -ticks_sl_abs, ticks_tp_abs, precio_sl, precio_tp
             
         else: # SHORT
-            # SL: 10 ticks por encima del precio más alto que haya alcanzado la mecha
-            ref_extremo = extremo_precio if extremo_precio is not None else (precio_entrada + (10 * tick_size))
-            precio_sl = ref_extremo + (10 * tick_size)
+            # SL: 5 ticks por encima del precio más alto que haya alcanzado la mecha
+            ref_extremo = extremo_precio if extremo_precio is not None else (precio_entrada + (5 * tick_size))
+            precio_sl = ref_extremo + (5 * tick_size)
             distancia_sl_puntos = abs(precio_sl - precio_entrada)
-            ticks_sl_abs = max(round(distancia_sl_puntos / tick_size), 10)
+            ticks_sl_abs = max(round(distancia_sl_puntos / tick_size), 5)
             
-            # TP: 40% de distancia entre VWAP y Banda Inferior (min 10 ticks)
+            # Techo máximo: 60% de distancia entre VWAP y Banda Inferior (min 5 ticks)
             distancia_banda = abs(ref_vwap - lower_band)
-            ticks_40_pct = round((distancia_banda * 0.40) / tick_size)
-            ticks_tp_abs = ticks_40_pct if ticks_40_pct > 10 else 10
+            techo_60_pct = max(round((distancia_banda * 0.60) / tick_size), 5)
+            ticks_tp_abs = min(ticks_vol, techo_60_pct)
+            ticks_tp_abs = max(ticks_tp_abs, 5) # Garantizar piso mínimo de 5 ticks
             precio_tp = precio_entrada - (ticks_tp_abs * tick_size)
             
             # Convención de signos TopstepX: SHORT -> SL positivo (+), TP negativo (-)
@@ -625,24 +637,26 @@ class AxiomEngine:
         tick_size = spec.get("tickSize", 0.25)
         contract_id = self.symbol_states[sym]["contract_id"]
         precio_entrada = float(df.iloc[-1]['Close'])
+        rvol = setup.get("rvol", 1.10)
         
         ticks_sl, ticks_tp, precio_sl, precio_tp = self.calcular_riesgo_dinamico(
             direccion, precio_entrada, extremo_precio,
             float(setup['upper_band']),
             float(setup['lower_band']),
             sym,
-            vwap_cruce
+            vwap_cruce,
+            rvol=rvol
         )
         
-        info_sl = f"SL: {abs(ticks_sl)} ticks ({precio_sl:,.2f} | 10 ticks desde extremo de mecha)"
-        info_tp = f"TP: {abs(ticks_tp)} ticks ({precio_tp:,.2f} | 40% distancia VWAP a Banda / Mín 10t)"
+        info_sl = f"SL: {abs(ticks_sl)} ticks ({precio_sl:,.2f} | 5 ticks desde extremo de mecha)"
+        info_tp = f"TP: {abs(ticks_tp)} ticks ({precio_tp:,.2f} | Dinámico por Volumen / Techo 60% Banda)"
         self.log(f"🚨 DISPARANDO {direccion} | Entrada: {precio_entrada:,.2f} | {info_sl} | {info_tp}", "ORDER", sym)
         
         side = 1 if direccion == "SHORT" else 0
         mecha_pts = setup.get("mecha_pts", 0.0)
         mecha_ticks = round(mecha_pts / tick_size) if tick_size > 0 else 0
-        rvol_info = f" | +{(setup['rvol']-1.0)*100:.1f}% Vol" if "rvol" in setup else ""
-        condicion_str = f"Absorcion VWAP 1m {setup['vwap_cruce']:.2f} ({mecha_ticks}t Mecha{rvol_info} | Extremo {extremo_precio:.2f}). SL: 10t Mecha ({precio_sl:.2f}) | TP 40% Banda: {abs(ticks_tp)}t ({precio_tp:.2f})"
+        rvol_info = f" | +{(rvol-1.0)*100:.1f}% Vol" if "rvol" in setup else ""
+        condicion_str = f"Absorcion VWAP 1m {setup['vwap_cruce']:.2f} ({mecha_ticks}t Mecha{rvol_info} | Extremo {extremo_precio:.2f}). SL: 5t Mecha ({precio_sl:.2f}) | TP Dinamico: {abs(ticks_tp)}t ({precio_tp:.2f})"
         
         try:
             res = self.client.place_order(
@@ -658,7 +672,32 @@ class AxiomEngine:
             if res.get("success"):
                 order_id = res.get("orderId", "N/A")
                 self.symbol_states[sym]["has_open_position"] = True
-                self.log(f"✅ Ejecución exitosa en TopstepX. Order ID: {order_id}", "ORDER", sym)
+                
+                # Inicializar seguimiento activo e independiente para Break-Even (cada 2 segundos)
+                halfway_target = precio_entrada + (precio_tp - precio_entrada) * 0.50
+                be_price = (precio_entrada + (1 * tick_size)) if direccion == "LONG" else (precio_entrada - (1 * tick_size))
+                
+                self.symbol_states[sym]["active_trade"] = {
+                    "symbol": sym,
+                    "contract_id": contract_id,
+                    "direction": direccion,
+                    "entry_price": precio_entrada,
+                    "current_price": precio_entrada,
+                    "initial_sl_price": precio_sl,
+                    "current_sl_price": precio_sl,
+                    "tp_price": precio_tp,
+                    "initial_sl_ticks": ticks_sl,
+                    "tp_ticks": ticks_tp,
+                    "rvol": rvol,
+                    "order_id": order_id,
+                    "be_triggered": False,
+                    "halfway_target": halfway_target,
+                    "be_price": be_price,
+                    "entry_timestamp": time.time(),
+                    "last_check_time": time.time()
+                }
+                
+                self.log(f"✅ Ejecución exitosa en TopstepX. Order ID: {order_id} | Break-Even armado al 50% TP ({halfway_target:.2f})", "ORDER", sym)
                 self.registrar_en_csv(
                     simbolo=sym,
                     direccion=direccion,
@@ -708,6 +747,169 @@ class AxiomEngine:
                 error_code="EXCEPTION",
                 order_id="N/A"
             )
+
+    # ==========================================
+    # ACTIVE TRADE MANAGEMENT & BREAK-EVEN ENGINE
+    # ==========================================
+    def monitorear_posicion_abierta(self, sym: str, df: pd.DataFrame):
+        """
+        Analiza cada 2 segundos de manera independiente la operación abierta del símbolo:
+        - Mide el progreso en tiempo real hacia el Take Profit.
+        - Si el precio alcanza el 50% del recorrido al TP, mueve el Stop Loss automáticamente
+          a Break-Even (Precio de Entrada + 1 tick) en TopstepX, garantizando Riesgo Cero.
+        - Registra el evento en la telemetría, consola y en el archivo CSV institucional.
+        - Detecta el cierre de la posición para liberar el seguimiento limpiamente.
+        """
+        state = self.symbol_states.get(sym, {})
+        trade = state.get("active_trade")
+        if not trade:
+            return
+
+        now = time.time()
+        if now - trade.get("last_check_time", 0.0) < 1.8:
+            return
+        trade["last_check_time"] = now
+
+        # 1. Verificar si la posición sigue activa en TopstepX
+        is_open = self.tiene_posicion_abierta(sym)
+        if not is_open:
+            self.log(f"🏁 [{sym}] Posición cerrada en mercado. Finalizando seguimiento activo de {trade['direction']}.", "ORDER", sym)
+            state["active_trade"] = None
+            state["has_open_position"] = False
+            return
+
+        if df is None or df.empty:
+            return
+
+        precio_actual = float(df.iloc[-1]['Close'])
+        trade["current_price"] = precio_actual
+        direccion = trade["direction"]
+        precio_entrada = trade["entry_price"]
+        precio_tp = trade["tp_price"]
+        halfway = trade["halfway_target"]
+        be_price = trade["be_price"]
+        spec = SUPPORTED_SYMBOLS.get(sym, {"tickSize": 0.25})
+        tick_size = spec.get("tickSize", 0.25)
+
+        # 2. Calcular avance porcentual hacia el Take Profit
+        if direccion == "LONG":
+            ganancia_pts = precio_actual - precio_entrada
+            recorrido_tp_pts = precio_tp - precio_entrada
+            pct_avance = (ganancia_pts / recorrido_tp_pts) * 100 if recorrido_tp_pts > 0 else 0.0
+            llego_al_50 = (precio_actual >= halfway)
+        else: # SHORT
+            ganancia_pts = precio_entrada - precio_actual
+            recorrido_tp_pts = precio_entrada - precio_tp
+            pct_avance = (ganancia_pts / recorrido_tp_pts) * 100 if recorrido_tp_pts > 0 else 0.0
+            llego_al_50 = (precio_actual <= halfway)
+
+        ganancia_ticks = round(ganancia_pts / tick_size) if tick_size > 0 else 0
+        sl_actual = trade["current_sl_price"]
+        be_str = " [BE ACTIVO]" if trade.get("be_triggered") else ""
+        
+        self.log(
+            f"🎯 [{sym}] Trade {direccion} activo{be_str} | In: {precio_entrada:.2f} | Now: {precio_actual:.2f} "
+            f"({ganancia_ticks:+d}t | {pct_avance:.1f}% TP) | SL: {sl_actual:.2f} | TP: {precio_tp:.2f}",
+            "TELEMETRY", sym
+        )
+
+        # 3. Disparo de Break-Even al 50% de ganancia (un solo disparo garantizado)
+        if llego_al_50 and not trade.get("be_triggered", False):
+            trade["be_triggered"] = True
+            trade["current_sl_price"] = be_price
+            
+            contract_id = trade["contract_id"]
+            self.mover_sl_en_topstep(contract_id, be_price, sym)
+            
+            self.log(
+                f"🛡️ [{sym}] ¡HITO 50% ALCANZADO (+{pct_avance:.1f}% de TP)! "
+                f"Moviendo Stop Loss a Break-Even ({be_price:.2f}) | Riesgo Cero garantizado.",
+                "ORDER", sym
+            )
+            
+            self.registrar_evento_be_en_csv(sym, trade, be_price, pct_avance)
+
+    def mover_sl_en_topstep(self, contract_id: str, nuevo_sl: float, sym: str) -> bool:
+        """Localiza la orden Stop activa en TopstepX para el contrato y modifica su precio a nuevo_sl."""
+        if not self.account_id:
+            return False
+            
+        try:
+            open_orders = self.client.search_open_orders(self.account_id)
+            stop_order = None
+            for o in open_orders:
+                cid = str(o.get("contractId", ""))
+                otype = int(o.get("type", 0))
+                # Type 4 = Stop Order
+                if cid == str(contract_id) and otype == 4:
+                    stop_order = o
+                    break
+                    
+            if stop_order:
+                order_id = stop_order.get("id")
+                size = stop_order.get("size", 1)
+                res = self.client.modify_order(
+                    account_id=self.account_id,
+                    order_id=order_id,
+                    price=nuevo_sl,
+                    trigger_price=nuevo_sl,
+                    size=size
+                )
+                if res.get("success"):
+                    self.log(f"✅ [{sym}] Orden Stop #{order_id} modificada con éxito en TopstepX a {nuevo_sl:.2f}.", "ORDER", sym)
+                    return True
+                else:
+                    self.log(f"⚠️ [{sym}] Respuesta al modificar orden #{order_id} en TopstepX: {res.get('errorMessage')}", "ERROR", sym)
+            else:
+                self.log(f"ℹ️ [{sym}] No se encontró orden Stop abierta en TopstepX. Break-Even activo en memoria a {nuevo_sl:.2f}.", "SYSTEM", sym)
+        except Exception as e:
+            self.log(f"⚠️ Error al intentar mover SL en TopstepX: {e}", "ERROR", sym)
+            
+        return False
+
+    def registrar_evento_be_en_csv(self, sym: str, trade: Dict[str, Any], be_price: float, pct_avance: float):
+        """Registra el evento de Break-Even en el archivo CSV institucional para trazabilidad."""
+        try:
+            os.makedirs(os.path.dirname(os.path.abspath(CSV_PATH)), exist_ok=True)
+            archivo_existe = os.path.isfile(CSV_PATH)
+            fecha_actual = datetime.now().strftime('%Y-%m-%d')
+            hora_actual = datetime.now().strftime('%H:%M:%S')
+            
+            fieldnames = [
+                'Fecha', 'Hora', 'Simbolo', 'Estado', 'Direccion', 'Precio_Mercado',
+                'Precio_Entrada_Real', 'Precio_Salida_Real', 'SL_Ticks', 'TP_Ticks',
+                'PnL_Bruto_USD', 'Comisiones_USD', 'PnL_Neto_USD', 'Order_ID',
+                'Exit_Order_ID', 'Motivo_Rechazo', 'Codigo_Error', 'Condicion_Tecnica', 'Ultima_Actualizacion'
+            ]
+            
+            with open(CSV_PATH, mode='a', newline='', encoding='utf-8') as file:
+                writer = csv.DictWriter(file, fieldnames=fieldnames, delimiter=';')
+                if not archivo_existe:
+                    writer.writeheader()
+                writer.writerow({
+                    'Fecha': fecha_actual,
+                    'Hora': hora_actual,
+                    'Simbolo': sym,
+                    'Estado': "BREAK-EVEN ACTIVADO (Riesgo Cero)",
+                    'Direccion': trade["direction"],
+                    'Precio_Mercado': f"{trade.get('current_price', be_price):.2f}",
+                    'Precio_Entrada_Real': f"{trade['entry_price']:.2f}",
+                    'Precio_Salida_Real': "PENDIENTE",
+                    'SL_Ticks': "1",
+                    'TP_Ticks': str(trade.get("tp_ticks", "Dinámico")),
+                    'PnL_Bruto_USD': "0.00",
+                    'Comisiones_USD': "0.00",
+                    'PnL_Neto_USD': "0.00",
+                    'Order_ID': str(trade.get("order_id", "N/A")),
+                    'Exit_Order_ID': "PENDIENTE",
+                    'Motivo_Rechazo': "N/A",
+                    'Codigo_Error': "0",
+                    'Condicion_Tecnica': f"Break-Even activado al 50% de ganancia (+{pct_avance:.1f}% TP). SL movido a {be_price:.2f} (+1 tick)",
+                    'Ultima_Actualizacion': f"{fecha_actual} {hora_actual}"
+                })
+            self.log(f"💾 Evento de Break-Even registrado en CSV.", "SYSTEM", sym)
+        except Exception as e:
+            self.log(f"❌ Error al registrar Break-Even en CSV: {e}", "ERROR", sym)
 
     # ==========================================
     # BLACK BOX RECORDING & REAL TOPSTEP SYNCHRONIZATION
@@ -1163,8 +1365,14 @@ class AxiomEngine:
                             # Si detectamos una nueva vela 5m iniciada, emitimos notificación
                             if state.get("current_active_candle_ts") != vela_ts:
                                 state["current_active_candle_ts"] = vela_ts
-                                self.log(f"🕯️ [{sym}] Vela 5m activa ({time_str} UTC). Escaneando rechazo por mecha en VWAP segundo a segundo...", "SETUP", sym)
+                                self.log(f"🕯️ [{sym}] Vela 5m activa ({time_str} UTC). Monitoreando zona VWAP y absorción...", "SETUP", sym)
 
+                            # A. Monitoreo prioritario de operaciones abiertas (cada 2 segundos de forma independiente)
+                            if state.get("active_trade") or self.tiene_posicion_abierta(sym):
+                                self.monitorear_posicion_abierta(sym, df)
+                                continue
+
+                            # B. Filtros de entrada para NUEVAS operaciones:
                             # 1. Filtro institucional de sesión CME (primeras 2 horas tras la apertura: 18:00-20:00 ET y receso diario)
                             is_operable, motivo_horario = self.es_horario_operable()
                             if not is_operable:
@@ -1175,16 +1383,12 @@ class AxiomEngine:
                             else:
                                 state["last_inoperable_reason"] = None
 
-                            # 2. Filtro de sobreexposición: Máximo 1 operación abierta por símbolo a la vez
-                            if self.tiene_posicion_abierta(sym):
+                            # 2. Control de ejecución: Cooldown activo
+                            if time.time() < state["cooldown_until"]:
                                 continue
 
                             # 3. Control de ejecución: Máximo 1 operación por ciclo
                             if state.get("last_executed_candle_ts") == vela_ts:
-                                continue
-
-                            # 4. Cooldown activo
-                            if time.time() < state["cooldown_until"]:
                                 continue
 
                             # 5. Evaluación de Absorción Institucional en VWAP (1m + Esfuerzo Volumen >= 1.10x)
