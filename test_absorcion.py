@@ -19,7 +19,7 @@ class TestAbsorcionVWAP(unittest.TestCase):
             'Timestamp': self.now,
             'Open': 20010.0,
             'High': 20015.0,
-            'Low': 19999.5,   # Entered zone (+-3 ticks of 20000.0 is 19999.25 to 20000.75)
+            'Low': 19999.5,   # Entered zone (+-5 ticks of 20000.0 is 19998.75 to 20001.25)
             'Close': 20002.0,
             'Volume': 5000,
             'VWAP': 20000.0,

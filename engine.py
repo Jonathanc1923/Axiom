@@ -311,11 +311,11 @@ class AxiomEngine:
         """
         Estrategia de Absorción Institucional en VWAP (1 Minuto + Esfuerzo de Volumen):
         
-        Cuando el precio se aproxima al VWAP (+-3 ticks), se analiza la última vela cerrada
+        Cuando el precio se aproxima al VWAP (+-5 ticks), se analiza la última vela cerrada
         de 1 minuto y se compara su volumen con el promedio de las últimas 10 velas de 1m.
         
         CONDICIÓN PARA COMPRA (LONG):
-        1. El precio entró a la zona (mínimo de la vela 1m <= VWAP + 3 ticks).
+        1. El precio entró a la zona (mínimo de la vela 1m <= VWAP + 5 ticks).
         2. Volumen de la vela cerrada >= 1.10 x Promedio de las últimas 10 velas de 1m (+10% esfuerzo).
         3. RECHAZO CONFIRMADO: La vela cerró POR ENCIMA del VWAP (Close >= VWAP)
            y dejó mecha inferior (Close > Low + 2 ticks).
@@ -324,7 +324,7 @@ class AxiomEngine:
         -> STOP LOSS: A 10 ticks por debajo del mínimo de esa vela (extremo_precio = Low).
         
         CONDICIÓN PARA VENTA (SHORT):
-        1. El precio entró a la zona (máximo de la vela 1m >= VWAP - 3 ticks).
+        1. El precio entró a la zona (máximo de la vela 1m >= VWAP - 5 ticks).
         2. Volumen de la vela cerrada >= 1.10 x Promedio de las últimas 10 velas de 1m (+10% esfuerzo).
         3. RECHAZO CONFIRMADO: La vela cerró POR DEBAJO del VWAP (Close <= VWAP)
            y dejó mecha superior (High - Close >= 2 ticks).
@@ -340,10 +340,10 @@ class AxiomEngine:
         
         vela_5m = df_5m.iloc[-1]
         vwap_val = float(vela_5m['VWAP'])
-        zona_ticks = 3 * tick_size
+        zona_ticks = 5 * tick_size
         
         # 1. Filtro previo de Zona Caliente en 5m:
-        # Verificar si la vela actual de 5m ha tocado o está dentro de VWAP +- 3 ticks
+        # Verificar si la vela actual de 5m ha tocado o está dentro de VWAP +- 5 ticks
         en_zona_5m_long = float(vela_5m['Low']) <= vwap_val + zona_ticks
         en_zona_5m_short = float(vela_5m['High']) >= vwap_val - zona_ticks
         if not (en_zona_5m_long or en_zona_5m_short):
