@@ -1585,6 +1585,13 @@ class AxiomEngine:
                         # B. Evaluación de NUEVAS operaciones para símbolos habilitados:
                         if is_enabled:
                             vela_actual = df.iloc[-1]
+                            vela_ts = vela_actual['Timestamp']
+                            time_str = vela_ts.strftime('%H:%M')
+                            
+                            # Si detectamos una nueva vela 5m iniciada, emitimos notificación
+                            if state.get("current_active_candle_ts") != vela_ts:
+                                state["current_active_candle_ts"] = vela_ts
+                                self.log(f"🕯️ [{sym}] Vela 5m activa ({time_str} UTC). Monitoreando zona VWAP y absorción...", "SETUP", sym)
 
                             # B. Filtros de entrada para NUEVAS operaciones:
                             # 1. Filtro institucional de sesión CME (primeras 2 horas tras la apertura: 18:00-20:00 ET y receso diario)
