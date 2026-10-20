@@ -673,9 +673,9 @@ class AxiomEngine:
                 order_id = res.get("orderId", "N/A")
                 self.symbol_states[sym]["has_open_position"] = True
                 
-                # Inicializar seguimiento activo e independiente para Break-Even (cada 2 segundos)
-                halfway_target = precio_entrada + (precio_tp - precio_entrada) * 0.50
-                be_price = (precio_entrada + (1 * tick_size)) if direccion == "LONG" else (precio_entrada - (1 * tick_size))
+                # Inicializar seguimiento activo e independiente para la Escalera de 3 Hitos (cada 2 segundos)
+                recorrido_tp_pts = abs(precio_tp - precio_entrada)
+                target_40 = (precio_entrada + recorrido_tp_pts * 0.40) if direccion == "LONG" else (precio_entrada - recorrido_tp_pts * 0.40)
                 
                 self.symbol_states[sym]["active_trade"] = {
                     "symbol": sym,
@@ -690,14 +690,12 @@ class AxiomEngine:
                     "tp_ticks": ticks_tp,
                     "rvol": rvol,
                     "order_id": order_id,
-                    "be_triggered": False,
-                    "halfway_target": halfway_target,
-                    "be_price": be_price,
+                    "sl_stage": 0, # 0=Inicial, 1=Hito 1 (40%), 2=Hito 2 (75%), 3=Hito 3 (90%)
                     "entry_timestamp": time.time(),
                     "last_check_time": time.time()
                 }
                 
-                self.log(f"✅ Ejecución exitosa en TopstepX. Order ID: {order_id} | Break-Even armado al 50% TP ({halfway_target:.2f})", "ORDER", sym)
+                self.log(f"✅ Ejecución exitosa en TopstepX. Order ID: {order_id} | Escalera armada (H1 al 40% TP: {target_40:.2f})", "ORDER", sym)
                 self.registrar_en_csv(
                     simbolo=sym,
                     direccion=direccion,
@@ -755,9 +753,12 @@ class AxiomEngine:
         """
         Analiza cada 2 segundos de manera independiente la operación abierta del símbolo:
         - Mide el progreso en tiempo real hacia el Take Profit.
-        - Si el precio alcanza el 50% del recorrido al TP, mueve el Stop Loss automáticamente
-          a Break-Even (Precio de Entrada + 1 tick) en TopstepX, garantizando Riesgo Cero.
-        - Registra el evento en la telemetría, consola y en el archivo CSV institucional.
+        - ESCALERA DE 3 HITOS PROGRESIVOS:
+          * Hito 1 (al 40% del TP): Mueve SL a Entrada + 1 tick (Break-Even / Riesgo Cero).
+          * Hito 2 (al 75% del TP): Sube SL para asegurar el +35% de ganancia del trade.
+          * Hito 3 (al 90% del TP): Sube SL para asegurar el +60% de ganancia (candado final).
+        - Fail-Safe Guard: Si el precio retrocede y toca el SL protegido, garantiza la salida.
+        - Registra cada hito en la telemetría, consola y en el archivo CSV institucional.
         - Detecta el cierre de la posición para liberar el seguimiento limpiamente.
         """
         state = self.symbol_states.get(sym, {})
@@ -786,48 +787,88 @@ class AxiomEngine:
         direccion = trade["direction"]
         precio_entrada = trade["entry_price"]
         precio_tp = trade["tp_price"]
-        halfway = trade["halfway_target"]
-        be_price = trade["be_price"]
         spec = SUPPORTED_SYMBOLS.get(sym, {"tickSize": 0.25})
         tick_size = spec.get("tickSize", 0.25)
 
-        # 2. Calcular avance porcentual hacia el Take Profit
+        # 2. Calcular avance porcentual y precios de los 3 hitos
+        recorrido_tp_pts = abs(precio_tp - precio_entrada)
         if direccion == "LONG":
             ganancia_pts = precio_actual - precio_entrada
-            recorrido_tp_pts = precio_tp - precio_entrada
             pct_avance = (ganancia_pts / recorrido_tp_pts) * 100 if recorrido_tp_pts > 0 else 0.0
-            llego_al_50 = (precio_actual >= halfway)
+            
+            sl_h1 = precio_entrada + (1 * tick_size)
+            sl_h2 = round((precio_entrada + recorrido_tp_pts * 0.35) / tick_size) * tick_size
+            sl_h3 = round((precio_entrada + recorrido_tp_pts * 0.60) / tick_size) * tick_size
         else: # SHORT
             ganancia_pts = precio_entrada - precio_actual
-            recorrido_tp_pts = precio_entrada - precio_tp
             pct_avance = (ganancia_pts / recorrido_tp_pts) * 100 if recorrido_tp_pts > 0 else 0.0
-            llego_al_50 = (precio_actual <= halfway)
+            
+            sl_h1 = precio_entrada - (1 * tick_size)
+            sl_h2 = round((precio_entrada - recorrido_tp_pts * 0.35) / tick_size) * tick_size
+            sl_h3 = round((precio_entrada - recorrido_tp_pts * 0.60) / tick_size) * tick_size
 
         ganancia_ticks = round(ganancia_pts / tick_size) if tick_size > 0 else 0
         sl_actual = trade["current_sl_price"]
-        be_str = " [BE ACTIVO]" if trade.get("be_triggered") else ""
+        sl_stage = trade.get("sl_stage", 0)
+        stage_str = f" [HITO {sl_stage}]" if sl_stage > 0 else ""
         
         self.log(
-            f"🎯 [{sym}] Trade {direccion} activo{be_str} | In: {precio_entrada:.2f} | Now: {precio_actual:.2f} "
+            f"🎯 [{sym}] Trade {direccion} activo{stage_str} | In: {precio_entrada:.2f} | Now: {precio_actual:.2f} "
             f"({ganancia_ticks:+d}t | {pct_avance:.1f}% TP) | SL: {sl_actual:.2f} | TP: {precio_tp:.2f}",
             "TELEMETRY", sym
         )
 
-        # 3. Disparo de Break-Even al 50% de ganancia (un solo disparo garantizado)
-        if llego_al_50 and not trade.get("be_triggered", False):
-            trade["be_triggered"] = True
-            trade["current_sl_price"] = be_price
-            
+        # 3. ESCALERA DE 3 HITOS: Mover SL progresivamente
+        nuevo_sl = None
+        nuevo_stage = sl_stage
+        motivo_hito = ""
+
+        if pct_avance >= 90.0 and sl_stage < 3:
+            nuevo_sl = sl_h3
+            nuevo_stage = 3
+            motivo_hito = f"HITO 3 (90% TP) | Candado activado: SL asegurando +60% ganancia ({sl_h3:.2f})"
+        elif pct_avance >= 75.0 and sl_stage < 2:
+            nuevo_sl = sl_h2
+            nuevo_stage = 2
+            motivo_hito = f"HITO 2 (75% TP) | SL asegurando +35% ganancia ({sl_h2:.2f})"
+        elif pct_avance >= 40.0 and sl_stage < 1:
+            nuevo_sl = sl_h1
+            nuevo_stage = 1
+            motivo_hito = f"HITO 1 (40% TP) | Moviendo SL a Break-Even ({sl_h1:.2f}) | Riesgo Cero"
+
+        if nuevo_sl is not None and nuevo_stage > sl_stage:
+            trade["sl_stage"] = nuevo_stage
+            trade["current_sl_price"] = nuevo_sl
             contract_id = trade["contract_id"]
-            self.mover_sl_en_topstep(contract_id, be_price, sym)
+            
+            # Enviar modificación a TopstepX
+            self.mover_sl_en_topstep(contract_id, nuevo_sl, sym)
             
             self.log(
-                f"🛡️ [{sym}] ¡HITO 50% ALCANZADO (+{pct_avance:.1f}% de TP)! "
-                f"Moviendo Stop Loss a Break-Even ({be_price:.2f}) | Riesgo Cero garantizado.",
+                f"🛡️ [{sym}] ¡{motivo_hito}! Avance: +{pct_avance:.1f}% de TP.",
                 "ORDER", sym
             )
-            
-            self.registrar_evento_be_en_csv(sym, trade, be_price, pct_avance)
+            self.registrar_evento_be_en_csv(sym, trade, nuevo_sl, pct_avance, motivo_hito)
+
+        # 4. SALVAGUARDA DE SEGURIDAD POR SOFTWARE (Fail-Safe Guard):
+        # Si ya se activó algún hito de protección y el precio retrocede y cruza el SL protegido:
+        if trade.get("sl_stage", 0) >= 1:
+            sl_protegido = trade["current_sl_price"]
+            sl_alcanzado = False
+            if direccion == "LONG" and precio_actual <= sl_protegido:
+                sl_alcanzado = True
+            elif direccion == "SHORT" and precio_actual >= sl_protegido:
+                sl_alcanzado = True
+                
+            if sl_alcanzado:
+                self.log(f"🛡️ [{sym}] Precio alcanzó nivel de Stop protegido ({precio_actual:.2f} vs SL {sl_protegido:.2f}). Ejecutando cierre de seguridad inmediato.", "ORDER", sym)
+                try:
+                    self.client.close_contract_position(self.account_id, trade["contract_id"])
+                except Exception as ce:
+                    self.log(f"⚠️ Error al forzar cierre de seguridad en {sym}: {ce}", "ERROR", sym)
+                state["active_trade"] = None
+                state["has_open_position"] = False
+                return
 
     def mover_sl_en_topstep(self, contract_id: str, nuevo_sl: float, sym: str) -> bool:
         """Localiza la orden Stop activa en TopstepX para el contrato y modifica su precio a nuevo_sl."""
@@ -861,14 +902,14 @@ class AxiomEngine:
                 else:
                     self.log(f"⚠️ [{sym}] Respuesta al modificar orden #{order_id} en TopstepX: {res.get('errorMessage')}", "ERROR", sym)
             else:
-                self.log(f"ℹ️ [{sym}] No se encontró orden Stop abierta en TopstepX. Break-Even activo en memoria a {nuevo_sl:.2f}.", "SYSTEM", sym)
+                self.log(f"ℹ️ [{sym}] No se encontró orden Stop abierta en TopstepX. Nivel protegido resguardado por software en {nuevo_sl:.2f}.", "SYSTEM", sym)
         except Exception as e:
             self.log(f"⚠️ Error al intentar mover SL en TopstepX: {e}", "ERROR", sym)
             
         return False
 
-    def registrar_evento_be_en_csv(self, sym: str, trade: Dict[str, Any], be_price: float, pct_avance: float):
-        """Registra el evento de Break-Even en el archivo CSV institucional para trazabilidad."""
+    def registrar_evento_be_en_csv(self, sym: str, trade: Dict[str, Any], nuevo_sl: float, pct_avance: float, motivo: str = "Ajuste SL"):
+        """Registra el evento de Break-Even o Profit Lock en el archivo CSV institucional para trazabilidad."""
         try:
             os.makedirs(os.path.dirname(os.path.abspath(CSV_PATH)), exist_ok=True)
             archivo_existe = os.path.isfile(CSV_PATH)
@@ -890,12 +931,12 @@ class AxiomEngine:
                     'Fecha': fecha_actual,
                     'Hora': hora_actual,
                     'Simbolo': sym,
-                    'Estado': "BREAK-EVEN ACTIVADO (Riesgo Cero)",
+                    'Estado': f"SL PROTEGIDO (Hito {trade.get('sl_stage', 1)})",
                     'Direccion': trade["direction"],
-                    'Precio_Mercado': f"{trade.get('current_price', be_price):.2f}",
+                    'Precio_Mercado': f"{trade.get('current_price', nuevo_sl):.2f}",
                     'Precio_Entrada_Real': f"{trade['entry_price']:.2f}",
                     'Precio_Salida_Real': "PENDIENTE",
-                    'SL_Ticks': "1",
+                    'SL_Ticks': str(trade.get("sl_stage", 1)),
                     'TP_Ticks': str(trade.get("tp_ticks", "Dinámico")),
                     'PnL_Bruto_USD': "0.00",
                     'Comisiones_USD': "0.00",
@@ -904,12 +945,12 @@ class AxiomEngine:
                     'Exit_Order_ID': "PENDIENTE",
                     'Motivo_Rechazo': "N/A",
                     'Codigo_Error': "0",
-                    'Condicion_Tecnica': f"Break-Even activado al 50% de ganancia (+{pct_avance:.1f}% TP). SL movido a {be_price:.2f} (+1 tick)",
+                    'Condicion_Tecnica': motivo,
                     'Ultima_Actualizacion': f"{fecha_actual} {hora_actual}"
                 })
-            self.log(f"💾 Evento de Break-Even registrado en CSV.", "SYSTEM", sym)
+            self.log(f"💾 Evento de protección de ganancias registrado en CSV.", "SYSTEM", sym)
         except Exception as e:
-            self.log(f"❌ Error al registrar Break-Even en CSV: {e}", "ERROR", sym)
+            self.log(f"❌ Error al registrar en CSV: {e}", "ERROR", sym)
 
     # ==========================================
     # BLACK BOX RECORDING & REAL TOPSTEP SYNCHRONIZATION

@@ -165,9 +165,8 @@ class TestAbsorcionVWAP(unittest.TestCase):
         setup = self.engine.verificar_absorcion_vwap_1m(self.df_5m, "NQ", df_1m_override=df_1m)
         self.assertIsNone(setup)
 
-    def test_break_even_activacion_al_50_porciento(self):
-        """Verifica que al avanzar el 50% hacia el TP, el SL se mueve a Entrada + 1 tick en TopstepX."""
-        # Configurar posición activa simulada en NQ
+    def test_escalera_3_hitos_progresivos(self):
+        """Verifica la Escalera de 3 Hitos: H1 (40% -> BE+1t), H2 (75% -> +35% ganancia), H3 (90% -> +60% ganancia)."""
         self.engine.symbol_states["NQ"]["has_open_position"] = True
         self.mock_client.get_open_positions.return_value = [{"contractId": "CON_NQ_TEST", "size": 1}]
         self.mock_client.search_open_orders.return_value = [{"id": 9999, "contractId": "CON_NQ_TEST", "type": 4, "size": 1}]
@@ -175,7 +174,6 @@ class TestAbsorcionVWAP(unittest.TestCase):
 
         entry_p = 20000.0
         tp_p = 20020.0 # 20 puntos = 80 ticks
-        halfway = 20010.0 # 50% de ganancia = 20010.0
         be_p = 20000.25 # Entrada + 1 tick
 
         self.engine.symbol_states["NQ"]["active_trade"] = {
@@ -191,27 +189,31 @@ class TestAbsorcionVWAP(unittest.TestCase):
             "tp_ticks": 80,
             "rvol": 1.80,
             "order_id": 8888,
-            "be_triggered": False,
-            "halfway_target": halfway,
-            "be_price": be_p,
+            "sl_stage": 0,
             "entry_timestamp": 100.0,
             "last_check_time": 0.0
         }
 
-        # Simular precio de mercado que alcanzó el 50% (20010.50)
-        df_update = pd.DataFrame([{'Close': 20010.50}])
-        self.engine.monitorear_posicion_abierta("NQ", df_update)
-
+        # 1. Precio alcanza el 42% (20008.50) -> Dispara Hito 1 (SL a BE + 1 tick = 20000.25)
+        df_h1 = pd.DataFrame([{'Close': 20008.50}])
+        self.engine.monitorear_posicion_abierta("NQ", df_h1)
         trade = self.engine.symbol_states["NQ"]["active_trade"]
-        self.assertTrue(trade["be_triggered"], "Break-Even debió activarse al 50% de avance")
-        self.assertEqual(trade["current_sl_price"], be_p, "El SL debió actualizarse a Entrada + 1 tick")
-        self.mock_client.modify_order.assert_called_once_with(
-            account_id=12345,
-            order_id=9999,
-            price=be_p,
-            trigger_price=be_p,
-            size=1
-        )
+        self.assertEqual(trade["sl_stage"], 1, "Debe estar en Hito 1")
+        self.assertEqual(trade["current_sl_price"], be_p, "El SL debe ser Entrada + 1 tick (20000.25)")
+
+        # 2. Precio alcanza el 76% (20015.25) -> Dispara Hito 2 (SL asegura +35% de ganancia = 20007.00)
+        trade["last_check_time"] = 0.0 # reset check throttle
+        df_h2 = pd.DataFrame([{'Close': 20015.25}])
+        self.engine.monitorear_posicion_abierta("NQ", df_h2)
+        self.assertEqual(trade["sl_stage"], 2, "Debe estar en Hito 2")
+        self.assertEqual(trade["current_sl_price"], 20007.00, "El SL debe asegurar +35% (20007.00)")
+
+        # 3. Precio alcanza el 91% (20018.25) -> Dispara Hito 3 (SL asegura +60% de ganancia = 20012.00)
+        trade["last_check_time"] = 0.0
+        df_h3 = pd.DataFrame([{'Close': 20018.25}])
+        self.engine.monitorear_posicion_abierta("NQ", df_h3)
+        self.assertEqual(trade["sl_stage"], 3, "Debe estar en Hito 3")
+        self.assertEqual(trade["current_sl_price"], 20012.00, "El SL debe asegurar +60% (20012.00)")
 
     def test_independencia_entre_simbolos(self):
         """Verifica que un trade abierto en NQ no interfiere ni contamina el estado de ES."""
