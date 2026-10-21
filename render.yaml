@@ -19,7 +19,7 @@ services:
       - key: ACCOUNT_FILTER
         value: PRAC
       - key: ACCOUNT_NAME
-        value: PRAC-V2-460183-49765454
+        value: PRAC-V2-460183-59937236
       - key: DEFAULT_SYMBOL
         value: ES
       - key: AUTO_START_ENGINE

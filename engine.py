@@ -122,6 +122,22 @@ class AxiomEngine:
             "by_symbol": {}
         }
 
+        # Cache de hitos y avance máximo porcentual hacia TP por trade
+        self.trade_milestones_cache: Dict[str, Dict[str, Any]] = {}
+
+    @staticmethod
+    def format_milestone(stage: int) -> str:
+        """Formatea el hito alcanzado de forma descriptiva e institucional."""
+        if stage >= 4:
+            return "Hito 4 (125% TP)"
+        elif stage == 3:
+            return "Hito 3 (90% +60%)"
+        elif stage == 2:
+            return "Hito 2 (75% +35%)"
+        elif stage == 1:
+            return "Hito 1 (50% BE)"
+        return "Inicial"
+
     # ==========================================
     # LOGGING & 24-HOUR TERMINAL EVENT BROADCASTER
     # ==========================================
@@ -1035,6 +1051,20 @@ class AxiomEngine:
         max_pct = max(trade.get("max_pct_avance", 0.0), pct_avance)
         trade["max_pct_avance"] = max_pct
 
+        # Actualizar cache de hitos y % máximo de avance alcanzado
+        order_id = str(trade.get("order_id", "N/A"))
+        contract_id = str(trade.get("contract_id", ""))
+        cache_entry = {
+            "stage": trade.get("sl_stage", 0),
+            "stage_desc": self.format_milestone(trade.get("sl_stage", 0)),
+            "max_pct": max_pct,
+            "max_pct_str": f"{max_pct:.1f}%"
+        }
+        if order_id and order_id != "N/A":
+            self.trade_milestones_cache[order_id] = cache_entry
+        if contract_id:
+            self.trade_milestones_cache[f"{sym}_{contract_id}"] = cache_entry
+
         ganancia_ticks = round(ganancia_pts / tick_size) if tick_size > 0 else 0
         sl_actual = trade["current_sl_price"]
         sl_stage = trade.get("sl_stage", 0)
@@ -1080,6 +1110,17 @@ class AxiomEngine:
             trade["sl_stage"] = nuevo_stage
             trade["current_sl_price"] = nuevo_sl
             contract_id = trade["contract_id"]
+            
+            cache_entry = {
+                "stage": nuevo_stage,
+                "stage_desc": self.format_milestone(nuevo_stage),
+                "max_pct": max_pct,
+                "max_pct_str": f"{max_pct:.1f}%"
+            }
+            if order_id and order_id != "N/A":
+                self.trade_milestones_cache[order_id] = cache_entry
+            if contract_id:
+                self.trade_milestones_cache[f"{sym}_{contract_id}"] = cache_entry
             
             # Enviar modificación a TopstepX con stopPrice
             self.mover_sl_en_topstep(contract_id, nuevo_sl, sym)
@@ -1219,9 +1260,15 @@ class AxiomEngine:
             fieldnames = [
                 'Fecha', 'Hora', 'Simbolo', 'Estado', 'Direccion', 'Precio_Mercado',
                 'Precio_Entrada_Real', 'Precio_Salida_Real', 'SL_Ticks', 'TP_Ticks',
+                'Hito_Alcanzado', 'Max_Pct_TP',
                 'PnL_Bruto_USD', 'Comisiones_USD', 'PnL_Neto_USD', 'Order_ID',
                 'Exit_Order_ID', 'Motivo_Rechazo', 'Codigo_Error', 'Condicion_Tecnica', 'Ultima_Actualizacion'
             ]
+            
+            stage = trade.get("sl_stage", 1)
+            hito_desc = self.format_milestone(stage)
+            max_pct_val = trade.get("max_pct_avance", pct_avance)
+            max_pct_str = f"{max_pct_val:.1f}%"
             
             with open(CSV_PATH, mode='a', newline='', encoding='utf-8') as file:
                 writer = csv.DictWriter(file, fieldnames=fieldnames, delimiter=';')
@@ -1231,13 +1278,15 @@ class AxiomEngine:
                     'Fecha': fecha_actual,
                     'Hora': hora_actual,
                     'Simbolo': sym,
-                    'Estado': f"SL PROTEGIDO (Hito {trade.get('sl_stage', 1)})",
+                    'Estado': f"SL PROTEGIDO ({hito_desc})",
                     'Direccion': trade["direction"],
                     'Precio_Mercado': f"{trade.get('current_price', nuevo_sl):.2f}",
                     'Precio_Entrada_Real': f"{trade['entry_price']:.2f}",
                     'Precio_Salida_Real': "PENDIENTE",
                     'SL_Ticks': str(trade.get("sl_stage", 1)),
                     'TP_Ticks': str(trade.get("tp_ticks", "Dinámico")),
+                    'Hito_Alcanzado': hito_desc,
+                    'Max_Pct_TP': max_pct_str,
                     'PnL_Bruto_USD': "0.00",
                     'Comisiones_USD': "0.00",
                     'PnL_Neto_USD': "0.00",
@@ -1288,14 +1337,19 @@ class AxiomEngine:
                 estado = "EN CURSO (OCO)"
                 motivo = "Aceptada"
                 cod_err = "0"
+                hito_alcanzado = "Inicial"
+                max_pct_tp = "0.0%"
             else:
                 motivo = str(mensaje_servidor) if mensaje_servidor else "Rechazada por TopstepX"
                 cod_err = str(error_code) if error_code else "N/A"
                 estado = f"RECHAZADA: {motivo}"
+                hito_alcanzado = "N/A"
+                max_pct_tp = "N/A"
             
             fieldnames = [
                 'Fecha', 'Hora', 'Simbolo', 'Estado', 'Direccion', 'Precio_Mercado',
                 'Precio_Entrada_Real', 'Precio_Salida_Real', 'SL_Ticks', 'TP_Ticks',
+                'Hito_Alcanzado', 'Max_Pct_TP',
                 'PnL_Bruto_USD', 'Comisiones_USD', 'PnL_Neto_USD', 'Order_ID',
                 'Exit_Order_ID', 'Motivo_Rechazo', 'Codigo_Error', 'Condicion_Tecnica', 'Ultima_Actualizacion'
             ]
@@ -1316,6 +1370,8 @@ class AxiomEngine:
                     'Precio_Salida_Real': "PENDIENTE" if exito else "N/A",
                     'SL_Ticks': ticks_sl,
                     'TP_Ticks': ticks_tp,
+                    'Hito_Alcanzado': hito_alcanzado,
+                    'Max_Pct_TP': max_pct_tp,
                     'PnL_Bruto_USD': "0.00",
                     'Comisiones_USD': "0.00",
                     'PnL_Neto_USD': "0.00",
@@ -1411,6 +1467,37 @@ class AxiomEngine:
                 else:
                     estado_str = "CERRADA ($0.00 USD)"
 
+                # Hitos y % Max TP
+                cached_data = self.trade_milestones_cache.get(order_id) or self.trade_milestones_cache.get(f"{sym}_{cid}")
+                hito_alcanzado = "Inicial"
+                max_pct_tp = "0.0%"
+
+                if cached_data:
+                    hito_alcanzado = cached_data.get("stage_desc", "Inicial")
+                    max_pct_tp = cached_data.get("max_pct_str", "0.0%")
+                else:
+                    spec = SUPPORTED_SYMBOLS.get(sym, {"tickSize": 0.25, "pointValue": 50.0})
+                    tick_sz = spec.get("tickSize", 0.25)
+                    p_exit = float(t['price'])
+                    diff_pts = (p_exit - entry_price) if direccion == "LONG" else (entry_price - p_exit)
+                    ref_tp_pts = 15.0 * tick_sz
+                    if gross_pnl > 0:
+                        calc_pct = max(0.0, (diff_pts / ref_tp_pts) * 100.0) if ref_tp_pts > 0 else 0.0
+                        if calc_pct >= 125.0:
+                            hito_alcanzado = "Hito 4 (125% TP)"
+                        elif calc_pct >= 90.0:
+                            hito_alcanzado = "Hito 3 (90% +60%)"
+                        elif calc_pct >= 75.0:
+                            hito_alcanzado = "Hito 2 (75% +35%)"
+                        elif calc_pct >= 50.0:
+                            hito_alcanzado = "Hito 1 (50% BE)"
+                        else:
+                            hito_alcanzado = "Inicial"
+                        max_pct_tp = f"{calc_pct:.1f}%"
+                    else:
+                        hito_alcanzado = "Inicial"
+                        max_pct_tp = "0.0%"
+
                 paired_trades.append({
                     "Fecha": fecha_str,
                     "Hora": hora_str,
@@ -1422,6 +1509,8 @@ class AxiomEngine:
                     "Precio_Salida_Real": f"{float(t['price']):.2f}",
                     "SL_Ticks": "10",
                     "TP_Ticks": "Dinámico",
+                    "Hito_Alcanzado": hito_alcanzado,
+                    "Max_Pct_TP": max_pct_tp,
                     "PnL_Bruto_USD": f"{gross_pnl:.2f}",
                     "Comisiones_USD": f"{total_fees_comms:.2f}",
                     "PnL_Neto_USD": f"{net_pnl:.2f}",
@@ -1444,6 +1533,15 @@ class AxiomEngine:
                 f_o = dt_o.strftime('%Y-%m-%d')
                 h_o = dt_o.strftime('%H:%M:%S')
 
+                open_trade = self.symbol_states.get(sym, {}).get("active_trade")
+                if open_trade:
+                    stg = open_trade.get("sl_stage", 0)
+                    h_open = self.format_milestone(stg)
+                    pct_open = f"{open_trade.get('max_pct_avance', 0.0):.1f}%"
+                else:
+                    h_open = "Inicial"
+                    pct_open = "0.0%"
+
                 paired_trades.append({
                     "Fecha": f_o,
                     "Hora": h_o,
@@ -1455,6 +1553,8 @@ class AxiomEngine:
                     "Precio_Salida_Real": "N/A",
                     "SL_Ticks": "10",
                     "TP_Ticks": "Dinámico",
+                    "Hito_Alcanzado": h_open,
+                    "Max_Pct_TP": pct_open,
                     "PnL_Bruto_USD": "0.00",
                     "Comisiones_USD": f"{(float(opening.get('fees', 0.0)) + float(opening.get('commissions', 0.0))):.2f}",
                     "PnL_Neto_USD": "0.00",
@@ -1501,10 +1601,14 @@ class AxiomEngine:
                     pt["Motivo_Rechazo"] = old["Motivo_Rechazo"]
                 if old.get("Codigo_Error"):
                     pt["Codigo_Error"] = old["Codigo_Error"]
+                if old.get("Hito_Alcanzado") and old["Hito_Alcanzado"] not in ["N/A", "Inicial", ""]:
+                    pt["Hito_Alcanzado"] = old["Hito_Alcanzado"]
+                if old.get("Max_Pct_TP") and old["Max_Pct_TP"] not in ["N/A", "0.0%", ""]:
+                    pt["Max_Pct_TP"] = old["Max_Pct_TP"]
             final_csv_rows.append(pt)
 
         for r_row in rejected_rows:
-            for col in ['Precio_Entrada_Real', 'Precio_Salida_Real', 'PnL_Bruto_USD', 'Comisiones_USD', 'PnL_Neto_USD', 'Exit_Order_ID', 'Motivo_Rechazo', 'Codigo_Error']:
+            for col in ['Precio_Entrada_Real', 'Precio_Salida_Real', 'PnL_Bruto_USD', 'Comisiones_USD', 'PnL_Neto_USD', 'Exit_Order_ID', 'Motivo_Rechazo', 'Codigo_Error', 'Hito_Alcanzado', 'Max_Pct_TP']:
                 if col not in r_row or not r_row[col]:
                     r_row[col] = "0.00" if "USD" in col else "N/A"
             if "Ultima_Actualizacion" not in r_row:
@@ -1514,6 +1618,7 @@ class AxiomEngine:
         fieldnames = [
             'Fecha', 'Hora', 'Simbolo', 'Estado', 'Direccion', 'Precio_Mercado',
             'Precio_Entrada_Real', 'Precio_Salida_Real', 'SL_Ticks', 'TP_Ticks',
+            'Hito_Alcanzado', 'Max_Pct_TP',
             'PnL_Bruto_USD', 'Comisiones_USD', 'PnL_Neto_USD', 'Order_ID',
             'Exit_Order_ID', 'Motivo_Rechazo', 'Codigo_Error', 'Condicion_Tecnica', 'Ultima_Actualizacion'
         ]
@@ -1609,6 +1714,10 @@ class AxiomEngine:
                 for row in reader:
                     if "Simbolo" not in row or not row["Simbolo"]:
                         row["Simbolo"] = "ES"
+                    if "Hito_Alcanzado" not in row or not row["Hito_Alcanzado"]:
+                        row["Hito_Alcanzado"] = "Inicial"
+                    if "Max_Pct_TP" not in row or not row["Max_Pct_TP"]:
+                        row["Max_Pct_TP"] = "0.0%"
                     trades.append(row)
         except Exception as e:
             print(f"Error reading CSV: {e}")

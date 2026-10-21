@@ -374,5 +374,34 @@ class TestAbsorcionVWAP(unittest.TestCase):
         self.assertEqual(trade["current_sl_price"], 20000.25, "SL debe moverse a Break-Even + 1 tick")
         self.assertGreaterEqual(trade["max_pct_avance"], 50.0)
 
+    def test_csv_hitos_y_max_pct_tp(self):
+        """Verifica que el registro de CSV y el historial incluyan Hito_Alcanzado y Max_Pct_TP."""
+        # 1. Test format_milestone
+        self.assertEqual(self.engine.format_milestone(0), "Inicial")
+        self.assertEqual(self.engine.format_milestone(1), "Hito 1 (50% BE)")
+        self.assertEqual(self.engine.format_milestone(2), "Hito 2 (75% +35%)")
+        self.assertEqual(self.engine.format_milestone(3), "Hito 3 (90% +60%)")
+        self.assertEqual(self.engine.format_milestone(4), "Hito 4 (125% TP)")
+
+        # 2. Test registrar_evento_be_en_csv
+        trade_mock = {
+            "direction": "LONG",
+            "entry_price": 5000.0,
+            "current_price": 5010.0,
+            "sl_stage": 2,
+            "tp_ticks": "Dinámico",
+            "max_pct_avance": 76.5,
+            "order_id": "TEST_BE_ORDER"
+        }
+        self.engine.registrar_evento_be_en_csv("ES", trade_mock, 5007.0, 76.5, "Hito 2 alcanzado")
+        
+        # 3. Test load_operations_history
+        ops = self.engine.load_operations_history()
+        self.assertTrue(len(ops) > 0)
+        latest_op = next((op for op in reversed(ops) if op.get("Order_ID") == "TEST_BE_ORDER"), None)
+        self.assertIsNotNone(latest_op)
+        self.assertEqual(latest_op["Hito_Alcanzado"], "Hito 2 (75% +35%)")
+        self.assertEqual(latest_op["Max_Pct_TP"], "76.5%")
+
 if __name__ == '__main__':
     unittest.main()

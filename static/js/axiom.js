@@ -697,7 +697,7 @@ document.addEventListener('DOMContentLoaded', () => {
         });
 
         if (filtered.length === 0) {
-            operationsTableBody.innerHTML = `<tr><td colspan="13" style="text-align:center; color:#64748B; padding:20px;">No hay registros de operaciones para el filtro seleccionado (${filterVal}).</td></tr>`;
+            operationsTableBody.innerHTML = `<tr><td colspan="15" style="text-align:center; color:#64748B; padding:20px;">No hay registros de operaciones para el filtro seleccionado (${filterVal}).</td></tr>`;
             return;
         }
 
@@ -726,6 +726,44 @@ document.addEventListener('DOMContentLoaded', () => {
                 ? parseFloat(r.Precio_Salida_Real).toLocaleString('en-US', { minimumFractionDigits: 2 })
                 : (r.Precio_Salida_Real || '--.--');
             
+            // Hito Alcanzado Badge
+            const hito = r.Hito_Alcanzado || 'Inicial';
+            let hitoBadge = `<span style="color:#64748B; font-size:11px;">Inicial</span>`;
+            if (hito.includes('Hito 4')) {
+                hitoBadge = `<span class="badge badge-hito-4">${escapeHtml(hito)}</span>`;
+            } else if (hito.includes('Hito 3')) {
+                hitoBadge = `<span class="badge badge-hito-3">${escapeHtml(hito)}</span>`;
+            } else if (hito.includes('Hito 2')) {
+                hitoBadge = `<span class="badge badge-hito-2">${escapeHtml(hito)}</span>`;
+            } else if (hito.includes('Hito 1')) {
+                hitoBadge = `<span class="badge badge-hito-1">${escapeHtml(hito)}</span>`;
+            } else if (hito === 'N/A') {
+                hitoBadge = `<span style="color:#64748B; font-size:11px;">--</span>`;
+            }
+
+            // Máx Avance TP %
+            const maxPctStr = r.Max_Pct_TP || '0.0%';
+            const maxPctVal = parseFloat(maxPctStr);
+            let maxPctColor = '#64748B';
+            let maxPctDisplay = maxPctStr;
+            if (!isNaN(maxPctVal)) {
+                if (maxPctVal >= 100) {
+                    maxPctColor = '#FACC15';
+                    maxPctDisplay = `+${maxPctVal.toFixed(1)}%`;
+                } else if (maxPctVal >= 50) {
+                    maxPctColor = '#10B981';
+                    maxPctDisplay = `+${maxPctVal.toFixed(1)}%`;
+                } else if (maxPctVal > 0) {
+                    maxPctColor = '#38BDF8';
+                    maxPctDisplay = `+${maxPctVal.toFixed(1)}%`;
+                } else {
+                    maxPctColor = '#64748B';
+                    maxPctDisplay = '0.0%';
+                }
+            } else if (maxPctStr === 'N/A') {
+                maxPctDisplay = '--';
+            }
+
             let motivoRechazo = '--';
             if (isRejected) {
                 if (r.Motivo_Rechazo && r.Motivo_Rechazo !== 'N/A') {
@@ -745,6 +783,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 <td><span class="badge ${isLong ? 'badge-long' : 'badge-short'}">${r.Direccion || ''}</span></td>
                 <td>${entryPrice > 0 ? entryPrice.toLocaleString('en-US', { minimumFractionDigits: 2 }) : '--.--'}</td>
                 <td>${exitPrice}</td>
+                <td>${hitoBadge}</td>
+                <td style="color:${maxPctColor}; font-weight:700; font-family:var(--font-mono);">${escapeHtml(maxPctDisplay)}</td>
                 <td style="color:${grossPnl >= 0 ? 'var(--bull-color)' : 'var(--bear-color)'}; font-weight:600;">${grossPnl >= 0 ? '+' : ''}$${grossPnl.toFixed(2)}</td>
                 <td style="color:#94A3B8;">${comms > 0 ? `-$${comms.toFixed(2)}` : '$0.00'}</td>
                 <td style="color:${netPnl >= 0 ? 'var(--bull-color)' : 'var(--bear-color)'}; font-weight:700;">${netPnl >= 0 ? '+' : ''}$${netPnl.toFixed(2)}</td>

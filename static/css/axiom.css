@@ -620,6 +620,10 @@ body {
 .badge-short { background: var(--color-bear-bg); color: var(--color-bear); border: 1px solid rgba(239, 68, 68, 0.3); }
 .badge-executed { background: rgba(59, 130, 246, 0.15); color: #60A5FA; border: 1px solid rgba(59, 130, 246, 0.3); }
 .badge-rejected { background: rgba(239, 68, 68, 0.1); color: #F87171; }
+.badge-hito-1 { background: rgba(148, 163, 184, 0.15); color: #E2E8F0; border: 1px solid #475569; }
+.badge-hito-2 { background: rgba(56, 189, 248, 0.15); color: #38BDF8; border: 1px solid #0284C7; }
+.badge-hito-3 { background: rgba(16, 185, 129, 0.15); color: #10B981; border: 1px solid #059669; }
+.badge-hito-4 { background: rgba(234, 179, 8, 0.15); color: #FACC15; border: 1px solid #CA8A04; }
 
 /* Terminal Console View */
 .terminal-window {
