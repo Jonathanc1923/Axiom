@@ -28,6 +28,25 @@ import numpy as np
 from config import CSV_PATH, CSV_DIR, SUPPORTED_SYMBOLS, DEFAULT_SYMBOL, DATA_DIR
 from topstep_client import TopstepClient
 
+def safe_parse_iso_timestamp(ts_str: str) -> datetime:
+    """Parsea timestamps ISO 8601 de TopstepX de forma segura, incluso con fracciones variables de microsegundos."""
+    if not ts_str:
+        return datetime.now()
+    try:
+        s = ts_str.replace("Z", "+00:00")
+        match = re.search(r'\.(\d+)([+-]\d{2}:\d{2})?$', s)
+        if match:
+            frac = match.group(1)[:6].ljust(6, '0')
+            tz = match.group(2) or "+00:00"
+            s = re.sub(r'\.\d+([+-]\d{2}:\d{2})?$', f'.{frac}{tz}', s)
+        return datetime.fromisoformat(s)
+    except Exception:
+        try:
+            clean_s = ts_str.split('.')[0].replace("T", " ")
+            return datetime.strptime(clean_s, "%Y-%m-%d %H:%M:%S")
+        except Exception:
+            return datetime.now()
+
 class AxiomEngine:
     def __init__(self, client: TopstepClient, default_symbol: str = DEFAULT_SYMBOL):
         self.client = client
@@ -1295,13 +1314,9 @@ class AxiomEngine:
                 order_id = str(opening['orderId']) if opening and opening.get('orderId') else "N/A"
                 exit_order_id = str(t.get('orderId', 'N/A'))
                 
-                try:
-                    dt_entry = datetime.fromisoformat(entry_ts_str.replace("Z", "+00:00"))
-                    fecha_str = dt_entry.strftime('%Y-%m-%d')
-                    hora_str = dt_entry.strftime('%H:%M:%S')
-                except Exception:
-                    fecha_str = datetime.now().strftime('%Y-%m-%d')
-                    hora_str = datetime.now().strftime('%H:%M:%S')
+                dt_entry = safe_parse_iso_timestamp(entry_ts_str)
+                fecha_str = dt_entry.strftime('%Y-%m-%d')
+                hora_str = dt_entry.strftime('%H:%M:%S')
 
                 fees = float(opening.get('fees', 0.0) if opening else 0.0) + float(t.get('fees', 0.0) or 0.0)
                 comms = float(opening.get('commissions', 0.0) if opening else 0.0) + float(t.get('commissions', 0.0) or 0.0)
@@ -1348,13 +1363,9 @@ class AxiomEngine:
                 side_str = "LONG" if opening.get('side') == 0 else "SHORT"
                 p_in = float(opening.get('price', 0.0))
                 oid = str(opening.get('orderId', 'N/A'))
-                try:
-                    dt_o = datetime.fromisoformat(opening.get('creationTimestamp', '').replace("Z", "+00:00"))
-                    f_o = dt_o.strftime('%Y-%m-%d')
-                    h_o = dt_o.strftime('%H:%M:%S')
-                except Exception:
-                    f_o = datetime.now().strftime('%Y-%m-%d')
-                    h_o = datetime.now().strftime('%H:%M:%S')
+                dt_o = safe_parse_iso_timestamp(opening.get('creationTimestamp', ''))
+                f_o = dt_o.strftime('%Y-%m-%d')
+                h_o = dt_o.strftime('%H:%M:%S')
 
                 paired_trades.append({
                     "Fecha": f_o,
