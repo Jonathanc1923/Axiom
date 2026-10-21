@@ -88,6 +88,7 @@ class AxiomEngine:
             }
             
         # Dedicated Real-time Logs per Symbol (Retención Estricta de 24 Horas)
+        self.csv_path: str = CSV_PATH
         self.logs_file_path = os.path.join(DATA_DIR, "logs_history_24h.jsonl")
         self.symbol_logs: Dict[str, List[Dict[str, Any]]] = {sym: [] for sym in SUPPORTED_SYMBOLS}
         self.log_history: List[Dict[str, Any]] = [] # Global combined stream
@@ -398,13 +399,20 @@ class AxiomEngine:
             previa_valida_short = True
             
         # Filtro de Tendencia Superior Institucional (EMA 50 en 5m):
-        # - Para LONG: Solo compras si el precio de 5m está por encima de la EMA 50
-        # - Para SHORT: Solo ventas si el precio de 5m está por debajo de la EMA 50
+        # - Para LONG: Solo compras si el precio de 5m está por encima de la EMA 50 y la EMA 50 no cae
+        # - Para SHORT: Solo ventas si el precio de 5m está por debajo de la EMA 50 y la EMA 50 no sube
         if 'EMA50' in vela_5m:
             ema50_val = float(vela_5m['EMA50'])
             c5_val = float(vela_5m['Close'])
-            previa_valida_long = previa_valida_long and (c5_val >= ema50_val)
-            previa_valida_short = previa_valida_short and (c5_val <= ema50_val)
+            
+            ema50_slope_up = True
+            ema50_slope_down = True
+            if len(df_5m) >= 5 and 'EMA50' in df_5m:
+                ema50_slope_up = ema50_val >= float(df_5m['EMA50'].iloc[-5])
+                ema50_slope_down = ema50_val <= float(df_5m['EMA50'].iloc[-5])
+                
+            previa_valida_long = previa_valida_long and (c5_val >= ema50_val) and ema50_slope_up
+            previa_valida_short = previa_valida_short and (c5_val <= ema50_val) and ema50_slope_down
             
         if not (previa_valida_long or previa_valida_short):
             return None
@@ -470,20 +478,20 @@ class AxiomEngine:
         rvol = (vol_cerrada / promedio_vol_10) if promedio_vol_10 > 0 else 1.0
 
         # CASO COMPRA (LONG):
-        # 1. El precio entró a la zona: mínimo <= VWAP + 3 ticks
-        # 2. Cerró por encima del VWAP y el cuerpo no cruzó hacia abajo: min(Open, Close) >= VWAP
+        # 1. El precio entró a la zona: mínimo <= VWAP + zona_ticks
+        # 2. Cerró por encima de VWAP pero cerca de VWAP (máximo 6 ticks sobre VWAP) para evitar perseguir el precio
         # 3. Dejó mecha inferior: Close > Low + 2 ticks
         toco_zona_long = (l_1m <= vwap_val + zona_ticks)
-        cerro_arriba_long = (min(o_1m, c_1m) >= vwap_val - (0.5 * tick_size))
+        cerro_arriba_long = (min(o_1m, c_1m) >= vwap_val - (0.5 * tick_size)) and (c_1m <= vwap_val + (6 * tick_size))
         mecha_inf = c_1m - l_1m
         mecha_confirmada_long = (mecha_inf >= 2 * tick_size)
         
         # CASO VENTA (SHORT):
-        # 1. El precio entró a la zona: máximo >= VWAP - 3 ticks
-        # 2. Cerró por debajo del VWAP y el cuerpo no cruzó hacia arriba: max(Open, Close) <= VWAP
+        # 1. El precio entró a la zona: máximo >= VWAP - zona_ticks
+        # 2. Cerró por debajo de VWAP pero cerca de VWAP (máximo 6 ticks bajo VWAP) para evitar perseguir el precio
         # 3. Dejó mecha superior: High - Close >= 2 ticks
         toco_zona_short = (h_1m >= vwap_val - zona_ticks)
-        cerro_abajo_short = (max(o_1m, c_1m) <= vwap_val + (0.5 * tick_size))
+        cerro_abajo_short = (max(o_1m, c_1m) <= vwap_val + (0.5 * tick_size)) and (c_1m >= vwap_val - (6 * tick_size))
         mecha_sup = h_1m - c_1m
         mecha_confirmada_short = (mecha_sup >= 2 * tick_size)
         
@@ -568,11 +576,23 @@ class AxiomEngine:
         tick_size = spec.get("tickSize", 0.25)
         ref_vwap = vwap_val if vwap_val is not None else precio_entrada
         
+        # Tope máximo estricto de Stop Loss según la volatilidad del activo (Capital Protection Guard)
+        MAX_SL_TICKS = {
+            "ES": 12, "MES": 12,   # 12 ticks ($150 en ES, $15 en MES)
+            "NQ": 20, "MNQ": 20,   # 20 ticks ($100 en NQ, $10 en MNQ)
+            "YM": 15, "MYM": 15,   # 15 ticks ($75 en YM, $7.50 en MYM)
+            "RTY": 15, "M2K": 15,  # 15 ticks ($75 en RTY, $7.50 en M2K)
+            "CL": 15, "MCL": 15,   # 15 ticks ($150 en CL, $15 en MCL)
+            "GC": 15, "MGC": 15    # 15 ticks ($150 en GC, $15 en MGC)
+        }
+        max_sl = MAX_SL_TICKS.get(sym, 16)
+
         if direccion == "LONG":
             # SL inicial: exactamente a 10 ticks de distancia por debajo de la línea VWAP
-            precio_sl = ref_vwap - (10 * tick_size)
-            distancia_sl_puntos = abs(precio_entrada - precio_sl)
-            ticks_sl_abs = max(round(distancia_sl_puntos / tick_size), 5)
+            precio_sl_ideal = ref_vwap - (10 * tick_size)
+            distancia_sl_puntos = abs(precio_entrada - precio_sl_ideal)
+            ticks_sl_abs = min(max(round(distancia_sl_puntos / tick_size), 5), max_sl)
+            precio_sl = precio_entrada - (ticks_sl_abs * tick_size)
             
             # TP: 60% de distancia entre VWAP y Banda Superior (min 5 ticks)
             distancia_banda = abs(upper_band - ref_vwap)
@@ -584,9 +604,10 @@ class AxiomEngine:
             
         else: # SHORT
             # SL inicial: exactamente a 10 ticks de distancia por encima de la línea VWAP
-            precio_sl = ref_vwap + (10 * tick_size)
-            distancia_sl_puntos = abs(precio_sl - precio_entrada)
-            ticks_sl_abs = max(round(distancia_sl_puntos / tick_size), 5)
+            precio_sl_ideal = ref_vwap + (10 * tick_size)
+            distancia_sl_puntos = abs(precio_sl_ideal - precio_entrada)
+            ticks_sl_abs = min(max(round(distancia_sl_puntos / tick_size), 5), max_sl)
+            precio_sl = precio_entrada + (ticks_sl_abs * tick_size)
             
             # TP: 60% de distancia entre VWAP y Banda Inferior (min 5 ticks)
             distancia_banda = abs(ref_vwap - lower_band)
@@ -663,6 +684,28 @@ class AxiomEngine:
             
         return state.get("has_open_position", False)
 
+    def tiene_alguna_posicion_abierta(self) -> tuple[bool, str]:
+        """
+        Salvaguarda de Gestión de Cartera Global:
+        Verifica si la cuenta ya tiene alguna posición abierta activa en CUALQUIER símbolo.
+        Garantiza que el bot opere con una disciplina estricta de MÁXIMO 1 OPERACIÓN A LA VEZ
+        en toda la cuenta, eliminando sobreapalancamiento y pérdidas correlacionadas (ej. NQ + MNQ o RTY + M2K).
+        """
+        for s_key, st in self.symbol_states.items():
+            if st.get("has_open_position") or st.get("active_trade"):
+                return True, s_key
+        try:
+            if self.account_id:
+                positions = self.client.get_open_positions(self.account_id)
+                for pos in positions:
+                    if abs(int(pos.get("size", 0))) > 0:
+                        cid = str(pos.get("contractId", ""))
+                        sym_name = self.resolve_symbol_from_contract(cid)
+                        return True, sym_name
+        except Exception:
+            pass
+        return False, ""
+
     # ==========================================
     # EXECUTION ENGINE: ORDER DISPATCH
     # ==========================================
@@ -678,9 +721,10 @@ class AxiomEngine:
             self.log(f"⏸️ [{sym}] Orden CANCELADA: {motivo_horario}.", "SETUP", sym)
             return
 
-        # Validación 2: Máximo 1 operación abierta por símbolo a la vez
-        if self.tiene_posicion_abierta(sym):
-            self.log(f"🛡️ [{sym}] Orden CANCELADA: Ya existe una posición abierta en mercado para {sym} (Máx 1 permitida).", "SETUP", sym)
+        # Validación 2: Candado de Cartera Global: Máximo 1 operación abierta en toda la cuenta
+        hay_abierta, sym_abierto = self.tiene_alguna_posicion_abierta()
+        if hay_abierta:
+            self.log(f"🛡️ [{sym}] Orden CANCELADA: Ya existe una posición abierta en mercado para {sym_abierto} (Máx 1 operación concurrente en toda la cuenta).", "SETUP", sym)
             return
             
         direccion = setup["direccion"]
@@ -1252,8 +1296,8 @@ class AxiomEngine:
     def registrar_evento_be_en_csv(self, sym: str, trade: Dict[str, Any], nuevo_sl: float, pct_avance: float, motivo: str = "Ajuste SL"):
         """Registra el evento de Break-Even o Profit Lock en el archivo CSV institucional para trazabilidad."""
         try:
-            os.makedirs(os.path.dirname(os.path.abspath(CSV_PATH)), exist_ok=True)
-            archivo_existe = os.path.isfile(CSV_PATH)
+            os.makedirs(os.path.dirname(os.path.abspath(self.csv_path)), exist_ok=True)
+            archivo_existe = os.path.isfile(self.csv_path) and os.path.getsize(self.csv_path) > 0
             fecha_actual = datetime.now().strftime('%Y-%m-%d')
             hora_actual = datetime.now().strftime('%H:%M:%S')
             
@@ -1270,7 +1314,7 @@ class AxiomEngine:
             max_pct_val = trade.get("max_pct_avance", pct_avance)
             max_pct_str = f"{max_pct_val:.1f}%"
             
-            with open(CSV_PATH, mode='a', newline='', encoding='utf-8') as file:
+            with open(self.csv_path, mode='a', newline='', encoding='utf-8') as file:
                 writer = csv.DictWriter(file, fieldnames=fieldnames, delimiter=';')
                 if not archivo_existe:
                     writer.writeheader()
@@ -1327,8 +1371,8 @@ class AxiomEngine:
     def registrar_en_csv(self, simbolo, direccion, precio, ticks_sl, ticks_tp, condicion, exito, mensaje_servidor, error_code, order_id):
         """Guarda la orden emitida en el archivo CSV institucional con motivo claro de rechazo según la API."""
         try:
-            os.makedirs(os.path.dirname(os.path.abspath(CSV_PATH)), exist_ok=True)
-            archivo_existe = os.path.isfile(CSV_PATH)
+            os.makedirs(os.path.dirname(os.path.abspath(self.csv_path)), exist_ok=True)
+            archivo_existe = os.path.isfile(self.csv_path) and os.path.getsize(self.csv_path) > 0
             
             fecha_actual = datetime.now().strftime('%Y-%m-%d')
             hora_actual = datetime.now().strftime('%H:%M:%S')
@@ -1354,7 +1398,7 @@ class AxiomEngine:
                 'Exit_Order_ID', 'Motivo_Rechazo', 'Codigo_Error', 'Condicion_Tecnica', 'Ultima_Actualizacion'
             ]
             
-            with open(CSV_PATH, mode='a', newline='', encoding='utf-8') as file:
+            with open(self.csv_path, mode='a', newline='', encoding='utf-8') as file:
                 writer = csv.DictWriter(file, fieldnames=fieldnames, delimiter=';')
                 if not archivo_existe:
                     writer.writeheader()
@@ -1568,9 +1612,9 @@ class AxiomEngine:
 
         # 4. Sincronizar y actualizar con el CSV en disco
         existing_rows = []
-        if os.path.isfile(CSV_PATH):
+        if os.path.isfile(self.csv_path):
             try:
-                with open(CSV_PATH, mode='r', encoding='utf-8') as f:
+                with open(self.csv_path, mode='r', encoding='utf-8') as f:
                     r = csv.DictReader(f, delimiter=';')
                     for row in r:
                         existing_rows.append(row)
@@ -1623,8 +1667,8 @@ class AxiomEngine:
             'Exit_Order_ID', 'Motivo_Rechazo', 'Codigo_Error', 'Condicion_Tecnica', 'Ultima_Actualizacion'
         ]
         try:
-            os.makedirs(os.path.dirname(os.path.abspath(CSV_PATH)), exist_ok=True)
-            with open(CSV_PATH, mode='w', newline='', encoding='utf-8') as f:
+            os.makedirs(os.path.dirname(os.path.abspath(self.csv_path)), exist_ok=True)
+            with open(self.csv_path, mode='w', newline='', encoding='utf-8') as f:
                 writer = csv.DictWriter(f, fieldnames=fieldnames, delimiter=';')
                 writer.writeheader()
                 for row in final_csv_rows:
@@ -1705,11 +1749,11 @@ class AxiomEngine:
     def load_operations_history(self) -> List[Dict[str, Any]]:
         """Lee el CSV de operaciones institucional."""
         trades = []
-        if not os.path.isfile(CSV_PATH):
+        if not os.path.isfile(self.csv_path):
             return trades
             
         try:
-            with open(CSV_PATH, mode='r', encoding='utf-8') as file:
+            with open(self.csv_path, mode='r', encoding='utf-8') as file:
                 reader = csv.DictReader(file, delimiter=';')
                 for row in reader:
                     if "Simbolo" not in row or not row["Simbolo"]:
@@ -1790,6 +1834,12 @@ class AxiomEngine:
                         self.sync_real_data_from_topstep()
                     except Exception as e:
                         self.log(f"⚠️ Error en sincronización horaria de TopstepX: {e}", "ERROR")
+
+                # Salvaguarda de Cartera Global: si ya hay una posición abierta activa en la cuenta, pausar escaneo
+                hay_global_pos, sym_global = self.tiene_alguna_posicion_abierta()
+                if hay_global_pos:
+                    time.sleep(1.0)
+                    continue
 
                 symbols_to_query = list(SUPPORTED_SYMBOLS.keys())
                 now_poll = time.time()

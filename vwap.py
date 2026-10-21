@@ -67,7 +67,7 @@ def inicializar_entorno():
     global ACCOUNT_ID, CONTRACT_ID
     
     # Buscar Cuenta (Filtro PRAC con cuenta específica)
-    TARGET_ACCOUNT = "PRAC-V2-460183-59937236"
+    TARGET_ACCOUNT = "PRAC-V2-460183-67377172"
     res_acc = requests.post(f"{API_BASE_URL}/api/Account/search", json={"onlyActiveAccounts": True}, headers=get_headers())
     cuentas = res_acc.json().get("accounts", [])
     if not cuentas: raise Exception("No se encontraron cuentas activas.")

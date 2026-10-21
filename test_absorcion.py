@@ -8,8 +8,13 @@ from topstep_client import TopstepClient
 
 class TestAbsorcionVWAP(unittest.TestCase):
     def setUp(self):
+        import tempfile
+        self.temp_csv = tempfile.NamedTemporaryFile(suffix='.csv', delete=False)
+        self.temp_csv.close()
+        
         self.mock_client = MagicMock(spec=TopstepClient)
         self.engine = AxiomEngine(self.mock_client, default_symbol="NQ")
+        self.engine.csv_path = self.temp_csv.name
         self.engine.symbol_states["NQ"]["tick_size"] = 0.25
         self.engine.symbol_states["NQ"]["contract_id"] = "CON_NQ_TEST"
         self.engine.symbol_states["ES"]["tick_size"] = 0.25
@@ -29,6 +34,14 @@ class TestAbsorcionVWAP(unittest.TestCase):
             'Upper_Band': 20040.0,
             'Lower_Band': 19960.0
         }])
+
+    def tearDown(self):
+        import os
+        if hasattr(self, 'temp_csv') and os.path.exists(self.temp_csv.name):
+            try:
+                os.remove(self.temp_csv.name)
+            except Exception:
+                pass
 
     def _crear_df_1m(self, vol_cerrada=1150, open_p=20002.0, high_p=20003.0, low_p=19999.5, close_p=20001.5):
         bars = []
