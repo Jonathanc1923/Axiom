@@ -322,6 +322,9 @@ class AxiomEngine:
         df['Upper_Band'] = df['VWAP'] + df['Std_Dev']
         df['Lower_Band'] = df['VWAP'] - df['Std_Dev']
         
+        # Filtro de Tendencia Superior Institucional: EMA 50 en 5m
+        df['EMA50'] = df['Close'].ewm(span=50, adjust=False).mean()
+        
         return df
 
     # ==========================================
@@ -377,6 +380,15 @@ class AxiomEngine:
         elif df_1m_override is not None:
             previa_valida_long = True
             previa_valida_short = True
+            
+        # Filtro de Tendencia Superior Institucional (EMA 50 en 5m):
+        # - Para LONG: Solo compras si el precio de 5m está por encima de la EMA 50
+        # - Para SHORT: Solo ventas si el precio de 5m está por debajo de la EMA 50
+        if 'EMA50' in vela_5m:
+            ema50_val = float(vela_5m['EMA50'])
+            c5_val = float(vela_5m['Close'])
+            previa_valida_long = previa_valida_long and (c5_val >= ema50_val)
+            previa_valida_short = previa_valida_short and (c5_val <= ema50_val)
             
         if not (previa_valida_long or previa_valida_short):
             return None
@@ -528,24 +540,17 @@ class AxiomEngine:
                                  vwap_val: Optional[float] = None,
                                  rvol: Optional[float] = None) -> tuple[int, int, float, float]:
         """
-        Calcula SL y TP según las reglas cuantitativas de absorción:
-        - SL: Exactamente 5 ticks sobre el extremo que alcanzó la mecha de 1m:
-              LONG: 5 ticks por debajo del precio más bajo alcanzado por la mecha (precio_sl = low_mecha - 5 ticks).
-              SHORT: 5 ticks por encima del precio más alto alcanzado por la mecha (precio_sl = high_mecha + 5 ticks).
-              Piso mínimo de SL: 5 ticks.
-        - TP: Dinámico según el porcentaje de exceso de volumen institucional detectado:
-              Ticks de TP = % Exceso de Volumen (ej. +25% vol -> 25 ticks).
-              Piso mínimo: 5 ticks.
-              Techo máximo: 60% de la distancia entre la línea VWAP y la banda correspondiente.
+        Calcula SL y TP según las reglas cuantitativas exactas:
+        - SL Inicial: Exactamente a 10 ticks de distancia de la línea VWAP
+              LONG: precio_sl = ref_vwap - (10 * tick_size)
+              SHORT: precio_sl = ref_vwap + (10 * tick_size)
+        - TP: Exactamente al 60% de la distancia entre la línea VWAP y la banda que sigue
+              LONG: 60% de distancia entre VWAP y Upper_Band (mínimo 5 ticks)
+              SHORT: 60% de distancia entre VWAP y Lower_Band (mínimo 5 ticks)
         """
         spec = SUPPORTED_SYMBOLS.get(sym, {"tickSize": 0.25})
         tick_size = spec.get("tickSize", 0.25)
         ref_vwap = vwap_val if vwap_val is not None else precio_entrada
-        
-        # 1. Base de Take Profit por porcentaje de volumen
-        rvol_val = float(rvol) if rvol is not None else 1.10
-        pct_vol = round((rvol_val - 1.0) * 100)
-        ticks_vol = max(5, pct_vol) # Piso mínimo de 5 ticks
         
         if direccion == "LONG":
             # SL inicial: exactamente a 10 ticks de distancia por debajo de la línea VWAP
@@ -553,11 +558,9 @@ class AxiomEngine:
             distancia_sl_puntos = abs(precio_entrada - precio_sl)
             ticks_sl_abs = max(round(distancia_sl_puntos / tick_size), 5)
             
-            # Techo máximo: 60% de distancia entre VWAP y Banda Superior (min 5 ticks)
+            # TP: 60% de distancia entre VWAP y Banda Superior (min 5 ticks)
             distancia_banda = abs(upper_band - ref_vwap)
-            techo_60_pct = max(round((distancia_banda * 0.60) / tick_size), 5)
-            ticks_tp_abs = min(ticks_vol, techo_60_pct)
-            ticks_tp_abs = max(ticks_tp_abs, 5) # Garantizar piso mínimo de 5 ticks
+            ticks_tp_abs = max(round((distancia_banda * 0.60) / tick_size), 5)
             precio_tp = precio_entrada + (ticks_tp_abs * tick_size)
             
             # Convención de signos TopstepX: LONG -> SL negativo (-), TP positivo (+)
@@ -569,11 +572,9 @@ class AxiomEngine:
             distancia_sl_puntos = abs(precio_sl - precio_entrada)
             ticks_sl_abs = max(round(distancia_sl_puntos / tick_size), 5)
             
-            # Techo máximo: 60% de distancia entre VWAP y Banda Inferior (min 5 ticks)
+            # TP: 60% de distancia entre VWAP y Banda Inferior (min 5 ticks)
             distancia_banda = abs(ref_vwap - lower_band)
-            techo_60_pct = max(round((distancia_banda * 0.60) / tick_size), 5)
-            ticks_tp_abs = min(ticks_vol, techo_60_pct)
-            ticks_tp_abs = max(ticks_tp_abs, 5) # Garantizar piso mínimo de 5 ticks
+            ticks_tp_abs = max(round((distancia_banda * 0.60) / tick_size), 5)
             precio_tp = precio_entrada - (ticks_tp_abs * tick_size)
             
             # Convención de signos TopstepX: SHORT -> SL positivo (+), TP negativo (-)
@@ -709,9 +710,9 @@ class AxiomEngine:
                 order_id = res.get("orderId", "N/A")
                 self.symbol_states[sym]["has_open_position"] = True
                 
-                # Inicializar seguimiento activo e independiente para la Escalera de 3 Hitos (cada 2 segundos)
+                # Inicializar seguimiento activo e independiente para la Escalera Dinámica de Hitos
                 recorrido_tp_pts = abs(precio_tp - precio_entrada)
-                target_40 = (precio_entrada + recorrido_tp_pts * 0.40) if direccion == "LONG" else (precio_entrada - recorrido_tp_pts * 0.40)
+                target_50 = (precio_entrada + recorrido_tp_pts * 0.50) if direccion == "LONG" else (precio_entrada - recorrido_tp_pts * 0.50)
                 
                 self.symbol_states[sym]["active_trade"] = {
                     "symbol": sym,
@@ -722,16 +723,19 @@ class AxiomEngine:
                     "initial_sl_price": precio_sl,
                     "current_sl_price": precio_sl,
                     "tp_price": precio_tp,
+                    "base_tp_price": precio_tp,
+                    "base_tp_pts": recorrido_tp_pts,
                     "initial_sl_ticks": ticks_sl,
                     "tp_ticks": ticks_tp,
                     "rvol": rvol,
                     "order_id": order_id,
-                    "sl_stage": 0, # 0=Inicial, 1=Hito 1 (40%), 2=Hito 2 (75%), 3=Hito 3 (90%)
+                    "sl_stage": 0, # 0=Inicial, 1=Hito 1 (50%), 2=Hito 2 (75%), 3=Hito 3 (90% + Expansión), 4=Hito 4 (125%)
+                    "tp_extensions": 0,
                     "entry_timestamp": time.time(),
                     "last_check_time": time.time()
                 }
                 
-                self.log(f"✅ Ejecución exitosa en TopstepX. Order ID: {order_id} | Escalera armada (H1 al 40% TP: {target_40:.2f})", "ORDER", sym)
+                self.log(f"✅ Ejecución exitosa en TopstepX. Order ID: {order_id} | Escalera armada (H1 al 50% TP: {target_50:.2f})", "ORDER", sym)
                 self.registrar_en_csv(
                     simbolo=sym,
                     direccion=direccion,
@@ -912,11 +916,14 @@ class AxiomEngine:
                 "direction": direccion,
                 "entry_price": entry_price,
                 "tp_price": tp_price,
+                "base_tp_price": tp_price,
+                "base_tp_pts": recorrido_tp_pts,
                 "initial_sl_price": current_sl_price,
                 "current_sl_price": current_sl_price,
                 "sl_ticks": sl_ticks,
                 "tp_ticks": tp_ticks,
                 "sl_stage": initial_stage,
+                "tp_extensions": 0,
                 "order_id": target_pos.get("id", "ADOPTADO"),
                 "sl_order_id": sl_order_id,
                 "tp_order_id": tp_order_id,
@@ -1000,23 +1007,29 @@ class AxiomEngine:
         tick_size = spec.get("tickSize", 0.25)
 
         # 2. Calcular avance porcentual utilizando TANTO el precio de cierre como el extremo más favorable de la mecha
-        recorrido_tp_pts = abs(precio_tp - precio_entrada)
+        base_recorrido_pts = trade.get("base_tp_pts")
+        if not base_recorrido_pts or base_recorrido_pts <= 0:
+            base_recorrido_pts = abs(precio_tp - precio_entrada)
+            trade["base_tp_pts"] = base_recorrido_pts
+            
         if direccion == "LONG":
             precio_favorable = max(precio_actual, vela_high if vela_high is not None else precio_actual)
             ganancia_pts = precio_favorable - precio_entrada
-            pct_avance = (ganancia_pts / recorrido_tp_pts) * 100 if recorrido_tp_pts > 0 else 0.0
+            pct_avance = (ganancia_pts / base_recorrido_pts) * 100 if base_recorrido_pts > 0 else 0.0
             
             sl_h1 = precio_entrada + (1 * tick_size)
-            sl_h2 = round((precio_entrada + recorrido_tp_pts * 0.35) / tick_size) * tick_size
-            sl_h3 = round((precio_entrada + recorrido_tp_pts * 0.60) / tick_size) * tick_size
+            sl_h2 = round((precio_entrada + base_recorrido_pts * 0.35) / tick_size) * tick_size
+            sl_h3 = round((precio_entrada + base_recorrido_pts * 0.60) / tick_size) * tick_size
+            sl_h4 = round((precio_entrada + base_recorrido_pts) / tick_size) * tick_size
         else: # SHORT
             precio_favorable = min(precio_actual, vela_low if vela_low is not None else precio_actual)
             ganancia_pts = precio_entrada - precio_favorable
-            pct_avance = (ganancia_pts / recorrido_tp_pts) * 100 if recorrido_tp_pts > 0 else 0.0
+            pct_avance = (ganancia_pts / base_recorrido_pts) * 100 if base_recorrido_pts > 0 else 0.0
             
             sl_h1 = precio_entrada - (1 * tick_size)
-            sl_h2 = round((precio_entrada - recorrido_tp_pts * 0.35) / tick_size) * tick_size
-            sl_h3 = round((precio_entrada - recorrido_tp_pts * 0.60) / tick_size) * tick_size
+            sl_h2 = round((precio_entrada - base_recorrido_pts * 0.35) / tick_size) * tick_size
+            sl_h3 = round((precio_entrada - base_recorrido_pts * 0.60) / tick_size) * tick_size
+            sl_h4 = round((precio_entrada - base_recorrido_pts) / tick_size) * tick_size
 
         # Memorizar el máximo avance histórico alcanzado durante la vida del trade
         max_pct = max(trade.get("max_pct_avance", 0.0), pct_avance)
@@ -1033,12 +1046,16 @@ class AxiomEngine:
             "TELEMETRY", sym
         )
 
-        # 3. ESCALERA DE 3 HITOS: Mover SL progresivamente según el máximo avance alcanzado
+        # 3. ESCALERA DINÁMICA DE HITOS: Mover SL progresivamente según el avance del precio
         nuevo_sl = None
         nuevo_stage = sl_stage
         motivo_hito = ""
 
-        if max_pct >= 90.0 and sl_stage < 3:
+        if max_pct >= 125.0 and sl_stage < 4:
+            nuevo_sl = sl_h4
+            nuevo_stage = 4
+            motivo_hito = f"HITO 4 (125% TP) | SL asegurando 100% de ganancia original ({sl_h4:.2f})"
+        elif max_pct >= 90.0 and sl_stage < 3:
             nuevo_sl = sl_h3
             nuevo_stage = 3
             motivo_hito = f"HITO 3 (90% TP) | Candado activado: SL asegurando +60% ganancia ({sl_h3:.2f})"
@@ -1046,10 +1063,10 @@ class AxiomEngine:
             nuevo_sl = sl_h2
             nuevo_stage = 2
             motivo_hito = f"HITO 2 (75% TP) | SL asegurando +35% ganancia ({sl_h2:.2f})"
-        elif max_pct >= 40.0 and sl_stage < 1:
+        elif max_pct >= 50.0 and sl_stage < 1:
             nuevo_sl = sl_h1
             nuevo_stage = 1
-            motivo_hito = f"HITO 1 (40% TP) | Moviendo SL a Break-Even ({sl_h1:.2f}) | Riesgo Cero"
+            motivo_hito = f"HITO 1 (50% TP) | Moviendo SL a Entrada + 1 tick ({sl_h1:.2f}) | Cero Pérdidas"
 
         # Validación estricta: Jamás retroceder el Stop Loss
         es_mejora = False
@@ -1073,7 +1090,29 @@ class AxiomEngine:
             )
             self.registrar_evento_be_en_csv(sym, trade, nuevo_sl, max_pct, motivo_hito)
 
-        # 4. SALVAGUARDA DE SEGURIDAD POR SOFTWARE (Fail-Safe Guard):
+        # 4. EXPANSIÓN DINÁMICA DE TAKE PROFIT (Permite ganar más siguiendo la dinámica del precio):
+        contract_id = trade.get("contract_id")
+        tp_extensions = trade.get("tp_extensions", 0)
+        
+        if max_pct >= 90.0 and tp_extensions == 0:
+            ext_pts = round((base_recorrido_pts * 0.40) / tick_size) * tick_size
+            nuevo_tp = (precio_tp + ext_pts) if direccion == "LONG" else (precio_tp - ext_pts)
+            trade["tp_price"] = nuevo_tp
+            trade["tp_extensions"] = 1
+            if contract_id:
+                self.mover_tp_en_topstep(contract_id, nuevo_tp, sym)
+            self.log(f"🚀 [{sym}] ¡EXPANSIÓN DINÁMICA DE TP! Precio alcanzó el {max_pct:.1f}% de la meta. Extendiendo TP a {nuevo_tp:.2f} (+40% de recorrido extra para tomar el máximo beneficio).", "ORDER", sym)
+            
+        elif max_pct >= 125.0 and tp_extensions == 1:
+            ext_pts = round((base_recorrido_pts * 0.40) / tick_size) * tick_size
+            nuevo_tp = (precio_tp + ext_pts) if direccion == "LONG" else (precio_tp - ext_pts)
+            trade["tp_price"] = nuevo_tp
+            trade["tp_extensions"] = 2
+            if contract_id:
+                self.mover_tp_en_topstep(contract_id, nuevo_tp, sym)
+            self.log(f"🚀 [{sym}] ¡SEGUNDA EXPANSIÓN DINÁMICA DE TP! Extendiendo TP a {nuevo_tp:.2f} mientras el SL resguarda el 100% de la meta original.", "ORDER", sym)
+
+        # 5. SALVAGUARDA DE SEGURIDAD POR SOFTWARE (Fail-Safe Guard):
         # Si ya se activó algún hito de protección y el precio retrocede y cruza el SL protegido:
         if trade.get("sl_stage", 0) >= 1:
             sl_protegido = trade["current_sl_price"]
@@ -1128,6 +1167,44 @@ class AxiomEngine:
                 self.log(f"ℹ️ [{sym}] No se encontró orden Stop abierta en TopstepX. Nivel protegido resguardado por software en {nuevo_sl:.2f}.", "SYSTEM", sym)
         except Exception as e:
             self.log(f"⚠️ Error al intentar mover SL en TopstepX: {e}", "ERROR", sym)
+            
+        return False
+
+    def mover_tp_en_topstep(self, contract_id: str, nuevo_tp: float, sym: str) -> bool:
+        """Localiza la orden Limit (Take Profit) activa en TopstepX para el contrato y modifica su limitPrice a nuevo_tp."""
+        if not self.account_id:
+            return False
+            
+        try:
+            open_orders = self.client.search_open_orders(self.account_id)
+            tp_order = None
+            for o in open_orders:
+                cid = str(o.get("contractId", ""))
+                otype = int(o.get("type", 0))
+                # Type 1 = Limit Order (Take Profit)
+                if cid == str(contract_id) and otype == 1:
+                    tp_order = o
+                    break
+                    
+            if tp_order:
+                order_id = tp_order.get("id")
+                size = tp_order.get("size", 1)
+                res = self.client.modify_order(
+                    account_id=self.account_id,
+                    order_id=order_id,
+                    limit_price=nuevo_tp,
+                    size=size
+                )
+                if res.get("success"):
+                    self.log(f"✅ [{sym}] Orden Limit TP #{order_id} modificada con éxito en TopstepX a {nuevo_tp:.2f}.", "ORDER", sym)
+                    return True
+                else:
+                    err_msg = res.get('errorMessage') or f"Código {res.get('errorCode')}"
+                    self.log(f"⚠️ [{sym}] Respuesta al modificar orden Limit TP #{order_id} en TopstepX: {err_msg}", "ERROR", sym)
+            else:
+                self.log(f"ℹ️ [{sym}] No se encontró orden Limit (TP) abierta en TopstepX para modificar a {nuevo_tp:.2f}.", "SYSTEM", sym)
+        except Exception as e:
+            self.log(f"⚠️ Error al intentar mover TP en TopstepX: {e}", "ERROR", sym)
             
         return False
 

@@ -80,17 +80,17 @@ class TestAbsorcionVWAP(unittest.TestCase):
         self.assertGreaterEqual(setup["rvol"], 1.10)
 
         # SL a 10 ticks de la línea VWAP (20000.0 - 2.50 = 19997.50)
-        # TP al 15% de volumen = 15 ticks (3.75 pts -> 20001.50 + 3.75 = 20005.25)
+        # TP al 60% de la distancia entre VWAP y Upper_Band (40.0 pts * 0.60 = 24.0 pts = 96 ticks)
         ticks_sl, ticks_tp, precio_sl, precio_tp = self.engine.calcular_riesgo_dinamico(
             "LONG", 20001.50, setup["extremo_precio"], 20040.0, 19960.0, "NQ", 20000.0, rvol=setup["rvol"]
         )
         self.assertEqual(precio_sl, 19997.50)  # 20000.0 - 10 * 0.25 = 19997.50 (SL a 10 ticks de VWAP)
         self.assertEqual(ticks_sl, -16)        # (20001.50 - 19997.50) / 0.25 = 16 ticks
-        self.assertEqual(ticks_tp, 15)         # 15 ticks por +15% de volumen
-        self.assertEqual(precio_tp, 20005.25)
+        self.assertEqual(ticks_tp, 96)         # 96 ticks por 60% de la banda (24.0 pts)
+        self.assertEqual(precio_tp, 20025.50)
 
     def test_short_absorcion_detectada(self):
-        """Prueba setup SHORT: Vol +20%, SL a 5 ticks del extremo, TP dinámico por volumen."""
+        """Prueba setup SHORT: SL a 10 ticks de VWAP, TP al 60% de la banda inferior."""
         df_5m_short = pd.DataFrame([{
             'Timestamp': self.now,
             'Open': 19990.0,
@@ -116,28 +116,28 @@ class TestAbsorcionVWAP(unittest.TestCase):
         self.assertEqual(setup["volumen_1m"], 1200)
 
         # SL a 10 ticks de la línea VWAP (20000.0 + 2.50 = 20002.50)
-        # TP al 20% de volumen = -20 ticks
+        # TP al 60% de la banda inferior (40.0 pts * 0.60 = 24.0 pts = 96 ticks)
         ticks_sl, ticks_tp, precio_sl, precio_tp = self.engine.calcular_riesgo_dinamico(
             "SHORT", 19998.50, setup["extremo_precio"], 20040.0, 19960.0, "NQ", 20000.0, rvol=setup["rvol"]
         )
         self.assertEqual(precio_sl, 20002.50)  # 20000.0 + 10 * 0.25 = 20002.50 (SL a 10 ticks de VWAP)
         self.assertEqual(ticks_sl, 16)         # (20002.50 - 19998.50) / 0.25 = 16 ticks
-        self.assertEqual(ticks_tp, -20)        # -20 ticks por +20% de volumen
-        self.assertEqual(precio_tp, 19993.50)
+        self.assertEqual(ticks_tp, -96)        # -96 ticks por 60% de banda inferior
+        self.assertEqual(precio_tp, 19974.50)
 
     def test_tp_techo_60_porciento_banda(self):
-        """Si el volumen es +90% pero la distancia al 60% de la banda es de 24 ticks, el TP debe limitarse a 24."""
+        """El TP debe situarse exactamente al 60% de la distancia entre la línea VWAP y la banda que sigue."""
         # Banda a solo 10 puntos del VWAP: 60% de 10 puntos = 6.0 puntos = 24 ticks
         ticks_sl, ticks_tp, precio_sl, precio_tp = self.engine.calcular_riesgo_dinamico(
-            "LONG", 20000.0, 19998.0, 20010.0, 19990.0, "NQ", 20000.0, rvol=1.90 # +90% volumen
+            "LONG", 20000.0, 19998.0, 20010.0, 19990.0, "NQ", 20000.0
         )
-        self.assertEqual(ticks_tp, 24) # Limitado al techo del 60% de la banda
+        self.assertEqual(ticks_tp, 24) # 60% de 10 puntos = 24 ticks
         self.assertEqual(precio_tp, 20006.0)
 
     def test_tp_piso_minimo_5_ticks(self):
-        """Si el volumen supera la media en solo un +2%, el TP debe respetar el piso de 5 ticks."""
+        """Si la banda está muy pegada (ej. 2 puntos), el TP debe respetar el piso de 5 ticks."""
         ticks_sl, ticks_tp, precio_sl, precio_tp = self.engine.calcular_riesgo_dinamico(
-            "LONG", 20000.0, 19998.0, 20040.0, 19960.0, "NQ", 20000.0, rvol=1.02 # +2% volumen
+            "LONG", 20000.0, 19998.0, 20002.0, 19998.0, "NQ", 20000.0
         )
         self.assertEqual(ticks_tp, 5) # Piso mínimo de 5 ticks
 
@@ -164,6 +164,30 @@ class TestAbsorcionVWAP(unittest.TestCase):
         )
         setup = self.engine.verificar_absorcion_vwap_1m(self.df_5m, "NQ", df_1m_override=df_1m)
         self.assertIsNone(setup)
+
+    def test_filtro_tendencia_5m_ema50_bloquea_contra_tendencia(self):
+        """Verifica que el Filtro de Tendencia Superior 5m bloquee compras si el precio 5m está bajo la EMA50."""
+        # Configurar 5m con EMA50 por encima del precio actual (tendencia bajista)
+        df_5m_bajista = self.df_5m.copy()
+        df_5m_bajista['EMA50'] = 20050.0 # Precio en 20002.0 < EMA50 20050.0 (Bajista)
+        
+        df_1m = self._crear_df_1m(
+            vol_cerrada=1150,
+            open_p=20002.0,
+            high_p=20003.0,
+            low_p=19999.50,
+            close_p=20001.50
+        )
+        # Intento de LONG en mercado bajista debe ser bloqueado por el filtro de tendencia
+        setup_bloqueado = self.engine.verificar_absorcion_vwap_1m(df_5m_bajista, "NQ", df_1m_override=df_1m)
+        self.assertIsNone(setup_bloqueado, "El Filtro de Tendencia 5m debe bloquear compras contra-tendencia")
+
+        # Con EMA50 por debajo del precio (tendencia alcista), el LONG debe ser aprobado
+        df_5m_alcista = self.df_5m.copy()
+        df_5m_alcista['EMA50'] = 19950.0 # Precio en 20002.0 > EMA50 19950.0 (Alcista)
+        setup_aprobado = self.engine.verificar_absorcion_vwap_1m(df_5m_alcista, "NQ", df_1m_override=df_1m)
+        self.assertIsNotNone(setup_aprobado, "El LONG debe ser aprobado cuando 5m está por encima de EMA50")
+        self.assertEqual(setup_aprobado["direccion"], "LONG")
 
     def test_escalera_3_hitos_progresivos(self):
         """Verifica la Escalera de 3 Hitos: H1 (40% -> BE+1t), H2 (75% -> +35% ganancia), H3 (90% -> +60% ganancia)."""
@@ -194,8 +218,8 @@ class TestAbsorcionVWAP(unittest.TestCase):
             "last_check_time": 0.0
         }
 
-        # 1. Precio alcanza el 42% (20008.50) -> Dispara Hito 1 (SL a BE + 1 tick = 20000.25)
-        df_h1 = pd.DataFrame([{'Close': 20008.50}])
+        # 1. Precio alcanza el 52.5% (20010.50) -> Dispara Hito 1 (SL a BE + 1 tick = 20000.25)
+        df_h1 = pd.DataFrame([{'Close': 20010.50}])
         self.engine.monitorear_posicion_abierta("NQ", df_h1)
         trade = self.engine.symbol_states["NQ"]["active_trade"]
         self.assertEqual(trade["sl_stage"], 1, "Debe estar en Hito 1")
@@ -208,12 +232,14 @@ class TestAbsorcionVWAP(unittest.TestCase):
         self.assertEqual(trade["sl_stage"], 2, "Debe estar en Hito 2")
         self.assertEqual(trade["current_sl_price"], 20007.00, "El SL debe asegurar +35% (20007.00)")
 
-        # 3. Precio alcanza el 91% (20018.25) -> Dispara Hito 3 (SL asegura +60% de ganancia = 20012.00)
+        # 3. Precio alcanza el 91% (20018.25) -> Dispara Hito 3 (SL asegura +60% = 20012.00) y expande TP (+40% = 20028.00)
         trade["last_check_time"] = 0.0
         df_h3 = pd.DataFrame([{'Close': 20018.25}])
         self.engine.monitorear_posicion_abierta("NQ", df_h3)
         self.assertEqual(trade["sl_stage"], 3, "Debe estar en Hito 3")
         self.assertEqual(trade["current_sl_price"], 20012.00, "El SL debe asegurar +60% (20012.00)")
+        self.assertEqual(trade["tp_extensions"], 1, "El TP debe haberse expandido 1 vez")
+        self.assertEqual(trade["tp_price"], 20028.00, "El nuevo TP expandido debe ser 20028.00 (+8 pts)")
 
     def test_independencia_entre_simbolos(self):
         """Verifica que un trade abierto en NQ no interfiere ni contamina el estado de ES."""
@@ -339,14 +365,14 @@ class TestAbsorcionVWAP(unittest.TestCase):
             "last_check_time": 0.0
         }
 
-        # La vela viva tiene Close en 20005.0 (avance 25% < 40%), pero su High llegó a 20009.0 (avance 45% >= 40%)
-        df_live = pd.DataFrame([{'Open': 20003.0, 'High': 20009.0, 'Low': 20002.0, 'Close': 20005.0}])
+        # La vela viva tiene Close en 20005.0 (avance 25% < 50%), pero su High llegó a 20011.0 (avance 55% >= 50%)
+        df_live = pd.DataFrame([{'Open': 20003.0, 'High': 20011.0, 'Low': 20002.0, 'Close': 20005.0}])
         self.engine.monitorear_posicion_abierta("NQ", df_live)
 
         trade = self.engine.symbol_states["NQ"]["active_trade"]
         self.assertEqual(trade["sl_stage"], 1, "Debe alcanzar Hito 1 gracias al High de la mecha viva")
         self.assertEqual(trade["current_sl_price"], 20000.25, "SL debe moverse a Break-Even + 1 tick")
-        self.assertGreaterEqual(trade["max_pct_avance"], 40.0)
+        self.assertGreaterEqual(trade["max_pct_avance"], 50.0)
 
 if __name__ == '__main__':
     unittest.main()
