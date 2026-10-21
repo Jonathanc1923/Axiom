@@ -684,28 +684,6 @@ class AxiomEngine:
             
         return state.get("has_open_position", False)
 
-    def tiene_alguna_posicion_abierta(self) -> tuple[bool, str]:
-        """
-        Salvaguarda de Gestión de Cartera Global:
-        Verifica si la cuenta ya tiene alguna posición abierta activa en CUALQUIER símbolo.
-        Garantiza que el bot opere con una disciplina estricta de MÁXIMO 1 OPERACIÓN A LA VEZ
-        en toda la cuenta, eliminando sobreapalancamiento y pérdidas correlacionadas (ej. NQ + MNQ o RTY + M2K).
-        """
-        for s_key, st in self.symbol_states.items():
-            if st.get("has_open_position") or st.get("active_trade"):
-                return True, s_key
-        try:
-            if self.account_id:
-                positions = self.client.get_open_positions(self.account_id)
-                for pos in positions:
-                    if abs(int(pos.get("size", 0))) > 0:
-                        cid = str(pos.get("contractId", ""))
-                        sym_name = self.resolve_symbol_from_contract(cid)
-                        return True, sym_name
-        except Exception:
-            pass
-        return False, ""
-
     # ==========================================
     # EXECUTION ENGINE: ORDER DISPATCH
     # ==========================================
@@ -721,10 +699,9 @@ class AxiomEngine:
             self.log(f"⏸️ [{sym}] Orden CANCELADA: {motivo_horario}.", "SETUP", sym)
             return
 
-        # Validación 2: Candado de Cartera Global: Máximo 1 operación abierta en toda la cuenta
-        hay_abierta, sym_abierto = self.tiene_alguna_posicion_abierta()
-        if hay_abierta:
-            self.log(f"🛡️ [{sym}] Orden CANCELADA: Ya existe una posición abierta en mercado para {sym_abierto} (Máx 1 operación concurrente en toda la cuenta).", "SETUP", sym)
+        # Validación 2: Máximo 1 operación abierta por símbolo a la vez
+        if self.tiene_posicion_abierta(sym):
+            self.log(f"🛡️ [{sym}] Orden CANCELADA: Ya existe una posición abierta en mercado para {sym} (Máx 1 permitida).", "SETUP", sym)
             return
             
         direccion = setup["direccion"]
@@ -733,7 +710,7 @@ class AxiomEngine:
         spec = SUPPORTED_SYMBOLS.get(sym, {"tickSize": 0.25})
         tick_size = spec.get("tickSize", 0.25)
         contract_id = self.symbol_states[sym]["contract_id"]
-        precio_entrada = float(df.iloc[-1]['Close'])
+        precio_entrada = float(setup.get("vela_cruce", {}).get("Close", df.iloc[-1]['Close']))
         rvol = setup.get("rvol", 1.10)
         
         ticks_sl, ticks_tp, precio_sl, precio_tp = self.calcular_riesgo_dinamico(
@@ -745,15 +722,15 @@ class AxiomEngine:
             rvol=rvol
         )
         
-        info_sl = f"SL: {abs(ticks_sl)} ticks ({precio_sl:,.2f} | 5 ticks desde extremo de mecha)"
-        info_tp = f"TP: {abs(ticks_tp)} ticks ({precio_tp:,.2f} | Dinámico por Volumen / Techo 60% Banda)"
+        info_sl = f"SL: {abs(ticks_sl)} ticks ({precio_sl:,.2f} | Base VWAP +-10t)"
+        info_tp = f"TP: {abs(ticks_tp)} ticks ({precio_tp:,.2f} | Techo 60% Banda)"
         self.log(f"🚨 DISPARANDO {direccion} | Entrada: {precio_entrada:,.2f} | {info_sl} | {info_tp}", "ORDER", sym)
         
         side = 1 if direccion == "SHORT" else 0
         mecha_pts = setup.get("mecha_pts", 0.0)
         mecha_ticks = round(mecha_pts / tick_size) if tick_size > 0 else 0
         rvol_info = f" | +{(rvol-1.0)*100:.1f}% Vol" if "rvol" in setup else ""
-        condicion_str = f"Absorcion VWAP 1m {setup['vwap_cruce']:.2f} ({mecha_ticks}t Mecha{rvol_info} | Extremo {extremo_precio:.2f}). SL: 5t Mecha ({precio_sl:.2f}) | TP Dinamico: {abs(ticks_tp)}t ({precio_tp:.2f})"
+        condicion_str = f"Absorcion VWAP 1m {setup['vwap_cruce']:.2f} ({mecha_ticks}t Mecha{rvol_info}). SL: {abs(ticks_sl)}t ({precio_sl:.2f}) | TP 60% Banda: {abs(ticks_tp)}t ({precio_tp:.2f})"
         
         try:
             res = self.client.place_order(
@@ -1834,12 +1811,6 @@ class AxiomEngine:
                         self.sync_real_data_from_topstep()
                     except Exception as e:
                         self.log(f"⚠️ Error en sincronización horaria de TopstepX: {e}", "ERROR")
-
-                # Salvaguarda de Cartera Global: si ya hay una posición abierta activa en la cuenta, pausar escaneo
-                hay_global_pos, sym_global = self.tiene_alguna_posicion_abierta()
-                if hay_global_pos:
-                    time.sleep(1.0)
-                    continue
 
                 symbols_to_query = list(SUPPORTED_SYMBOLS.keys())
                 now_poll = time.time()
