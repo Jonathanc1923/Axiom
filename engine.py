@@ -342,15 +342,34 @@ class AxiomEngine:
         vela_5m = df_5m.iloc[-1]
         vwap_val = float(vela_5m['VWAP'])
         zona_ticks = 5 * tick_size
+
+        # 1. Filtro Institucional de Contexto: Vela previa de 5m completa del lado del rebote
+        # La vela de 5 minutos anterior no debe haber pasado ni tocado el VWAP en cuerpo y mecha:
+        # - Para LONG (esperamos rebote alcista): vela previa completamente por encima de VWAP (Low > VWAP)
+        # - Para SHORT (esperamos rebote bajista): vela previa completamente por debajo de VWAP (High < VWAP)
+        previa_valida_long = False
+        previa_valida_short = False
         
-        # 1. Filtro previo de Zona Caliente en 5m:
+        if len(df_5m) >= 2:
+            vela_5m_prev = df_5m.iloc[-2]
+            vwap_prev = float(vela_5m_prev.get('VWAP', vwap_val))
+            previa_valida_long = float(vela_5m_prev['Low']) > (vwap_prev + (0.5 * tick_size))
+            previa_valida_short = float(vela_5m_prev['High']) < (vwap_prev - (0.5 * tick_size))
+        elif df_1m_override is not None:
+            previa_valida_long = True
+            previa_valida_short = True
+            
+        if not (previa_valida_long or previa_valida_short):
+            return None
+        
+        # 2. Filtro previo de Zona Caliente en 5m:
         # Verificar si la vela actual de 5m ha tocado o está dentro de VWAP +- 5 ticks
         en_zona_5m_long = float(vela_5m['Low']) <= vwap_val + zona_ticks
         en_zona_5m_short = float(vela_5m['High']) >= vwap_val - zona_ticks
         if not (en_zona_5m_long or en_zona_5m_short):
             return None
             
-        # 2. Obtener velas de 1 minuto (TopstepX History o test override)
+        # 3. Obtener velas de 1 minuto (TopstepX History o test override)
         if df_1m_override is not None:
             df_1m = df_1m_override
         else:
@@ -421,8 +440,8 @@ class AxiomEngine:
         mecha_sup = h_1m - c_1m
         mecha_confirmada_short = (mecha_sup >= 2 * tick_size)
         
-        es_long = toco_zona_long and cerro_arriba_long and mecha_confirmada_long
-        es_short = toco_zona_short and cerro_abajo_short and mecha_confirmada_short
+        es_long = toco_zona_long and cerro_arriba_long and mecha_confirmada_long and previa_valida_long
+        es_short = toco_zona_short and cerro_abajo_short and mecha_confirmada_short and previa_valida_short
         
         # Si ambas fueran técnicamente verdaderas, desempatar por el lado hacia donde cerró la vela
         if es_long and es_short:
@@ -510,9 +529,8 @@ class AxiomEngine:
         ticks_vol = max(5, pct_vol) # Piso mínimo de 5 ticks
         
         if direccion == "LONG":
-            # SL: 5 ticks por debajo del precio más bajo que haya alcanzado la mecha
-            ref_extremo = extremo_precio if extremo_precio is not None else (precio_entrada - (5 * tick_size))
-            precio_sl = ref_extremo - (5 * tick_size)
+            # SL inicial: exactamente a 10 ticks de distancia por debajo de la línea VWAP
+            precio_sl = ref_vwap - (10 * tick_size)
             distancia_sl_puntos = abs(precio_entrada - precio_sl)
             ticks_sl_abs = max(round(distancia_sl_puntos / tick_size), 5)
             
@@ -527,9 +545,8 @@ class AxiomEngine:
             return -ticks_sl_abs, ticks_tp_abs, precio_sl, precio_tp
             
         else: # SHORT
-            # SL: 5 ticks por encima del precio más alto que haya alcanzado la mecha
-            ref_extremo = extremo_precio if extremo_precio is not None else (precio_entrada + (5 * tick_size))
-            precio_sl = ref_extremo + (5 * tick_size)
+            # SL inicial: exactamente a 10 ticks de distancia por encima de la línea VWAP
+            precio_sl = ref_vwap + (10 * tick_size)
             distancia_sl_puntos = abs(precio_sl - precio_entrada)
             ticks_sl_abs = max(round(distancia_sl_puntos / tick_size), 5)
             
@@ -904,15 +921,16 @@ class AxiomEngine:
             self.log(f"⚠️ Error al intentar adoptar posición abierta para {sym}: {e}", "ERROR", sym)
             return None
 
-    def monitorear_posicion_abierta(self, sym: str, df: pd.DataFrame):
+    def monitorear_posicion_abierta(self, sym: str, df: Optional[pd.DataFrame] = None):
         """
-        Analiza cada 2 segundos de manera independiente la operación abierta del símbolo:
-        - Mide el progreso en tiempo real hacia el Take Profit.
+        Analiza de manera independiente la operación abierta del símbolo:
+        - Mide el progreso en tiempo real hacia el Take Profit utilizando TANTO el precio de cierre como los extremos de mecha (High/Low).
+        - Memoriza el máximo avance alcanzado en la vida del trade para garantizar que ningún hito se pierda ante fluctuaciones rápidas.
         - ESCALERA DE 3 HITOS PROGRESIVOS:
           * Hito 1 (al 40% del TP): Mueve SL a Entrada + 1 tick (Break-Even / Riesgo Cero).
           * Hito 2 (al 75% del TP): Sube SL para asegurar el +35% de ganancia del trade.
           * Hito 3 (al 90% del TP): Sube SL para asegurar el +60% de ganancia (candado final).
-        - Fail-Safe Guard: Si el precio retrocede y toca el SL protegido, garantiza la salida.
+        - Fail-Safe Guard: Si el precio retrocede y toca el SL protegido, garantiza la salida inmediata a mercado.
         - Registra cada hito en la telemetría, consola y en el archivo CSV institucional.
         - Detecta el cierre de la posición para liberar el seguimiento limpiamente.
         """
@@ -926,7 +944,7 @@ class AxiomEngine:
                 return
 
         now = time.time()
-        if now - trade.get("last_check_time", 0.0) < 1.8:
+        if now - trade.get("last_check_time", 0.0) < 0.5:
             return
         trade["last_check_time"] = now
 
@@ -939,10 +957,18 @@ class AxiomEngine:
             return
 
         precio_actual = None
+        vela_high = None
+        vela_low = None
+        
         if df is not None and not df.empty:
-            precio_actual = float(df.iloc[-1]['Close'])
+            vela = df.iloc[-1]
+            precio_actual = float(vela['Close'])
+            vela_high = float(vela.get('High', precio_actual))
+            vela_low = float(vela.get('Low', precio_actual))
         elif state.get("telemetry", {}).get("close"):
             precio_actual = float(state["telemetry"]["close"])
+            vela_high = precio_actual
+            vela_low = precio_actual
 
         if precio_actual is None:
             return
@@ -954,22 +980,28 @@ class AxiomEngine:
         spec = SUPPORTED_SYMBOLS.get(sym, {"tickSize": 0.25})
         tick_size = spec.get("tickSize", 0.25)
 
-        # 2. Calcular avance porcentual y precios de los 3 hitos
+        # 2. Calcular avance porcentual utilizando TANTO el precio de cierre como el extremo más favorable de la mecha
         recorrido_tp_pts = abs(precio_tp - precio_entrada)
         if direccion == "LONG":
-            ganancia_pts = precio_actual - precio_entrada
+            precio_favorable = max(precio_actual, vela_high if vela_high is not None else precio_actual)
+            ganancia_pts = precio_favorable - precio_entrada
             pct_avance = (ganancia_pts / recorrido_tp_pts) * 100 if recorrido_tp_pts > 0 else 0.0
             
             sl_h1 = precio_entrada + (1 * tick_size)
             sl_h2 = round((precio_entrada + recorrido_tp_pts * 0.35) / tick_size) * tick_size
             sl_h3 = round((precio_entrada + recorrido_tp_pts * 0.60) / tick_size) * tick_size
         else: # SHORT
-            ganancia_pts = precio_entrada - precio_actual
+            precio_favorable = min(precio_actual, vela_low if vela_low is not None else precio_actual)
+            ganancia_pts = precio_entrada - precio_favorable
             pct_avance = (ganancia_pts / recorrido_tp_pts) * 100 if recorrido_tp_pts > 0 else 0.0
             
             sl_h1 = precio_entrada - (1 * tick_size)
             sl_h2 = round((precio_entrada - recorrido_tp_pts * 0.35) / tick_size) * tick_size
             sl_h3 = round((precio_entrada - recorrido_tp_pts * 0.60) / tick_size) * tick_size
+
+        # Memorizar el máximo avance histórico alcanzado durante la vida del trade
+        max_pct = max(trade.get("max_pct_avance", 0.0), pct_avance)
+        trade["max_pct_avance"] = max_pct
 
         ganancia_ticks = round(ganancia_pts / tick_size) if tick_size > 0 else 0
         sl_actual = trade["current_sl_price"]
@@ -977,25 +1009,25 @@ class AxiomEngine:
         stage_str = f" [HITO {sl_stage}]" if sl_stage > 0 else ""
         
         self.log(
-            f"🎯 [{sym}] Trade {direccion} activo{stage_str} | In: {precio_entrada:.2f} | Now: {precio_actual:.2f} "
-            f"({ganancia_ticks:+d}t | {pct_avance:.1f}% TP) | SL: {sl_actual:.2f} | TP: {precio_tp:.2f}",
+            f"🎯 [{sym}] Trade {direccion} activo{stage_str} | In: {precio_entrada:.2f} | Now: {precio_actual:.2f} (Fav: {precio_favorable:.2f}) "
+            f"({ganancia_ticks:+d}t | {pct_avance:.1f}% TP | Max: {max_pct:.1f}%) | SL: {sl_actual:.2f} | TP: {precio_tp:.2f}",
             "TELEMETRY", sym
         )
 
-        # 3. ESCALERA DE 3 HITOS: Mover SL progresivamente
+        # 3. ESCALERA DE 3 HITOS: Mover SL progresivamente según el máximo avance alcanzado
         nuevo_sl = None
         nuevo_stage = sl_stage
         motivo_hito = ""
 
-        if pct_avance >= 90.0 and sl_stage < 3:
+        if max_pct >= 90.0 and sl_stage < 3:
             nuevo_sl = sl_h3
             nuevo_stage = 3
             motivo_hito = f"HITO 3 (90% TP) | Candado activado: SL asegurando +60% ganancia ({sl_h3:.2f})"
-        elif pct_avance >= 75.0 and sl_stage < 2:
+        elif max_pct >= 75.0 and sl_stage < 2:
             nuevo_sl = sl_h2
             nuevo_stage = 2
             motivo_hito = f"HITO 2 (75% TP) | SL asegurando +35% ganancia ({sl_h2:.2f})"
-        elif pct_avance >= 40.0 and sl_stage < 1:
+        elif max_pct >= 40.0 and sl_stage < 1:
             nuevo_sl = sl_h1
             nuevo_stage = 1
             motivo_hito = f"HITO 1 (40% TP) | Moviendo SL a Break-Even ({sl_h1:.2f}) | Riesgo Cero"
@@ -1013,14 +1045,14 @@ class AxiomEngine:
             trade["current_sl_price"] = nuevo_sl
             contract_id = trade["contract_id"]
             
-            # Enviar modificación a TopstepX
+            # Enviar modificación a TopstepX con stopPrice
             self.mover_sl_en_topstep(contract_id, nuevo_sl, sym)
             
             self.log(
-                f"🛡️ [{sym}] ¡{motivo_hito}! Avance: +{pct_avance:.1f}% de TP.",
+                f"🛡️ [{sym}] ¡{motivo_hito}! Avance: +{max_pct:.1f}% de TP.",
                 "ORDER", sym
             )
-            self.registrar_evento_be_en_csv(sym, trade, nuevo_sl, pct_avance, motivo_hito)
+            self.registrar_evento_be_en_csv(sym, trade, nuevo_sl, max_pct, motivo_hito)
 
         # 4. SALVAGUARDA DE SEGURIDAD POR SOFTWARE (Fail-Safe Guard):
         # Si ya se activó algún hito de protección y el precio retrocede y cruza el SL protegido:
@@ -1496,17 +1528,65 @@ class AxiomEngine:
         return trades
 
     # ==========================================
-    # MULTI-SYMBOL BACKGROUND ENGINE LOOP
+    # DUAL-PROCESS ENGINE ARCHITECTURE
     # ==========================================
-    def run_loop(self):
-        self.log("⏳ Motor Multi-Símbolo Activo. Telemetría y scanner iniciados...", "SYSTEM")
-        if self.last_sync_time == 0:
-            self.last_sync_time = time.time()
-            self.next_sync_time = time.time() + self.sync_interval_seconds
+    def run_trade_monitor_loop(self):
+        """
+        SUBPROCESO 1: MONITOR DE POSICIONES Y TRAILING STOP DE TIEMPO REAL (1.0s)
+        - Exclusivo para gestión de operaciones abiertas.
+        - No descarga historial pesado ni calcula VWAP.
+        - Detecta y adopta posiciones abiertas en TopstepX.
+        - Consulta el precio actual y el extremo vivo de la mecha (High/Low) en <50ms.
+        - Ajusta el Stop Loss inmediatamente si se alcanzó o superó cualquiera de los 3 hitos.
+        - Aplica salvaguarda Fail-Safe ante retrocesos.
+        """
+        self.log("⚡ [FAST TRACKER] Hilo dedicado de monitoreo de operaciones iniciado (1.0s).", "SYSTEM")
         
         while not self.stop_event.is_set():
             try:
-                # 0. Sincronización horaria automática con TopstepX (cada 1 hora = 3600 segundos)
+                # 1. Sincronización global rápida de posiciones en la cuenta TopstepX
+                self.sincronizar_posiciones_activas_cuenta()
+                
+                # 2. Localizar símbolos con operación abierta
+                for sym, state in list(self.symbol_states.items()):
+                    if self.stop_event.is_set():
+                        break
+                        
+                    has_trade = (state.get("active_trade") is not None) or state.get("has_open_position", False)
+                    if not has_trade:
+                        continue
+                        
+                    contract_id = state.get("contract_id")
+                    if not contract_id:
+                        continue
+                        
+                    # Consulta ultra-ligera de 1 sola barra viva de 1m (<50ms de latencia)
+                    df_live = self.client.retrieve_bars(contract_id, unit=2, unit_number=1, limit=1)
+                    self.monitorear_posicion_abierta(sym, df_live)
+                    
+            except Exception as e:
+                self.log(f"⚠️ Excepción en Fast Trade Tracker: {e}", "ERROR")
+                
+            if not self.stop_event.is_set():
+                time.sleep(1.0)
+                
+        self.log("🛑 Fast Trade Tracker detenido correctamente.", "SYSTEM")
+
+    def run_scanner_loop(self):
+        """
+        SUBPROCESO 2: ESCÁNER DE NUEVAS ENTRADAS Y TELEMETRÍA VWAP (Segundo Plano)
+        - Descarga historial de 350 barras para el cálculo de sesión VWAP y bandas.
+        - Si un símbolo ya tiene posición abierta, omite el escaneo para ese símbolo (lo gestiona Subproceso 1).
+        - Evalúa el filtro de horario institucional CME (18:00-20:00 ET).
+        - Evalúa la condición de vela previa de 5m limpia (cuerpo y mecha completa del lado del rebote).
+        - Evalúa la absorción de volumen en 1m (+10% esfuerzo vs SMA10, mecha >= 2 ticks).
+        - Despacha órdenes OCO bracket y las entrega a Subproceso 1.
+        """
+        self.log("🔍 [SCANNER] Hilo de escaneo institucional VWAP iniciado.", "SYSTEM")
+        
+        while not self.stop_event.is_set():
+            try:
+                # 0. Sincronización horaria periódica con TopstepX
                 if time.time() - self.last_sync_time >= self.sync_interval_seconds:
                     self.log("⏰ [SINCRONIZACIÓN HORARIA] Actualizando balance y operaciones reales con TopstepX...", "SYSTEM")
                     try:
@@ -1514,10 +1594,6 @@ class AxiomEngine:
                     except Exception as e:
                         self.log(f"⚠️ Error en sincronización horaria de TopstepX: {e}", "ERROR")
 
-                # 1. Sincronización global rápida de posiciones en la cuenta TopstepX
-                self.sincronizar_posiciones_activas_cuenta()
-
-                # 2. Monitorear los símbolos con control inteligente de tasa (Rate Limit)
                 symbols_to_query = list(SUPPORTED_SYMBOLS.keys())
                 now_poll = time.time()
                 
@@ -1532,20 +1608,19 @@ class AxiomEngine:
                         
                     is_enabled = state.get("enabled", False)
                     is_active_view = (sym == self.active_symbol)
-                    has_open_pos = state.get("has_open_position", False) or (state.get("active_trade") is not None)
                     
-                    # Control inteligente de frecuencia:
-                    # - Símbolos activos, en pantalla o con POSICIÓN ABIERTA: sondeo prioritario cada 2.0 segundos.
-                    # - Símbolos inactivos sin posición: sondeo de baja frecuencia cada 60 segundos.
-                    min_interval = 2.0 if (is_enabled or is_active_view or has_open_pos) else 60.0
+                    # Si ya tiene una operación abierta activa, Subproceso 1 se encarga de ella.
+                    if state.get("active_trade") or state.get("has_open_position"):
+                        continue
+                        
+                    # Frecuencia de escaneo: cada 5.0 segundos para activos/pantalla; cada 60s para inactivos
+                    min_interval = 5.0 if (is_enabled or is_active_view) else 60.0
                     if (now_poll - state.get("last_poll_time", 0.0)) < min_interval:
                         continue
                     state["last_poll_time"] = now_poll
                     
-                    # Descargamos historial de 350 velas para asegurar la sesión completa CME (reseteo 18:00 ET)
-                    limit_bars = 350
-                    
-                    df = self.client.retrieve_bars(contract_id, unit=2, unit_number=5, limit=limit_bars, days_back=2)
+                    # Descargamos historial de 350 velas para VWAP acumulativo desde 18:00 ET
+                    df = self.client.retrieve_bars(contract_id, unit=2, unit_number=5, limit=350, days_back=2)
                     if not df.empty:
                         df = self.calcular_vwap_sesion(df)
                         
@@ -1572,29 +1647,21 @@ class AxiomEngine:
                                 "cooldown_remaining": cd_left
                             }
                         
-                        # Emitir telemetría para todos los símbolos habilitados o para la vista activa
+                        # Emitir telemetría para símbolos habilitados o vista activa
                         if is_enabled or is_active_view:
                             self.log(f"📊 {sym}: {vela_actual['Close']:,.2f} | 🔴 Sup: {vela_actual['Upper_Band']:,.2f} | 🔵 VWAP: {vela_actual['VWAP']:,.2f} | 🟢 Inf: {vela_actual['Lower_Band']:,.2f} | Dist: {dist_vwap:+.2f} pts", "TELEMETRY", sym)
                         
-                        # 2. Evaluación de Trading Autónomo y Gestión de Posición
-                        # A. Monitoreo prioritario de operaciones abiertas (cada 2 segundos de forma independiente para CUALQUIER símbolo con posición)
-                        if has_open_pos or self.tiene_posicion_abierta(sym):
-                            self.monitorear_posicion_abierta(sym, df)
-                            continue
-
-                        # B. Evaluación de NUEVAS operaciones para símbolos habilitados:
+                        # Evaluación de NUEVAS operaciones para símbolos habilitados
                         if is_enabled:
                             vela_actual = df.iloc[-1]
                             vela_ts = vela_actual['Timestamp']
                             time_str = vela_ts.strftime('%H:%M')
                             
-                            # Si detectamos una nueva vela 5m iniciada, emitimos notificación
                             if state.get("current_active_candle_ts") != vela_ts:
                                 state["current_active_candle_ts"] = vela_ts
                                 self.log(f"🕯️ [{sym}] Vela 5m activa ({time_str} UTC). Monitoreando zona VWAP y absorción...", "SETUP", sym)
 
-                            # B. Filtros de entrada para NUEVAS operaciones:
-                            # 1. Filtro institucional de sesión CME (primeras 2 horas tras la apertura: 18:00-20:00 ET y receso diario)
+                            # 1. Filtro institucional de sesión CME (primeras 2 horas tras apertura y receso)
                             is_operable, motivo_horario = self.es_horario_operable()
                             if not is_operable:
                                 if state.get("last_inoperable_reason") != motivo_horario:
@@ -1604,15 +1671,15 @@ class AxiomEngine:
                             else:
                                 state["last_inoperable_reason"] = None
 
-                            # 2. Control de ejecución: Cooldown activo
+                            # 2. Cooldown
                             if time.time() < state["cooldown_until"]:
                                 continue
 
-                            # 3. Control de ejecución: Máximo 1 operación por ciclo
+                            # 3. Máximo 1 operación por ciclo
                             if state.get("last_executed_candle_ts") == vela_ts:
                                 continue
 
-                            # 5. Evaluación de Absorción Institucional en VWAP (1m + Esfuerzo Volumen >= 1.10x)
+                            # 4. Evaluación de Absorción Institucional en VWAP (incluye condición de vela previa 5m limpia)
                             setup = self.verificar_absorcion_vwap_1m(df, sym)
                             if setup:
                                 state["last_executed_candle_ts"] = vela_ts
@@ -1627,28 +1694,30 @@ class AxiomEngine:
                                 )
                                 self.ejecutar_orden(setup, df, sym)
                     
-                    # Pausa de cortesía entre consultas individuales para no saturar la API
-                    time.sleep(0.35)
+                    time.sleep(0.25)
                     
             except requests.exceptions.HTTPError as he:
                 if he.response is not None and he.response.status_code == 429:
                     self.log("⏸️ TopstepX Rate Limit temporal alcanzado (HTTP 429). Pausando 6 segundos...", "SYSTEM")
                     time.sleep(6)
                 else:
-                    self.log(f"⚠️ Excepción en el ciclo multi-símbolo: {he}", "ERROR", "ALL")
+                    self.log(f"⚠️ Excepción en el escáner multi-símbolo: {he}", "ERROR", "ALL")
             except Exception as e:
                 err_str = str(e)
                 if "429" in err_str:
                     self.log("⏸️ TopstepX Rate Limit temporal alcanzado (HTTP 429). Pausando 6 segundos...", "SYSTEM")
                     time.sleep(6)
                 else:
-                    self.log(f"⚠️ Excepción en el ciclo multi-símbolo: {e}", "ERROR", "ALL")
+                    self.log(f"⚠️ Excepción en el escáner multi-símbolo: {e}", "ERROR", "ALL")
                 
-            # Intervalo dinámico entre rondas completas de sondeo en vivo (1 segundo)
             if not self.stop_event.is_set():
-                time.sleep(1)
+                time.sleep(1.0)
 
-        self.log("🛑 Motor multi-símbolo detenido correctamente.", "SYSTEM", "ALL")
+        self.log("🛑 Escáner multi-símbolo detenido correctamente.", "SYSTEM", "ALL")
+
+    def run_loop(self):
+        """Bucle unificado de compatibilidad si se invoca directamente."""
+        self.run_scanner_loop()
 
     # ==========================================
     # LIFECYCLE MANAGEMENT
@@ -1660,9 +1729,17 @@ class AxiomEngine:
             
         self.stop_event.clear()
         self.running = True
-        self.thread = threading.Thread(target=self.run_loop, daemon=True)
-        self.thread.start()
-        self.log("⚡ Motor multi-símbolo iniciado en segundo plano.", "SYSTEM")
+        
+        # Subproceso 1: Monitor de Posiciones Abiertas y Trailing Stop de Alta Frecuencia (1.0s)
+        self.trade_monitor_thread = threading.Thread(target=self.run_trade_monitor_loop, daemon=True, name="Axiom-FastTracker")
+        self.trade_monitor_thread.start()
+        self.thread = self.trade_monitor_thread
+        
+        # Subproceso 2: Escáner de Señales VWAP y Telemetría
+        self.scanner_thread = threading.Thread(target=self.run_scanner_loop, daemon=True, name="Axiom-Scanner")
+        self.scanner_thread.start()
+        
+        self.log("⚡ Motor multi-símbolo iniciado con arquitectura dual: Subproceso 1 (Fast Trailing Stop 1s) + Subproceso 2 (Escáner VWAP).", "SYSTEM")
 
     def stop(self):
         if not self.running:
@@ -1671,8 +1748,12 @@ class AxiomEngine:
         self.log("🛑 Deteniendo motor multi-símbolo...", "SYSTEM")
         self.running = False
         self.stop_event.set()
-        if self.thread and self.thread.is_alive():
-            self.thread.join(timeout=3)
+        
+        if hasattr(self, "trade_monitor_thread") and self.trade_monitor_thread and self.trade_monitor_thread.is_alive():
+            self.trade_monitor_thread.join(timeout=2)
+            
+        if hasattr(self, "scanner_thread") and self.scanner_thread and self.scanner_thread.is_alive():
+            self.scanner_thread.join(timeout=2)
 
     def emergency_flatten(self, symbol_key: Optional[str] = None) -> Dict[str, Any]:
         """Cierra inmediatamente posiciones en el símbolo o en todos."""

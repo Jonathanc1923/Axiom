@@ -79,13 +79,13 @@ class TestAbsorcionVWAP(unittest.TestCase):
         self.assertEqual(setup["volumen_1m"], 1150)
         self.assertGreaterEqual(setup["rvol"], 1.10)
 
-        # SL a 5 ticks debajo del extremo 19999.50 (19999.50 - 1.25 = 19998.25)
+        # SL a 10 ticks de la línea VWAP (20000.0 - 2.50 = 19997.50)
         # TP al 15% de volumen = 15 ticks (3.75 pts -> 20001.50 + 3.75 = 20005.25)
         ticks_sl, ticks_tp, precio_sl, precio_tp = self.engine.calcular_riesgo_dinamico(
             "LONG", 20001.50, setup["extremo_precio"], 20040.0, 19960.0, "NQ", 20000.0, rvol=setup["rvol"]
         )
-        self.assertEqual(precio_sl, 19998.25)  # 19999.50 - 5 * 0.25 = 19998.25
-        self.assertEqual(ticks_sl, -13)        # (20001.50 - 19998.25) / 0.25 = 13 ticks
+        self.assertEqual(precio_sl, 19997.50)  # 20000.0 - 10 * 0.25 = 19997.50 (SL a 10 ticks de VWAP)
+        self.assertEqual(ticks_sl, -16)        # (20001.50 - 19997.50) / 0.25 = 16 ticks
         self.assertEqual(ticks_tp, 15)         # 15 ticks por +15% de volumen
         self.assertEqual(precio_tp, 20005.25)
 
@@ -115,13 +115,13 @@ class TestAbsorcionVWAP(unittest.TestCase):
         self.assertEqual(setup["extremo_precio"], 20000.50)
         self.assertEqual(setup["volumen_1m"], 1200)
 
-        # SL a 5 ticks encima del extremo 20000.50 (20000.50 + 1.25 = 20001.75)
+        # SL a 10 ticks de la línea VWAP (20000.0 + 2.50 = 20002.50)
         # TP al 20% de volumen = -20 ticks
         ticks_sl, ticks_tp, precio_sl, precio_tp = self.engine.calcular_riesgo_dinamico(
             "SHORT", 19998.50, setup["extremo_precio"], 20040.0, 19960.0, "NQ", 20000.0, rvol=setup["rvol"]
         )
-        self.assertEqual(precio_sl, 20001.75)  # 20000.50 + 5 * 0.25 = 20001.75
-        self.assertEqual(ticks_sl, 13)         # (20001.75 - 19998.50) / 0.25 = 13 ticks
+        self.assertEqual(precio_sl, 20002.50)  # 20000.0 + 10 * 0.25 = 20002.50 (SL a 10 ticks de VWAP)
+        self.assertEqual(ticks_sl, 16)         # (20002.50 - 19998.50) / 0.25 = 16 ticks
         self.assertEqual(ticks_tp, -20)        # -20 ticks por +20% de volumen
         self.assertEqual(precio_tp, 19993.50)
 
@@ -288,6 +288,65 @@ class TestAbsorcionVWAP(unittest.TestCase):
             self.assertEqual(json_payload["orderId"], 9876)
             self.assertEqual(json_payload["stopPrice"], 20005.25)
             self.assertNotIn("price", json_payload)
+
+    def test_condicion_vela_5m_previa_limpia(self):
+        """
+        Verifica la condición extra:
+        La vela de 5 minutos anterior debe haber estado completa del lado del rebote sin tocar ni pasar el VWAP.
+        """
+        df_1m = self._crear_df_1m(vol_cerrada=1200, open_p=20002.0, high_p=20003.0, low_p=19999.50, close_p=20001.50)
+        
+        # Caso 1: Vela previa de 5m limpia arriba de VWAP (Low: 20002.0 > VWAP 20000.0) -> ACEPTA
+        df_5m_valido = pd.DataFrame([
+            {'Timestamp': self.now - timedelta(minutes=5), 'Open': 20005.0, 'High': 20010.0, 'Low': 20002.0, 'Close': 20006.0, 'Volume': 4000, 'VWAP': 20000.0, 'Upper_Band': 20040.0, 'Lower_Band': 19960.0},
+            {'Timestamp': self.now, 'Open': 20006.0, 'High': 20008.0, 'Low': 19999.5, 'Close': 20002.0, 'Volume': 5000, 'VWAP': 20000.0, 'Upper_Band': 20040.0, 'Lower_Band': 19960.0}
+        ])
+        setup_valido = self.engine.verificar_absorcion_vwap_1m(df_5m_valido, "NQ", df_1m_override=df_1m)
+        self.assertIsNotNone(setup_valido, "Debe aceptar setup si la vela previa estuvo completamente arriba de VWAP")
+
+        # Caso 2: Vela previa de 5m tocó o cruzó el VWAP (Low: 19998.0 <= VWAP 20000.0) -> RECHAZA
+        df_5m_invalido = pd.DataFrame([
+            {'Timestamp': self.now - timedelta(minutes=5), 'Open': 20005.0, 'High': 20007.0, 'Low': 19998.0, 'Close': 20001.0, 'Volume': 4000, 'VWAP': 20000.0, 'Upper_Band': 20040.0, 'Lower_Band': 19960.0},
+            {'Timestamp': self.now, 'Open': 20001.0, 'High': 20005.0, 'Low': 19999.5, 'Close': 20002.0, 'Volume': 5000, 'VWAP': 20000.0, 'Upper_Band': 20040.0, 'Lower_Band': 19960.0}
+        ])
+        setup_invalido = self.engine.verificar_absorcion_vwap_1m(df_5m_invalido, "NQ", df_1m_override=df_1m)
+        self.assertIsNone(setup_invalido, "Debe rechazar si la vela previa de 5m tocó o cruzó el VWAP")
+
+    def test_fast_tracker_mecha_viva(self):
+        """
+        Verifica que el Fast Tracker reconozca el hito si la mecha viva (Low/High) tocó la meta,
+        incluso si el precio de cierre en ese instante rebotó.
+        """
+        self.engine.symbol_states["NQ"]["has_open_position"] = True
+        self.mock_client.get_open_positions.return_value = [{"contractId": "CON_NQ_TEST", "size": 1}]
+        self.mock_client.search_open_orders.return_value = [{"id": 7777, "contractId": "CON_NQ_TEST", "type": 4, "size": 1}]
+        self.mock_client.modify_order.return_value = {"success": True}
+
+        entry_p = 20000.0
+        tp_p = 20020.0
+        
+        self.engine.symbol_states["NQ"]["active_trade"] = {
+            "symbol": "NQ",
+            "contract_id": "CON_NQ_TEST",
+            "direction": "LONG",
+            "entry_price": entry_p,
+            "current_price": entry_p,
+            "initial_sl_price": 19997.50,
+            "current_sl_price": 19997.50,
+            "tp_price": tp_p,
+            "tp_ticks": 80,
+            "sl_stage": 0,
+            "last_check_time": 0.0
+        }
+
+        # La vela viva tiene Close en 20005.0 (avance 25% < 40%), pero su High llegó a 20009.0 (avance 45% >= 40%)
+        df_live = pd.DataFrame([{'Open': 20003.0, 'High': 20009.0, 'Low': 20002.0, 'Close': 20005.0}])
+        self.engine.monitorear_posicion_abierta("NQ", df_live)
+
+        trade = self.engine.symbol_states["NQ"]["active_trade"]
+        self.assertEqual(trade["sl_stage"], 1, "Debe alcanzar Hito 1 gracias al High de la mecha viva")
+        self.assertEqual(trade["current_sl_price"], 20000.25, "SL debe moverse a Break-Even + 1 tick")
+        self.assertGreaterEqual(trade["max_pct_avance"], 40.0)
 
 if __name__ == '__main__':
     unittest.main()
