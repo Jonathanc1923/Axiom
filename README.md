@@ -6,16 +6,18 @@ Plataforma web institucional de trading algorítmico y ejecución cuantitativa p
 
 ## 🏛️ Identidad y Arquitectura de la Firma
 
-**Axiom Algorithmic** implementa un modelo de reversión a la media institucional basado en el **VWAP de Sesión (Volume-Weighted Average Price)** y bandas de desviación estándar (+1σ / -1σ) sincronizadas con el ciclo horario de los mercados de futuros (apertura y reinicio a las 18:00 ET / New York).
+**Axiom Algorithmic (v2.0)** implementa un modelo cuantitativo institucional de reversión a la media de alta frecuencia basado exclusivamente en el **VWAP de Sesión (Volume-Weighted Average Price)** y bandas de desviación estándar (+1σ / -1σ) sincronizadas con el ciclo horario de los mercados de futuros CME (reinicio diario a las 18:00 ET / New York).
 
 ### Módulos Principales:
-- **Dashboard Web Institucional**: Gráfico de velas interactivas de 5 minutos con la librería de grado bancario **TradingView Lightweight Charts**, superposición de VWAP, bandas superior/inferior y marcadores de órdenes ejecutadas en tiempo real.
-- **Motor Autónomo Multiactivo**: Ejecuta la estrategia en segundo plano de manera automática al arrancar (`AUTO_START_ENGINE=true`), y permite cambiar o monitorear dinámicamente símbolos como `ES`, `NQ`, `YM`, `RTY`, `MES`, `MNQ`, `CL` y `GC`.
-- **Terminal de Telemetría en Vivo (WebSockets)**: Transmite en vivo a la consola web cada pulso de mercado, evaluaciones de velas cerradas, rechazos en VWAP y respuestas del servidor con la misma fidelidad que en consola.
-- **Gestión Dinámica de Riesgo OCO**: Cálculo dinámico de Stop Loss (fuera del VWAP por margen de protección) y Take Profit (75% del recorrido hacia la banda), respetando la convención de signos exigida por TopstepX / ProjectX.
-- **Filtro de Seguridad PRACTICE**: Conexión protegida exclusivamente hacia cuentas de simulación/práctica (`PRAC`), evitando ejecuciones accidentales en cuentas reales.
-- **Kill Switch de Emergencia**: Botón de *Flatten* para liquidar y cerrar inmediatamente cualquier posición abierta.
-- **Caja Negra CSV**: Registro auditado en `registro_operaciones.csv` con exportación directa desde el navegador.
+- **Estrategia Pura VWAP Touch (Cero Volumen)**: Disparo instantáneo a mercado al tocar o traspasar la línea de VWAP, con filtro estricto de contexto en 5m (la vela previa debe haber estado 100% en cuerpo y mecha del lado del rebote).
+- **Gestión Dinámica de Riesgo OCO Universal**: Stop Loss inicial fijo de 25 ticks para todos los instrumentos y Take Profit inicial proyectado a la banda lateral correspondiente ($D_{base}$).
+- **Escalera de Trailing Stop de Alta Frecuencia (2 Segundos)**:
+  - **Hito 1 (Avance $\ge 40\%$ de $D_{base}$)**: Mueve SL a Entrada + 1 tick (Break-Even protegido).
+  - **Hito 2 (Avance $\ge 70\%$ de $D_{base}$)**: Asegura SL al 45% de $D_{base}$ y amplía TP al 120% de $D_{base}$.
+  - **Hito 3 (Avance $\ge 120\%$ de $D_{base}$)**: Asegura SL al 108% de $D_{base}$ (90% del nivel 120%) y sube TP al 150% de $D_{base}$ (límite máximo final).
+- **Dashboard Web Institucional**: Gráfico de velas de 5 minutos con **TradingView Lightweight Charts**, superposición de VWAP, bandas superior/inferior y marcadores de ejecución en tiempo real.
+- **Terminal de Telemetría en Vivo (WebSockets)**: Transmite en vivo cada latido de 2 segundos a la consola web y persiste 24 horas continuas de eventos en disco (`logs_history_24h.jsonl`).
+- **Caja Negra CSV**: Registro auditado y trazable de todas las órdenes e hitos en `registro_operaciones.csv` para auditoría y post-análisis cuantitativo.
 
 ---
 

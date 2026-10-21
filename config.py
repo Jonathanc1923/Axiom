@@ -34,7 +34,38 @@ CSV_DIR = DATA_DIR
 CSV_PATH = os.path.join(DATA_DIR, "registro_operaciones.csv")
 
 # ==========================================
-# Supported Institutional CME Futures
+# Institutional Strategy Configuration: Pure VWAP Reversion & Trailing
+# ==========================================
+# Stop Loss Inicial universal fijo (25 ticks para todos los activos)
+INITIAL_SL_TICKS = int(os.getenv("INITIAL_SL_TICKS", "25"))
+
+# Intervalo central de monitoreo y actualización de mercado (2.0 segundos)
+POLL_INTERVAL_SECONDS = float(os.getenv("POLL_INTERVAL_SECONDS", "2.0"))
+
+# Escalera de Hitos Dinámicos Infinitos (Porcentajes sobre D_base)
+# Hito 1: Al 40% de recorrido -> SL a BE + 1 tick
+HITO_1_TRIGGER_PCT = 40.0
+
+# Hito 2: Al 70% de recorrido -> SL al 45%, TP ampliado al 120%
+HITO_2_TRIGGER_PCT = 70.0
+HITO_2_SL_PCT = 0.45
+HITO_2_TP_EXPAND_PCT = 1.20
+
+# Hito 3: Al 120% de recorrido -> SL al 108% (90% de 120%), TP final al 150%
+HITO_3_TRIGGER_PCT = 120.0
+HITO_3_SL_PCT = 1.08
+HITO_3_TP_EXPAND_PCT = 1.50
+
+# Hito 4: Al 135% de recorrido -> SL al 128%, TP ampliado al 170%
+HITO_4_TRIGGER_PCT = 135.0
+HITO_4_SL_PCT = 1.28
+HITO_4_TP_EXPAND_PCT = 1.70
+
+# Hitos Infinitos (Paso recurrente de expansión cada 20% adicional)
+RUNNER_STEP_PCT = 20.0
+
+# ==========================================
+# Supported Institutional CME Futures Specifications
 # ==========================================
 SUPPORTED_SYMBOLS = {
     "ES": {
@@ -44,7 +75,7 @@ SUPPORTED_SYMBOLS = {
         "tickSize": 0.25,
         "tickValue": 12.50, # USD per tick per contract
         "pointValue": 50.0,
-        "defaultSlPoints": 1.25, # 5 ticks
+        "defaultSlTicks": 25,
     },
     "NQ": {
         "name": "E-mini Nasdaq-100",
@@ -53,7 +84,7 @@ SUPPORTED_SYMBOLS = {
         "tickSize": 0.25,
         "tickValue": 5.00,
         "pointValue": 20.0,
-        "defaultSlPoints": 3.00, # 12 ticks
+        "defaultSlTicks": 25,
     },
     "YM": {
         "name": "E-mini Dow Jones ($5)",
@@ -62,7 +93,7 @@ SUPPORTED_SYMBOLS = {
         "tickSize": 1.0,
         "tickValue": 5.00,
         "pointValue": 5.0,
-        "defaultSlPoints": 10.0, # 10 ticks
+        "defaultSlTicks": 25,
     },
     "RTY": {
         "name": "E-mini Russell 2000",
@@ -71,7 +102,7 @@ SUPPORTED_SYMBOLS = {
         "tickSize": 0.1,
         "tickValue": 5.00,
         "pointValue": 50.0,
-        "defaultSlPoints": 1.0, # 10 ticks
+        "defaultSlTicks": 25,
     },
     "MES": {
         "name": "Micro E-mini S&P 500",
@@ -80,7 +111,7 @@ SUPPORTED_SYMBOLS = {
         "tickSize": 0.25,
         "tickValue": 1.25,
         "pointValue": 5.0,
-        "defaultSlPoints": 1.25,
+        "defaultSlTicks": 25,
     },
     "MNQ": {
         "name": "Micro E-mini Nasdaq-100",
@@ -89,7 +120,7 @@ SUPPORTED_SYMBOLS = {
         "tickSize": 0.25,
         "tickValue": 0.50,
         "pointValue": 2.0,
-        "defaultSlPoints": 3.00,
+        "defaultSlTicks": 25,
     },
     "CL": {
         "name": "Crude Oil Futures",
@@ -98,7 +129,7 @@ SUPPORTED_SYMBOLS = {
         "tickSize": 0.01,
         "tickValue": 10.00,
         "pointValue": 1000.0,
-        "defaultSlPoints": 0.15,
+        "defaultSlTicks": 25,
     },
     "GC": {
         "name": "Gold Futures",
@@ -107,7 +138,7 @@ SUPPORTED_SYMBOLS = {
         "tickSize": 0.1,
         "tickValue": 10.00,
         "pointValue": 100.0,
-        "defaultSlPoints": 1.5,
+        "defaultSlTicks": 25,
     },
     "MYM": {
         "name": "Micro E-mini Dow Jones",
@@ -116,7 +147,7 @@ SUPPORTED_SYMBOLS = {
         "tickSize": 1.0,
         "tickValue": 0.50,
         "pointValue": 0.50,
-        "defaultSlPoints": 10.0,
+        "defaultSlTicks": 25,
     },
     "M2K": {
         "name": "Micro E-mini Russell 2000",
@@ -125,7 +156,7 @@ SUPPORTED_SYMBOLS = {
         "tickSize": 0.1,
         "tickValue": 0.50,
         "pointValue": 5.0,
-        "defaultSlPoints": 1.0,
+        "defaultSlTicks": 25,
     },
     "MGC": {
         "name": "Micro Gold Futures",
@@ -134,7 +165,7 @@ SUPPORTED_SYMBOLS = {
         "tickSize": 0.1,
         "tickValue": 1.00,
         "pointValue": 10.0,
-        "defaultSlPoints": 1.5,
+        "defaultSlTicks": 25,
     },
     "MCL": {
         "name": "Micro Crude Oil Futures",
@@ -143,6 +174,6 @@ SUPPORTED_SYMBOLS = {
         "tickSize": 0.01,
         "tickValue": 1.00,
         "pointValue": 100.0,
-        "defaultSlPoints": 0.15,
+        "defaultSlTicks": 25,
     }
 }
