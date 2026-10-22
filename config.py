@@ -46,20 +46,20 @@ POLL_INTERVAL_SECONDS = float(os.getenv("POLL_INTERVAL_SECONDS", "2.0"))
 # Hito 1: Al 40% de recorrido -> SL a BE + 1 tick
 HITO_1_TRIGGER_PCT = 40.0
 
-# Hito 2: Al 70% de recorrido -> SL al 45%, TP ampliado al 120%
+# Hito 2: Al 70% de recorrido -> SL al 45%, TP ampliado al 140% (para permitir avance hacia Hito 3)
 HITO_2_TRIGGER_PCT = 70.0
 HITO_2_SL_PCT = 0.45
-HITO_2_TP_EXPAND_PCT = 1.20
+HITO_2_TP_EXPAND_PCT = 1.40
 
-# Hito 3: Al 120% de recorrido -> SL al 108% (90% de 120%), TP final al 150%
+# Hito 3: Al 120% de recorrido -> SL al 108% (90% de 120%), TP ampliado al 170%
 HITO_3_TRIGGER_PCT = 120.0
 HITO_3_SL_PCT = 1.08
-HITO_3_TP_EXPAND_PCT = 1.50
+HITO_3_TP_EXPAND_PCT = 1.70
 
-# Hito 4: Al 135% de recorrido -> SL al 128%, TP ampliado al 170%
+# Hito 4: Al 135% de recorrido -> SL al 128%, TP ampliado al 200%
 HITO_4_TRIGGER_PCT = 135.0
 HITO_4_SL_PCT = 1.28
-HITO_4_TP_EXPAND_PCT = 1.70
+HITO_4_TP_EXPAND_PCT = 2.00
 
 # Hitos Infinitos (Paso recurrente de expansión cada 20% adicional)
 RUNNER_STEP_PCT = 20.0
