@@ -184,8 +184,9 @@ class TopstepClient:
             res.raise_for_status()
             data = res.json()
             
-            if data.get("success") and data.get("bars"):
-                df = pd.DataFrame(data["bars"])
+            bars = data.get("bars") if isinstance(data, dict) else None
+            if bars:
+                df = pd.DataFrame(bars)
                 df = df.rename(columns={
                     't': 'Timestamp',
                     'o': 'Open',
