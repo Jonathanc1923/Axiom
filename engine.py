@@ -760,17 +760,19 @@ class AxiomEngine:
                 nuevo_tp = round_to_tick(precio_entrada + (d_base * tp_k_pct), tick_size) if direccion == "LONG" else round_to_tick(precio_entrada - (d_base * tp_k_pct), tick_size)
                 motivo_hito = f"HITO {target_stage} ({trig_k:.0f}% D_base) | SL al {sl_k_pct*100:.0f}% ({nuevo_sl:.2f}) | TP Ampliado al {tp_k_pct*100:.0f}% ({nuevo_tp:.2f})"
 
-            trade["sl_stage"] = target_stage
-            if nuevo_sl is not None:
-                trade["current_sl_price"] = nuevo_sl
-            if nuevo_tp is not None:
-                trade["current_tp_price"] = nuevo_tp
-
             # Ajustar órdenes de forma atómica en TopstepX con una sola consulta
-            self.ajustar_bracket_en_topstep(contract_id, nuevo_sl, nuevo_tp, sym)
+            mod_ok = self.ajustar_bracket_en_topstep(contract_id, nuevo_sl, nuevo_tp, sym)
+            if mod_ok:
+                trade["sl_stage"] = target_stage
+                if nuevo_sl is not None:
+                    trade["current_sl_price"] = nuevo_sl
+                if nuevo_tp is not None:
+                    trade["current_tp_price"] = nuevo_tp
 
-            self.log(f"🏆 [{sym}] ¡{motivo_hito}! Recorrido máximo: {max_pct:.1f}%", "ORDER", sym)
-            self.registrar_evento_be_en_csv(sym, trade, nuevo_sl or sl_actual, max_pct, motivo_hito)
+                self.log(f"🏆 [{sym}] ¡{motivo_hito}! Recorrido máximo: {max_pct:.1f}%", "ORDER", sym)
+                self.registrar_evento_be_en_csv(sym, trade, nuevo_sl or sl_actual, max_pct, motivo_hito)
+            else:
+                self.log(f"⚠️ [{sym}] Error al ajustar brackets en TopstepX. Se reintentará automáticamente en el próximo ciclo de 2s...", "ORDER", sym)
 
         # SALVAGUARDA FAIL-SAFE POR SOFTWARE
         # Si ya se activó al menos el Hito 1 y el precio retrocede traspasando el SL protegido:
@@ -807,6 +809,7 @@ class AxiomEngine:
             return False
             
         success = True
+        orders_found = 0
         spec = SUPPORTED_SYMBOLS.get(sym, {"tickSize": 0.25})
         tick_size = spec.get("tickSize", 0.25)
 
@@ -823,6 +826,7 @@ class AxiomEngine:
                 if cid == target_cid or order_sym == sym:
                     # Type 4 = Stop Order (SL)
                     if otype == 4 and nuevo_sl is not None:
+                        orders_found += 1
                         curr_stop = o.get("stopPrice")
                         if curr_stop is not None and abs(float(curr_stop) - float(nuevo_sl)) < (0.01 * tick_size):
                             continue # Ya está en el nivel deseado
@@ -843,6 +847,7 @@ class AxiomEngine:
                             
                     # Type 1 = Limit Order (TP)
                     elif otype == 1 and nuevo_tp is not None:
+                        orders_found += 1
                         curr_limit = o.get("limitPrice")
                         if curr_limit is not None and abs(float(curr_limit) - float(nuevo_tp)) < (0.01 * tick_size):
                             continue # Ya está en el nivel deseado
@@ -860,6 +865,10 @@ class AxiomEngine:
                             success = False
                             err_msg = res.get('errorMessage') or f"Código {res.get('errorCode')}"
                             self.log(f"⚠️ [{sym}] Error al ampliar TP #{order_id}: {err_msg}", "ERROR", sym)
+
+            if orders_found == 0:
+                # No había órdenes en TopstepX para modificar, retornar True para que el fail-safe en software proteja el trade
+                return True
         except Exception as e:
             self.log(f"⚠️ Error al ajustar brackets en TopstepX: {e}", "ERROR", sym)
             return False
