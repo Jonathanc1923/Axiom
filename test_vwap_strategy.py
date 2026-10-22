@@ -116,6 +116,76 @@ class TestPureVWAPStrategy(unittest.TestCase):
         self.assertEqual(setup["direccion"], "LONG")
         self.assertEqual(setup["precio_entrada"], 4995.0)
 
+    def test_setup_short_rechazado_si_vela_previa_estuvo_arriba(self):
+        """Si la vela previa estuvo por encima de VWAP, NO se puede abrir SHORT de reversión."""
+        df_5m = pd.DataFrame([
+            {
+                'Timestamp': self.now - timedelta(minutes=5),
+                'Open': 52775.0, 'High': 52781.0, 'Low': 52755.0, 'Close': 52770.0, # 100% arriba de VWAP 52740
+                'Volume': 1000, 'VWAP': 52740.0, 'Upper_Band': 52780.0, 'Lower_Band': 52700.0
+            },
+            {
+                'Timestamp': self.now,
+                'Open': 52767.0, 'High': 52841.0, 'Low': 52755.0, 'Close': 52820.0,
+                'Volume': 1200, 'VWAP': 52743.0, 'Upper_Band': 52783.0, 'Lower_Band': 52703.0
+            }
+        ])
+        setup = self.engine.verificar_setup_vwap(df_5m, "YM", current_price=52820.0)
+        self.assertIsNone(setup, "Debe rechazar SHORT porque la vela previa estuvo arriba de VWAP")
+
+    def test_setup_short_rechazado_si_vela_actual_abrio_arriba_de_vwap(self):
+        """Si la vela actual abrió por encima de VWAP, no venimos desde abajo -> Rechazado para SHORT."""
+        df_5m = pd.DataFrame([
+            {
+                'Timestamp': self.now - timedelta(minutes=5),
+                'Open': 52710.0, 'High': 52725.0, 'Low': 52700.0, 'Close': 52720.0, # Abajo de VWAP
+                'Volume': 1000, 'VWAP': 52740.0, 'Upper_Band': 52780.0, 'Lower_Band': 52700.0
+            },
+            {
+                'Timestamp': self.now,
+                'Open': 52750.0, # Abrió por encima de VWAP 52743
+                'High': 52760.0, 'Low': 52740.0, 'Close': 52745.0,
+                'Volume': 1200, 'VWAP': 52743.0, 'Upper_Band': 52783.0, 'Lower_Band': 52703.0
+            }
+        ])
+        setup = self.engine.verificar_setup_vwap(df_5m, "YM", current_price=52745.0)
+        self.assertIsNone(setup, "Debe rechazar SHORT si la vela actual abrió por encima de VWAP")
+
+    def test_setup_short_rechazado_si_precio_se_dispara_lejos_de_vwap(self):
+        """Si el precio sube excesivamente lejos de VWAP hacia la banda superior, ya no es toque de VWAP."""
+        df_5m = pd.DataFrame([
+            {
+                'Timestamp': self.now - timedelta(minutes=5),
+                'Open': 52710.0, 'High': 52725.0, 'Low': 52700.0, 'Close': 52720.0,
+                'Volume': 1000, 'VWAP': 52740.0, 'Upper_Band': 52780.0, 'Lower_Band': 52700.0
+            },
+            {
+                'Timestamp': self.now,
+                'Open': 52735.0, # Abrió abajo
+                'High': 52841.0, 'Low': 52730.0, 'Close': 52820.0, # Disparado a 52820 (80 pts arriba)
+                'Volume': 1200, 'VWAP': 52743.0, 'Upper_Band': 52783.0, 'Lower_Band': 52703.0
+            }
+        ])
+        setup = self.engine.verificar_setup_vwap(df_5m, "YM", current_price=52820.0)
+        self.assertIsNone(setup, "Debe rechazar SHORT cuando el precio se escapa 80 puntos por encima de VWAP")
+
+    def test_setup_rechazado_si_vela_desactualizada_mayor_a_6_minutos(self):
+        """Si la vela en el DataFrame tiene más de 6 minutos de antigüedad, rechazar por datos obsoletos."""
+        df_5m = pd.DataFrame([
+            {
+                'Timestamp': self.now - timedelta(minutes=20),
+                'Open': 5015.0, 'High': 5020.0, 'Low': 5005.0, 'Close': 5010.0,
+                'Volume': 1000, 'VWAP': 5000.0, 'Upper_Band': 5040.0, 'Lower_Band': 4960.0
+            },
+            {
+                'Timestamp': self.now - timedelta(minutes=15), # Vela obsoleta (hace 15 minutos)
+                'Open': 5008.0, 'High': 5012.0, 'Low': 4999.5, 'Close': 5000.0,
+                'Volume': 1200, 'VWAP': 5000.0, 'Upper_Band': 5040.0, 'Lower_Band': 4960.0
+            }
+        ])
+        setup = self.engine.verificar_setup_vwap(df_5m, "ES", current_price=5000.0)
+        self.assertIsNone(setup, "Debe rechazar cualquier setup con velas obsoletas (> 6 min)")
+
     def test_ejecutar_orden_convencion_signos_long_y_short(self):
         """Verifica que el SL sea NEGATIVO para LONG y POSITIVO para SHORT según TopstepX API."""
         setup_long = {

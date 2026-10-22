@@ -353,17 +353,27 @@ class AxiomEngine:
         """
         Estrategia de Reversión VWAP Institucional Pura:
         
-        REGLA DE CONTEXTO (Vela previa de 5m completa en nuestro lado):
-        - Para LONG (esperamos rebote alcista):
-          La vela previa de 5 minutos debe haber estado 100% por encima del VWAP:
-          prev_candle.Low > prev_candle.VWAP
-        - Para SHORT (esperamos rebote bajista):
-          La vela previa de 5 minutos debe haber estado 100% por debajo del VWAP:
-          prev_candle.High < prev_candle.VWAP
+        REGLA DE CONTEXTO ESTRICTA (Velas previas cerradas):
+        1. Comprobación de frescura de datos: la última vela debe tener < 6 minutos de antigüedad.
+        2. Para LONG (Rebote al alza al tocar VWAP desde arriba):
+           - Las velas previas cerradas (t-1 y t-2) deben haber estado 100% por encima del VWAP:
+             vela_prev1.Low > vwap_prev1 (sin haber tocado el VWAP).
+           - La vela actual (t) debe haber abierto POR ENCIMA del VWAP:
+             vela_actual.Open >= vwap_now - (1.0 * tick_size).
+           - Gatillo: El precio actual o Low de la vela toca o traspasa el VWAP hacia abajo:
+             precio_mercado <= vwap_now + (1.0 * tick_size).
+           - Rango de tolerancia: El precio NO debe haber caído más allá del 35% hacia la banda inferior:
+             precio_mercado >= vwap_now - max(12 * tick_size, 0.35 * (vwap_now - lower_band_now)).
 
-        GATILLO INMEDIATO (Al tocar o traspasar VWAP dentro de rango de tolerancia):
-        - Para LONG: precio_actual <= VWAP_actual (máximo 12 ticks de penetración anti-chasing)
-        - Para SHORT: precio_actual >= VWAP_actual (máximo 12 ticks de penetración anti-chasing)
+        3. Para SHORT (Rechazo a la baja al tocar VWAP desde abajo):
+           - Las velas previas cerradas (t-1 y t-2) deben haber estado 100% por debajo del VWAP:
+             vela_prev1.High < vwap_prev1 (sin haber tocado el VWAP).
+           - La vela actual (t) debe haber abierto POR DEBAJO del VWAP:
+             vela_actual.Open <= vwap_now + (1.0 * tick_size).
+           - Gatillo: El precio actual o High de la vela toca o traspasa el VWAP hacia arriba:
+             precio_mercado >= vwap_now - (1.0 * tick_size).
+           - Rango de tolerancia: El precio NO debe haber subido más allá del 35% hacia la banda superior:
+             precio_mercado <= vwap_now + max(12 * tick_size, 0.35 * (upper_band_now - vwap_now)).
         """
         if df_5m is None or len(df_5m) < 2:
             return None
@@ -372,25 +382,60 @@ class AxiomEngine:
         tick_size = spec.get("tickSize", 0.25)
 
         vela_5m_actual = df_5m.iloc[-1]
-        vela_5m_prev = df_5m.iloc[-2]
+        vela_5m_prev1 = df_5m.iloc[-2]
+        vela_5m_prev2 = df_5m.iloc[-3] if len(df_5m) >= 3 else None
+
+        # 1. Control de Frescura: Rechazar si la última vela tiene más de 6 minutos de antigüedad
+        now_utc = datetime.now(timezone.utc)
+        ts_actual = vela_5m_actual['Timestamp']
+        if getattr(ts_actual, 'tzinfo', None) is None:
+            ts_actual = ts_actual.replace(tzinfo=timezone.utc)
+        age_seconds = (now_utc - ts_actual).total_seconds()
+        if age_seconds > 360 or age_seconds < -60:
+            return None
 
         vwap_now = float(vela_5m_actual['VWAP'])
         upper_band_now = float(vela_5m_actual['Upper_Band'])
         lower_band_now = float(vela_5m_actual['Lower_Band'])
-
-        vwap_prev = float(vela_5m_prev.get('VWAP', vwap_now))
-        prev_low = float(vela_5m_prev['Low'])
-        prev_high = float(vela_5m_prev['High'])
+        open_now = float(vela_5m_actual['Open'])
 
         precio_mercado = float(current_price) if current_price is not None else float(vela_5m_actual['Close'])
 
-        # 1. Filtro de Contexto de Vela Previa
-        contexto_long = prev_low > (vwap_prev + (0.5 * tick_size))
-        contexto_short = prev_high < (vwap_prev - (0.5 * tick_size))
+        # 2. Verificación Estricta de la Vela Previa (t-1) y Anteprevia (t-2)
+        p1_vwap = float(vela_5m_prev1.get('VWAP', vwap_now))
+        p1_low = float(vela_5m_prev1['Low'])
+        p1_high = float(vela_5m_prev1['High'])
 
-        # 2. Evaluación de Gatillo al tocar o traspasar VWAP (Sin restricción anti-chasing)
-        # Para LONG: Venimos desde arriba, y el precio toca o pasa el VWAP hacia abajo
-        if contexto_long and precio_mercado <= vwap_now:
+        # Para LONG: t-1 estuvo 100% por encima del VWAP (Low > VWAP)
+        t1_long_ok = p1_low > (p1_vwap + (0.5 * tick_size))
+        # Para SHORT: t-1 estuvo 100% por debajo del VWAP (High < VWAP)
+        t1_short_ok = p1_high < (p1_vwap - (0.5 * tick_size))
+
+        t2_long_ok = True
+        t2_short_ok = True
+        if vela_5m_prev2 is not None:
+            p2_vwap = float(vela_5m_prev2.get('VWAP', vwap_now))
+            p2_low = float(vela_5m_prev2['Low'])
+            p2_high = float(vela_5m_prev2['High'])
+            t2_long_ok = p2_low > (p2_vwap + (0.5 * tick_size))
+            t2_short_ok = p2_high < (p2_vwap - (0.5 * tick_size))
+
+        contexto_long = t1_long_ok and t2_long_ok
+        contexto_short = t1_short_ok and t2_short_ok
+
+        # 3. La vela actual (en formación) debe haber abierto en el lado correcto
+        actual_abrio_arriba = open_now >= (vwap_now - (1.0 * tick_size))
+        actual_abrio_abajo = open_now <= (vwap_now + (1.0 * tick_size))
+
+        # 4. Gatillos de entrada al tocar o traspasar VWAP con límite de penetración
+        band_span_lower = abs(vwap_now - lower_band_now)
+        max_pen_long = max(12 * tick_size, band_span_lower * 0.35)
+
+        band_span_upper = abs(upper_band_now - vwap_now)
+        max_pen_short = max(12 * tick_size, band_span_upper * 0.35)
+
+        # EVALUACIÓN LONG
+        if contexto_long and actual_abrio_arriba and precio_mercado <= (vwap_now + (1.0 * tick_size)) and precio_mercado >= (vwap_now - max_pen_long):
             d_base = abs(upper_band_now - precio_mercado)
             if d_base < (10 * tick_size):
                 d_base = 15 * tick_size
@@ -406,8 +451,8 @@ class AxiomEngine:
                 "timestamp_vela": vela_5m_actual['Timestamp']
             }
 
-        # Para SHORT: Venimos desde abajo, y el precio toca o pasa el VWAP hacia arriba
-        if contexto_short and precio_mercado >= vwap_now:
+        # EVALUACIÓN SHORT
+        if contexto_short and actual_abrio_abajo and precio_mercado >= (vwap_now - (1.0 * tick_size)) and precio_mercado <= (vwap_now + max_pen_short):
             d_base = abs(precio_mercado - lower_band_now)
             if d_base < (10 * tick_size):
                 d_base = 15 * tick_size
@@ -1475,29 +1520,36 @@ class AxiomEngine:
 
                 # 2. OBTENCIÓN EN BLOQUE / PARALELO DE PRECIOS VIVOS Y VELAS PARA TODOS LOS SÍMBOLOS ACTIVOS
                 now_ts = time.time()
+                
+                # Respetar pausa si hubo Rate Limit (429) recientemente
+                if now_ts < getattr(self, "_rate_limited_until", 0.0):
+                    time.sleep(1.0)
+                    continue
+
                 def fetch_symbol_market_data(sym_key):
                     st = self.symbol_states[sym_key]
                     c_id = st.get("contract_id")
-                    need_5m = (now_ts - st.get("last_5m_fetch_time", 0.0)) >= 15.0 or st.get("latest_df").empty
+                    need_5m = (now_ts - st.get("last_5m_fetch_time", 0.0)) >= 3.0 or st.get("latest_df").empty
                     
                     df_5m_res = st.get("latest_df")
                     if need_5m:
-                        df_fetched = self.client.retrieve_bars(c_id, unit=2, unit_number=5, limit=250, days_back=2)
+                        df_fetched = self.client.retrieve_bars(c_id, unit=2, unit_number=5, limit=100, days_back=1)
                         if not df_fetched.empty:
                             df_5m_res = self.calcular_vwap_sesion(df_fetched)
                             with self.lock:
                                 st["latest_df"] = df_5m_res
                                 st["last_5m_fetch_time"] = now_ts
+                        elif df_5m_res.empty:
+                            self._rate_limited_until = now_ts + 6.0
 
-                    df_live_res = self.client.retrieve_bars(c_id, unit=2, unit_number=1, limit=1)
-                    return sym_key, df_5m_res, df_live_res
+                    return sym_key, df_5m_res
 
                 market_data = {}
                 if symbols_to_process:
                     max_w = min(len(symbols_to_process), 4)
                     with ThreadPoolExecutor(max_workers=max_w) as executor:
-                        for s_key, df_5m_res, df_live_res in executor.map(fetch_symbol_market_data, symbols_to_process):
-                            market_data[s_key] = (df_5m_res, df_live_res)
+                        for s_key, df_5m_res in executor.map(fetch_symbol_market_data, symbols_to_process):
+                            market_data[s_key] = df_5m_res
 
                 for sym in symbols_to_process:
                     if self.stop_event.is_set():
@@ -1509,20 +1561,15 @@ class AxiomEngine:
                         continue
 
                     is_enabled = state.get("enabled", False)
-                    df_5m, df_live = market_data[sym]
+                    df_5m = market_data[sym]
 
-                    if df_live is not None and not df_live.empty:
-                        live_bar = df_live.iloc[-1]
-                        current_price = float(live_bar['Close'])
-                        live_high = float(live_bar['High'])
-                        live_low = float(live_bar['Low'])
-                    elif df_5m is not None and not df_5m.empty:
-                        live_bar = df_5m.iloc[-1]
-                        current_price = float(live_bar['Close'])
-                        live_high = float(live_bar['High'])
-                        live_low = float(live_bar['Low'])
-                    else:
+                    if df_5m is None or df_5m.empty:
                         continue
+
+                    live_bar = df_5m.iloc[-1]
+                    current_price = float(live_bar['Close'])
+                    live_high = float(live_bar['High'])
+                    live_low = float(live_bar['Low'])
 
                     # Actualizar telemetría de símbolo
                     if df_5m is not None and not df_5m.empty:

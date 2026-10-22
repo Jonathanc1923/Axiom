@@ -178,10 +178,9 @@ class TopstepClient:
         
         url = f"{self.base_url}/api/History/retrieveBars"
         try:
-            res = requests.post(url, json=payload, headers=self.get_headers(), timeout=20)
+            res = requests.post(url, json=payload, headers=self.get_headers(), timeout=15)
             if res.status_code == 429:
-                time.sleep(2.5)
-                res = requests.post(url, json=payload, headers=self.get_headers(), timeout=20)
+                return pd.DataFrame()
             res.raise_for_status()
             data = res.json()
             
