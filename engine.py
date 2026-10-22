@@ -470,10 +470,11 @@ class AxiomEngine:
                 
             if positions is not None:
                 for pos in positions:
-                    pos_cid = str(pos.get("contractId", ""))
+                    pos_cid = str(pos.get("contractId", "")).strip().upper()
+                    target_cid = str(contract_id).strip().upper()
                     pos_size = abs(int(pos.get("size", 0)))
                     pos_sym = self.resolve_symbol_from_contract(pos_cid)
-                    if pos_size > 0 and (pos_cid == contract_id or pos_sym == sym):
+                    if pos_size > 0 and (pos_cid == target_cid or pos_sym == sym):
                         state["has_open_position"] = True
                         return True
                 # Si consultó exitosamente a Topstep y no hay posiciones abiertas:
@@ -812,12 +813,14 @@ class AxiomEngine:
         try:
             open_orders = self.client.search_open_orders(self.account_id)
             for o in open_orders:
-                cid = str(o.get("contractId", ""))
+                cid = str(o.get("contractId", "")).strip().upper()
+                target_cid = str(contract_id).strip().upper()
+                order_sym = self.resolve_symbol_from_contract(cid)
                 otype = int(o.get("type", 0))
                 order_id = o.get("id")
                 size = o.get("size", 1)
                 
-                if cid == str(contract_id):
+                if cid == target_cid or order_sym == sym:
                     # Type 4 = Stop Order (SL)
                     if otype == 4 and nuevo_sl is not None:
                         curr_stop = o.get("stopPrice")
@@ -1099,6 +1102,25 @@ class AxiomEngine:
                     
             if p_salida is None:
                 p_salida = float(trade.get("current_price", precio_entrada))
+
+            # Asegurar que max_pct y stage reflejen al menos el recorrido favorable de salida
+            d_base = float(trade.get("base_tp_pts", 0.0))
+            if p_salida is not None and precio_entrada > 0:
+                diff_pts = (p_salida - precio_entrada) if direccion == "LONG" else (precio_entrada - p_salida)
+                if d_base > 0 and diff_pts > 0:
+                    exit_pct = (diff_pts / d_base) * 100.0
+                    max_pct = max(max_pct, exit_pct)
+                    if max_pct >= HITO_1_TRIGGER_PCT and stage < 1:
+                        stage = 1
+                    if max_pct >= HITO_2_TRIGGER_PCT and stage < 2:
+                        stage = 2
+                    if max_pct >= HITO_3_TRIGGER_PCT and stage < 3:
+                        stage = 3
+                    if max_pct >= HITO_4_TRIGGER_PCT:
+                        runner_tier = 4 + int((max_pct - HITO_4_TRIGGER_PCT) // RUNNER_STEP_PCT)
+                        if runner_tier > stage:
+                            stage = runner_tier
+            hito_desc = self.format_milestone(stage)
                 
             spec = SUPPORTED_SYMBOLS.get(sym, {"pointValue": 50.0})
             pt_val = spec.get("pointValue", 50.0)
@@ -1390,6 +1412,28 @@ class AxiomEngine:
                             net_pnl = round(gross_pnl - comms, 2)
                             sign = "+" if net_pnl >= 0 else ""
                             
+                            # Actualizar Hito alcanzado si la operación tuvo avance positivo
+                            curr_hito = r.get("Hito_Alcanzado") or "Inicial"
+                            if curr_hito in ("Inicial", "N/A", "") and diff_pts > 0:
+                                spec = SUPPORTED_SYMBOLS.get(sym, {"tickSize": 0.25})
+                                tick_size = spec.get("tickSize", 0.25)
+                                try:
+                                    tp_ticks = float(r.get("TP_Ticks", 0) or 0)
+                                except Exception:
+                                    tp_ticks = 0
+                                d_base = (tp_ticks * tick_size) if tp_ticks > 0 else (15 * tick_size)
+                                if d_base > 0:
+                                    pct = (diff_pts / d_base) * 100.0
+                                    stg = 0
+                                    if pct >= HITO_1_TRIGGER_PCT: stg = 1
+                                    if pct >= HITO_2_TRIGGER_PCT: stg = 2
+                                    if pct >= HITO_3_TRIGGER_PCT: stg = 3
+                                    if pct >= HITO_4_TRIGGER_PCT:
+                                        stg = 4 + int((pct - HITO_4_TRIGGER_PCT) // RUNNER_STEP_PCT)
+                                    if stg > 0:
+                                        r["Hito_Alcanzado"] = self.format_milestone(stg)
+                                        r["Max_Pct_TP"] = f"{pct:.1f}%"
+                            
                             r["Estado"] = f"CERRADA ({sign}${net_pnl:.2f} USD)"
                             r["Precio_Salida_Real"] = f"{p_salida:.2f}"
                             r["PnL_Bruto_USD"] = f"{gross_pnl:.2f}"
@@ -1465,10 +1509,26 @@ class AxiomEngine:
                     except Exception:
                         cached_positions = None
 
-                # Filtrar solo símbolos operables o en vista activa
+                # Extraer símbolos con posiciones abiertas vivas en TopstepX
+                open_syms_in_topstep = set()
+                if cached_positions:
+                    for p in cached_positions:
+                        if abs(int(p.get("size", 0))) > 0:
+                            p_cid = str(p.get("contractId", "")).strip().upper()
+                            s = self.resolve_symbol_from_contract(p_cid)
+                            if s:
+                                open_syms_in_topstep.add(s)
+
+                # Procesar símbolos habilitados, en pantalla, O CON POSICIONES ABIERTAS / TRADES ACTIVOS
                 symbols_to_process = [
                     sym for sym, state in self.symbol_states.items()
-                    if state.get("contract_id") and (state.get("enabled", False) or sym == self.active_symbol)
+                    if state.get("contract_id") and (
+                        state.get("enabled", False)
+                        or sym == self.active_symbol
+                        or state.get("has_open_position", False)
+                        or state.get("active_trade") is not None
+                        or sym in open_syms_in_topstep
+                    )
                 ]
 
                 # 2. OBTENCIÓN EN BLOQUE / PARALELO DE PRECIOS VIVOS Y VELAS PARA TODOS LOS SÍMBOLOS ACTIVOS

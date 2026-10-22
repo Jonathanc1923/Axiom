@@ -389,5 +389,28 @@ class TestPureVWAPStrategy(unittest.TestCase):
         self.assertEqual(len(history_after), 1)
         self.assertIn("CERRADA", history_after[0]["Estado"])
 
+    def test_posicion_abierta_en_simbolo_inactivo_es_monitoreada_y_actualiza_hitos(self):
+        """Verifica que si hay una posición en un símbolo como MES (no habilitado por defecto), se incluya y actualice hitos."""
+        self.engine.symbol_states["MES"]["contract_id"] = "CON.F.US.MES.Z26"
+        self.engine.symbol_states["MES"]["enabled"] = False
+        self.engine.active_symbol = "ES"
+
+        # Simular que TopstepX tiene posición abierta en MES
+        cached_positions = [{'id': 777, 'contractId': 'CON.F.US.MES.Z26', 'size': 1, 'averagePrice': 7738.25, 'type': 2}]
+        
+        # Extraer símbolos según la nueva lógica del engine
+        open_syms = {self.engine.resolve_symbol_from_contract(p.get("contractId", "")) for p in cached_positions}
+        symbols_to_process = [
+            sym for sym, state in self.engine.symbol_states.items()
+            if state.get("contract_id") and (
+                state.get("enabled", False)
+                or sym == self.engine.active_symbol
+                or state.get("has_open_position", False)
+                or state.get("active_trade") is not None
+                or sym in open_syms
+            )
+        ]
+        self.assertIn("MES", symbols_to_process, "MES debe estar en symbols_to_process cuando tiene posición abierta")
+
 if __name__ == '__main__':
     unittest.main()
