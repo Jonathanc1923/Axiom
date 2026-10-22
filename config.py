@@ -36,8 +36,11 @@ CSV_PATH = os.path.join(DATA_DIR, "registro_operaciones.csv")
 # ==========================================
 # Institutional Strategy Configuration: Pure VWAP Reversion & Trailing
 # ==========================================
-# Stop Loss Inicial universal fijo (25 ticks para todos los activos)
-INITIAL_SL_TICKS = int(os.getenv("INITIAL_SL_TICKS", "25"))
+# Stop Loss Inicial universal fijo (35 ticks para todos los activos)
+INITIAL_SL_TICKS = int(os.getenv("INITIAL_SL_TICKS", "35"))
+
+# Lookback de velas de 5m para evaluar la pendiente direccional del VWAP institucional
+VWAP_SLOPE_LOOKBACK_BARS = int(os.getenv("VWAP_SLOPE_LOOKBACK_BARS", "10"))
 
 # Intervalo central de monitoreo y actualización de mercado (2.0 segundos)
 POLL_INTERVAL_SECONDS = float(os.getenv("POLL_INTERVAL_SECONDS", "2.0"))
@@ -75,7 +78,7 @@ SUPPORTED_SYMBOLS = {
         "tickSize": 0.25,
         "tickValue": 12.50, # USD per tick per contract
         "pointValue": 50.0,
-        "defaultSlTicks": 25,
+        "defaultSlTicks": 35,
     },
     "NQ": {
         "name": "E-mini Nasdaq-100",
@@ -84,7 +87,7 @@ SUPPORTED_SYMBOLS = {
         "tickSize": 0.25,
         "tickValue": 5.00,
         "pointValue": 20.0,
-        "defaultSlTicks": 25,
+        "defaultSlTicks": 35,
     },
     "YM": {
         "name": "E-mini Dow Jones ($5)",
@@ -93,7 +96,7 @@ SUPPORTED_SYMBOLS = {
         "tickSize": 1.0,
         "tickValue": 5.00,
         "pointValue": 5.0,
-        "defaultSlTicks": 25,
+        "defaultSlTicks": 35,
     },
     "RTY": {
         "name": "E-mini Russell 2000",
@@ -102,7 +105,7 @@ SUPPORTED_SYMBOLS = {
         "tickSize": 0.1,
         "tickValue": 5.00,
         "pointValue": 50.0,
-        "defaultSlTicks": 25,
+        "defaultSlTicks": 35,
     },
     "MES": {
         "name": "Micro E-mini S&P 500",
@@ -111,7 +114,7 @@ SUPPORTED_SYMBOLS = {
         "tickSize": 0.25,
         "tickValue": 1.25,
         "pointValue": 5.0,
-        "defaultSlTicks": 25,
+        "defaultSlTicks": 35,
     },
     "MNQ": {
         "name": "Micro E-mini Nasdaq-100",
@@ -120,7 +123,7 @@ SUPPORTED_SYMBOLS = {
         "tickSize": 0.25,
         "tickValue": 0.50,
         "pointValue": 2.0,
-        "defaultSlTicks": 25,
+        "defaultSlTicks": 35,
     },
     "CL": {
         "name": "Crude Oil Futures",
@@ -129,7 +132,7 @@ SUPPORTED_SYMBOLS = {
         "tickSize": 0.01,
         "tickValue": 10.00,
         "pointValue": 1000.0,
-        "defaultSlTicks": 25,
+        "defaultSlTicks": 35,
     },
     "GC": {
         "name": "Gold Futures",
@@ -138,7 +141,7 @@ SUPPORTED_SYMBOLS = {
         "tickSize": 0.1,
         "tickValue": 10.00,
         "pointValue": 100.0,
-        "defaultSlTicks": 25,
+        "defaultSlTicks": 35,
     },
     "MYM": {
         "name": "Micro E-mini Dow Jones",
@@ -147,7 +150,7 @@ SUPPORTED_SYMBOLS = {
         "tickSize": 1.0,
         "tickValue": 0.50,
         "pointValue": 0.50,
-        "defaultSlTicks": 25,
+        "defaultSlTicks": 35,
     },
     "M2K": {
         "name": "Micro E-mini Russell 2000",
@@ -156,7 +159,7 @@ SUPPORTED_SYMBOLS = {
         "tickSize": 0.1,
         "tickValue": 0.50,
         "pointValue": 5.0,
-        "defaultSlTicks": 25,
+        "defaultSlTicks": 35,
     },
     "MGC": {
         "name": "Micro Gold Futures",
@@ -165,7 +168,7 @@ SUPPORTED_SYMBOLS = {
         "tickSize": 0.1,
         "tickValue": 1.00,
         "pointValue": 10.0,
-        "defaultSlTicks": 25,
+        "defaultSlTicks": 35,
     },
     "MCL": {
         "name": "Micro Crude Oil Futures",
@@ -174,6 +177,6 @@ SUPPORTED_SYMBOLS = {
         "tickSize": 0.01,
         "tickValue": 1.00,
         "pointValue": 100.0,
-        "defaultSlTicks": 25,
+        "defaultSlTicks": 35,
     }
 }

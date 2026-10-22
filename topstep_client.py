@@ -162,7 +162,7 @@ class TopstepClient:
         self.contract_cache[symbol_key] = selected
         return selected
 
-    def retrieve_bars(self, contract_id: str, unit: int = 2, unit_number: int = 5, limit: int = 288, days_back: int = 2) -> pd.DataFrame:
+    def retrieve_bars(self, contract_id: str, unit: int = 2, unit_number: int = 5, limit: int = 300, days_back: int = 2) -> pd.DataFrame:
         """Descarga velas históricas (por defecto 5m) para el contrato especificado."""
         now_utc = datetime.now(timezone.utc)
         payload = {

@@ -37,12 +37,12 @@ class TestPureVWAPStrategy(unittest.TestCase):
                 pass
 
     def test_setup_long_valid(self):
-        """Vela previa 100% por encima de VWAP, precio actual toca/cruza VWAP -> Señal LONG."""
+        """Vela previa 100% por encima de VWAP, precio actual toca/cruza VWAP, pendiente alcista -> Señal LONG."""
         df_5m = pd.DataFrame([
             {
                 'Timestamp': self.now - timedelta(minutes=5),
                 'Open': 5015.0, 'High': 5020.0, 'Low': 5005.0, 'Close': 5010.0,
-                'Volume': 1000, 'VWAP': 5000.0, 'Upper_Band': 5040.0, 'Lower_Band': 4960.0
+                'Volume': 1000, 'VWAP': 4995.0, 'Upper_Band': 5040.0, 'Lower_Band': 4960.0
             },
             {
                 'Timestamp': self.now,
@@ -56,14 +56,15 @@ class TestPureVWAPStrategy(unittest.TestCase):
         self.assertEqual(setup["direccion"], "LONG")
         self.assertEqual(setup["precio_entrada"], 5000.0)
         self.assertEqual(setup["d_base"], 40.0) # 5040 - 5000
+        self.assertGreater(setup["vwap_slope"], 0)
 
     def test_setup_short_valid(self):
-        """Vela previa 100% por debajo de VWAP, precio actual toca/cruza VWAP -> Señal SHORT."""
+        """Vela previa 100% por debajo de VWAP, precio actual toca/cruza VWAP, pendiente bajista -> Señal SHORT."""
         df_5m = pd.DataFrame([
             {
                 'Timestamp': self.now - timedelta(minutes=5),
                 'Open': 4985.0, 'High': 4995.0, 'Low': 4980.0, 'Close': 4990.0,
-                'Volume': 1000, 'VWAP': 5000.0, 'Upper_Band': 5040.0, 'Lower_Band': 4960.0
+                'Volume': 1000, 'VWAP': 5005.0, 'Upper_Band': 5040.0, 'Lower_Band': 4960.0
             },
             {
                 'Timestamp': self.now,
@@ -77,14 +78,15 @@ class TestPureVWAPStrategy(unittest.TestCase):
         self.assertEqual(setup["direccion"], "SHORT")
         self.assertEqual(setup["precio_entrada"], 5000.25)
         self.assertAlmostEqual(setup["d_base"], 40.25, places=2)
+        self.assertLess(setup["vwap_slope"], 0)
 
     def test_setup_rechazado_si_vela_previa_toco_vwap(self):
         """Si la vela previa tocó o cruzó el VWAP, el contexto NO es válido -> None."""
         df_5m = pd.DataFrame([
             {
                 'Timestamp': self.now - timedelta(minutes=5),
-                'Open': 5010.0, 'High': 5015.0, 'Low': 4999.0, 'Close': 5005.0, # Low < VWAP
-                'Volume': 1000, 'VWAP': 5000.0, 'Upper_Band': 5040.0, 'Lower_Band': 4960.0
+                'Open': 5010.0, 'High': 5015.0, 'Low': 4990.0, 'Close': 5005.0, # Low 4990.0 < VWAP 4995.0 (tocó/cruzó)
+                'Volume': 1000, 'VWAP': 4995.0, 'Upper_Band': 5040.0, 'Lower_Band': 4960.0
             },
             {
                 'Timestamp': self.now,
@@ -97,12 +99,12 @@ class TestPureVWAPStrategy(unittest.TestCase):
         self.assertIsNone(setup)
 
     def test_setup_abre_si_pasa_vwap(self):
-        """Verifica que el bot abra igual si toca o pasa el VWAP (sin restricción anti-chasing)."""
+        """Verifica que el bot abra igual si toca o pasa el VWAP con pendiente alcista válida."""
         df_5m = pd.DataFrame([
             {
                 'Timestamp': self.now - timedelta(minutes=5),
                 'Open': 5015.0, 'High': 5020.0, 'Low': 5005.0, 'Close': 5010.0,
-                'Volume': 1000, 'VWAP': 5000.0, 'Upper_Band': 5040.0, 'Lower_Band': 4960.0
+                'Volume': 1000, 'VWAP': 4995.0, 'Upper_Band': 5040.0, 'Lower_Band': 4960.0
             },
             {
                 'Timestamp': self.now,
@@ -165,7 +167,7 @@ class TestPureVWAPStrategy(unittest.TestCase):
         self.engine.ejecutar_orden(setup_long, "ES", ignore_schedule=True)
         _, kwargs_long = self.mock_client.place_order.call_args
         self.assertEqual(kwargs_long["side"], 0)
-        self.assertEqual(kwargs_long["sl_ticks"], -25, "TopstepX exige signo negativo para SL en LONG")
+        self.assertEqual(kwargs_long["sl_ticks"], -35, "TopstepX exige signo negativo para SL en LONG")
         self.assertEqual(kwargs_long["tp_ticks"], 160)
 
         # Probar SHORT
@@ -184,7 +186,7 @@ class TestPureVWAPStrategy(unittest.TestCase):
         self.engine.ejecutar_orden(setup_short, "ES", ignore_schedule=True)
         _, kwargs_short = self.mock_client.place_order.call_args
         self.assertEqual(kwargs_short["side"], 1)
-        self.assertEqual(kwargs_short["sl_ticks"], 25, "TopstepX exige signo positivo para SL en SHORT")
+        self.assertEqual(kwargs_short["sl_ticks"], 35, "TopstepX exige signo positivo para SL en SHORT")
         self.assertEqual(kwargs_short["tp_ticks"], -160, "TopstepX exige signo negativo para TP en SHORT")
 
     def test_escalera_de_hitos_long(self):
@@ -411,6 +413,82 @@ class TestPureVWAPStrategy(unittest.TestCase):
             )
         ]
         self.assertIn("MES", symbols_to_process, "MES debe estar en symbols_to_process cuando tiene posición abierta")
+
+    def test_setup_long_rechazado_si_pendiente_vwap_bajista(self):
+        """Verifica que un setup LONG sea rechazado si el VWAP de los últimos 10 períodos va hacia abajo."""
+        bars = []
+        for i in range(12):
+            bars.append({
+                'Timestamp': self.now - timedelta(minutes=(12 - i) * 5),
+                'Open': 5020.0 - i * 2, 'High': 5025.0 - i * 2, 'Low': 5005.0 - i * 2, 'Close': 5010.0 - i * 2,
+                'Volume': 1000,
+                'VWAP': 5020.0 - i * 2,
+                'Upper_Band': 5050.0, 'Lower_Band': 4950.0
+            })
+        df_5m = pd.DataFrame(bars)
+        df_5m.iloc[-2, df_5m.columns.get_loc('Low')] = df_5m.iloc[-2]['VWAP'] + 5.0
+        precio_actual = float(df_5m.iloc[-1]['VWAP'])
+
+        setup = self.engine.verificar_setup_vwap(df_5m, "ES", current_price=precio_actual)
+        self.assertIsNone(setup, "Debe rechazar LONG porque la pendiente del VWAP va en bajada")
+
+    def test_setup_short_rechazado_si_pendiente_vwap_alcista(self):
+        """Verifica que un setup SHORT sea rechazado si el VWAP de los últimos 10 períodos va hacia arriba."""
+        bars = []
+        for i in range(12):
+            bars.append({
+                'Timestamp': self.now - timedelta(minutes=(12 - i) * 5),
+                'Open': 4980.0 + i * 2, 'High': 4995.0 + i * 2, 'Low': 4975.0 + i * 2, 'Close': 4990.0 + i * 2,
+                'Volume': 1000,
+                'VWAP': 4980.0 + i * 2,
+                'Upper_Band': 5050.0, 'Lower_Band': 4950.0
+            })
+        df_5m = pd.DataFrame(bars)
+        df_5m.iloc[-2, df_5m.columns.get_loc('High')] = df_5m.iloc[-2]['VWAP'] - 5.0
+        precio_actual = float(df_5m.iloc[-1]['VWAP'])
+
+        setup = self.engine.verificar_setup_vwap(df_5m, "ES", current_price=precio_actual)
+        self.assertIsNone(setup, "Debe rechazar SHORT porque la pendiente del VWAP va en subida")
+
+    def test_setup_aprobado_pendiente_vwap_10_velas(self):
+        """Verifica que si la pendiente en 10 velas va en la dirección deseada, se apruebe con datos de pendiente."""
+        bars_long = []
+        for i in range(15):
+            bars_long.append({
+                'Timestamp': self.now - timedelta(minutes=(15 - i) * 5),
+                'Open': 4980.0 + i * 1.5, 'High': 4995.0 + i * 1.5, 'Low': 4975.0 + i * 1.5, 'Close': 4990.0 + i * 1.5,
+                'Volume': 1000,
+                'VWAP': 4980.0 + i * 1.5,
+                'Upper_Band': 5040.0, 'Lower_Band': 4960.0
+            })
+        df_long = pd.DataFrame(bars_long)
+        df_long.iloc[-2, df_long.columns.get_loc('Low')] = df_long.iloc[-2]['VWAP'] + 2.0
+        precio_mercado = float(df_long.iloc[-1]['VWAP'])
+
+        setup = self.engine.verificar_setup_vwap(df_long, "ES", current_price=precio_mercado)
+        self.assertIsNotNone(setup, "Debe aprobar LONG con pendiente alcista en 10 velas de 5m")
+        self.assertEqual(setup["direccion"], "LONG")
+        self.assertGreater(setup["vwap_slope"], 0.0)
+        self.assertEqual(setup["slope_bars"], 10)
+
+    def test_calcular_vwap_sesion_completa_desde_18h(self):
+        """Verifica que calcular_vwap_sesion aísle la sesión actual iniciando a las 18:00 ET y acumulando velas de 5m."""
+        ts_range = pd.date_range(start='2026-10-21 20:00:00+00:00', end='2026-10-22 15:00:00+00:00', freq='5min')
+        df_multi = pd.DataFrame({
+            'Timestamp': ts_range,
+            'Open': 5000.0,
+            'High': 5010.0,
+            'Low': 4990.0,
+            'Close': 5005.0,
+            'Volume': 100
+        })
+        df_res = self.engine.calcular_vwap_sesion(df_multi)
+        self.assertFalse(df_res.empty)
+        primera_vela = df_res.iloc[0]
+        self.assertEqual(primera_vela['NY_Time'].hour, 18)
+        self.assertEqual(primera_vela['NY_Time'].minute, 0)
+        self.assertEqual(primera_vela['Cum_Vol'], 100)
+        self.assertEqual(df_res.iloc[-1]['Cum_Vol'], len(df_res) * 100)
 
 if __name__ == '__main__':
     unittest.main()

@@ -28,7 +28,7 @@ if hasattr(sys.stderr, "reconfigure"):
 
 from config import (
     CSV_PATH, CSV_DIR, SUPPORTED_SYMBOLS, DEFAULT_SYMBOL, DATA_DIR,
-    INITIAL_SL_TICKS, POLL_INTERVAL_SECONDS,
+    INITIAL_SL_TICKS, POLL_INTERVAL_SECONDS, VWAP_SLOPE_LOOKBACK_BARS,
     HITO_1_TRIGGER_PCT, HITO_2_TRIGGER_PCT, HITO_2_SL_PCT, HITO_2_TP_EXPAND_PCT,
     HITO_3_TRIGGER_PCT, HITO_3_SL_PCT, HITO_3_TP_EXPAND_PCT,
     HITO_4_TRIGGER_PCT, HITO_4_SL_PCT, HITO_4_TP_EXPAND_PCT, RUNNER_STEP_PCT
@@ -319,39 +319,48 @@ class AxiomEngine:
         """
         Cálculo institucional de VWAP de Sesión con bandas de desviación estándar (+/-1 STD).
         La sesión oficial de futuros CME inicia/resetea cada día a las 18:00 ET (New York).
+        Calcula el VWAP de la sesión completa desde su inicio acumulando velas de 5 minutos.
         """
-        if df.empty:
+        if df is None or df.empty:
             return df
             
         df = df.copy()
-        df['NY_Time'] = df['Timestamp'].dt.tz_convert('America/New_York')
+        if df['Timestamp'].dt.tz is None:
+            df['NY_Time'] = df['Timestamp'].dt.tz_localize('UTC').dt.tz_convert('America/New_York')
+        else:
+            df['NY_Time'] = df['Timestamp'].dt.tz_convert('America/New_York')
+
         df['Session'] = (df['NY_Time'] + pd.Timedelta(hours=6)).dt.date
         
-        df['HLC3'] = (df['High'] + df['Low'] + df['Close']) / 3.0
-        df['PxV'] = df['HLC3'] * df['Volume']
-        df['Px2xV'] = (df['HLC3'] ** 2) * df['Volume']
+        # Filtrar para conservar estrictamente las velas de la sesión actual de CME (desde 18:00 ET)
+        sesion_actual = df['Session'].iloc[-1]
+        df_sesion = df[df['Session'] == sesion_actual].copy()
         
-        df['Cum_Vol'] = df.groupby('Session')['Volume'].cumsum()
-        df['Cum_PxV'] = df.groupby('Session')['PxV'].cumsum()
-        df['Cum_Px2xV'] = df.groupby('Session')['Px2xV'].cumsum()
+        df_sesion['HLC3'] = (df_sesion['High'] + df_sesion['Low'] + df_sesion['Close']) / 3.0
+        df_sesion['PxV'] = df_sesion['HLC3'] * df_sesion['Volume']
+        df_sesion['Px2xV'] = (df_sesion['HLC3'] ** 2) * df_sesion['Volume']
         
-        safe_cum_vol = df['Cum_Vol'].replace(0, np.nan)
-        df['VWAP'] = np.where(df['Cum_Vol'] > 0, df['Cum_PxV'] / safe_cum_vol, df['HLC3'])
+        df_sesion['Cum_Vol'] = df_sesion['Volume'].cumsum()
+        df_sesion['Cum_PxV'] = df_sesion['PxV'].cumsum()
+        df_sesion['Cum_Px2xV'] = df_sesion['Px2xV'].cumsum()
         
-        varianza = (df['Cum_Px2xV'] / safe_cum_vol) - (df['VWAP'] ** 2)
-        df['Variance'] = np.maximum(varianza.fillna(0), 0)
-        df['Std_Dev'] = np.sqrt(df['Variance']).fillna(0)
-        df['Upper_Band'] = df['VWAP'] + df['Std_Dev']
-        df['Lower_Band'] = df['VWAP'] - df['Std_Dev']
+        safe_cum_vol = df_sesion['Cum_Vol'].replace(0, np.nan)
+        df_sesion['VWAP'] = np.where(df_sesion['Cum_Vol'] > 0, df_sesion['Cum_PxV'] / safe_cum_vol, df_sesion['HLC3'])
         
-        return df
+        varianza = (df_sesion['Cum_Px2xV'] / safe_cum_vol) - (df_sesion['VWAP'] ** 2)
+        df_sesion['Variance'] = np.maximum(varianza.fillna(0), 0)
+        df_sesion['Std_Dev'] = np.sqrt(df_sesion['Variance']).fillna(0)
+        df_sesion['Upper_Band'] = df_sesion['VWAP'] + df_sesion['Std_Dev']
+        df_sesion['Lower_Band'] = df_sesion['VWAP'] - df_sesion['Std_Dev']
+        
+        return df_sesion.reset_index(drop=True)
 
     # ==========================================
     # STRATEGY ENGINE: PURE VWAP TOUCH & CONTEXT
     # ==========================================
     def verificar_setup_vwap(self, df_5m: pd.DataFrame, sym: str, current_price: Optional[float] = None) -> Optional[Dict[str, Any]]:
         """
-        Estrategia de Reversión VWAP (Regla Simple):
+        Estrategia de Reversión VWAP (Reglas Institucionales):
         - Cada 2 segundos se actualiza el precio.
         - Si el precio toca o pasa el VWAP, se activa la operación siempre y cuando:
           1. La vela anterior de 5 minutos NO tocó ni pasó el VWAP.
@@ -360,6 +369,9 @@ class AxiomEngine:
                Gatillo: Precio actual toca o pasa el VWAP hacia abajo (precio <= VWAP).
              * Para SHORT: Vela previa 100% por debajo de VWAP (High < VWAP).
                Gatillo: Precio actual toca o pasa el VWAP hacia arriba (precio >= VWAP).
+          3. Validación de Pendiente Institucional del VWAP (Últimas 10 velas de 5m):
+             * Para LONG: La pendiente del VWAP debe ir hacia arriba (VWAP_actual > VWAP_ref_10).
+             * Para SHORT: La pendiente del VWAP debe ir hacia abajo (VWAP_actual < VWAP_ref_10).
         """
         if df_5m is None or len(df_5m) < 2:
             return None
@@ -386,9 +398,25 @@ class AxiomEngine:
         # Para SHORT: vela previa 100% por debajo de VWAP (High < VWAP)
         contexto_short = prev_high < (vwap_prev - (0.5 * tick_size))
 
-        # 2. Gatillo al tocar o pasar el VWAP
+        # 2. Validación de Pendiente Institucional del VWAP (Últimas 10 velas de 5 minutos)
+        lookback_bars = VWAP_SLOPE_LOOKBACK_BARS
+        idx_ref = max(0, len(df_5m) - 1 - lookback_bars)
+        vwap_ref = float(df_5m.iloc[idx_ref]['VWAP'])
+        bars_eval = (len(df_5m) - 1) - idx_ref
+        slope_vwap = vwap_now - vwap_ref
+
+        # 3. Gatillo al tocar o pasar el VWAP
         # Para LONG: viene de arriba y toca o pasa VWAP hacia abajo
         if contexto_long and precio_mercado <= (vwap_now + (0.5 * tick_size)):
+            # Validar que la pendiente del VWAP sea alcista para favorecer ganancias en LONG
+            if vwap_now <= vwap_ref:
+                self.log(
+                    f"🚫 [{sym}] Setup LONG descartado por Pendiente VWAP no alcista: "
+                    f"VWAP actual ({vwap_now:.2f}) <= VWAP hace {bars_eval} velas ({vwap_ref:.2f}) | Pendiente: {slope_vwap:+.2f}",
+                    "SETUP", sym
+                )
+                return None
+
             d_base = abs(upper_band_now - precio_mercado)
             if d_base < (10 * tick_size):
                 d_base = 15 * tick_size
@@ -401,11 +429,23 @@ class AxiomEngine:
                 "lower_band": lower_band_now,
                 "target_band": upper_band_now,
                 "d_base": d_base,
+                "vwap_slope": slope_vwap,
+                "vwap_ref": vwap_ref,
+                "slope_bars": bars_eval,
                 "timestamp_vela": vela_5m_actual['Timestamp']
             }
 
         # Para SHORT: viene de abajo y toca o pasa VWAP hacia arriba
         if contexto_short and precio_mercado >= (vwap_now - (0.5 * tick_size)):
+            # Validar que la pendiente del VWAP sea bajista para favorecer ganancias en SHORT
+            if vwap_now >= vwap_ref:
+                self.log(
+                    f"🚫 [{sym}] Setup SHORT descartado por Pendiente VWAP no bajista: "
+                    f"VWAP actual ({vwap_now:.2f}) >= VWAP hace {bars_eval} velas ({vwap_ref:.2f}) | Pendiente: {slope_vwap:+.2f}",
+                    "SETUP", sym
+                )
+                return None
+
             d_base = abs(precio_mercado - lower_band_now)
             if d_base < (10 * tick_size):
                 d_base = 15 * tick_size
@@ -418,6 +458,9 @@ class AxiomEngine:
                 "lower_band": lower_band_now,
                 "target_band": lower_band_now,
                 "d_base": d_base,
+                "vwap_slope": slope_vwap,
+                "vwap_ref": vwap_ref,
+                "slope_bars": bars_eval,
                 "timestamp_vela": vela_5m_actual['Timestamp']
             }
 
@@ -495,7 +538,7 @@ class AxiomEngine:
     def ejecutar_orden(self, setup: Dict[str, Any], sym: str, ignore_schedule: bool = False):
         """
         Ejecuta la orden a mercado en TopstepX con brackets OCO iniciales:
-        - SL Inicial: Fijo en 25 ticks (INITIAL_SL_TICKS).
+        - SL Inicial: Fijo en 35 ticks (INITIAL_SL_TICKS).
         - TP Inicial: Distancia base D_base hacia la banda lateral que le sigue.
         - Congela los parámetros base en memoria para la gestión por hitos cada 2 segundos.
         """
@@ -541,7 +584,7 @@ class AxiomEngine:
 
         condicion_str = (
             f"VWAP Touch Reversion. Entrada: {precio_entrada:.2f} | "
-            f"SL inicial: 25t ({precio_sl:.2f}) | TP inicial Banda: {ticks_tp}t ({precio_tp:.2f}) | D_base: {d_base:.2f} pts"
+            f"SL inicial: {ticks_sl}t ({precio_sl:.2f}) | TP inicial Banda: {ticks_tp}t ({precio_tp:.2f}) | D_base: {d_base:.2f} pts | Pendiente VWAP ({setup.get('slope_bars', 10)}b): {setup.get('vwap_slope', 0):+.2f}"
         )
         self.log(f"🚨 DISPARANDO {direccion} A MERCADO | {condicion_str}", "ORDER", sym)
         
@@ -952,7 +995,7 @@ class AxiomEngine:
             if sl_order and sl_order.get("stopPrice") is not None:
                 current_sl_price = float(sl_order["stopPrice"])
             else:
-                current_sl_price = (entry_price - 25 * tick_size) if direccion == "LONG" else (entry_price + 25 * tick_size)
+                current_sl_price = (entry_price - INITIAL_SL_TICKS * tick_size) if direccion == "LONG" else (entry_price + INITIAL_SL_TICKS * tick_size)
                 
             if tp_order and tp_order.get("limitPrice") is not None:
                 tp_price = float(tp_order["limitPrice"])
@@ -1555,13 +1598,26 @@ class AxiomEngine:
                     
                     df_5m_res = st.get("latest_df")
                     if need_5m:
-                        df_fetched = self.client.retrieve_bars(c_id, unit=2, unit_number=5, limit=50, days_back=1)
+                        existing_df = st.get("latest_df")
+                        # Sincronización completa de la sesión CME (300 velas de 5m = 25h) en inicio o cada 120s; luego ligero (5 velas)
+                        is_initial_or_stale = existing_df is None or existing_df.empty or (now_ts - st.get("last_full_sync_time", 0.0)) >= 120.0
+                        limit_to_fetch = 300 if is_initial_or_stale else 5
+                        days_back_fetch = 2 if is_initial_or_stale else 1
+
+                        df_fetched = self.client.retrieve_bars(c_id, unit=2, unit_number=5, limit=limit_to_fetch, days_back=days_back_fetch)
                         if not df_fetched.empty:
-                            df_5m_res = self.calcular_vwap_sesion(df_fetched)
+                            if existing_df is not None and not existing_df.empty and not is_initial_or_stale:
+                                df_combined = pd.concat([existing_df, df_fetched]).drop_duplicates(subset=['Timestamp'], keep='last').sort_values('Timestamp').reset_index(drop=True)
+                            else:
+                                df_combined = df_fetched
+
+                            df_5m_res = self.calcular_vwap_sesion(df_combined)
                             with self.lock:
                                 st["latest_df"] = df_5m_res
                                 st["last_5m_fetch_time"] = now_ts
-                        elif df_5m_res.empty:
+                                if is_initial_or_stale:
+                                    st["last_full_sync_time"] = now_ts
+                        elif df_5m_res is None or df_5m_res.empty:
                             self._rate_limited_until = now_ts + 4.0
 
                     return sym_key, df_5m_res
