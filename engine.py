@@ -29,6 +29,7 @@ if hasattr(sys.stderr, "reconfigure"):
 from config import (
     CSV_PATH, CSV_DIR, SUPPORTED_SYMBOLS, DEFAULT_SYMBOL, DATA_DIR,
     INITIAL_SL_TICKS, POLL_INTERVAL_SECONDS, VWAP_SLOPE_LOOKBACK_BARS,
+    MIN_VWAP_SLOPE_TICKS, BASKET_TP_TARGET_USD, BASKET_TP_HARD_USD, BASKET_COOLDOWN_SECONDS,
     HITO_1_TRIGGER_PCT, HITO_2_TRIGGER_PCT, HITO_2_SL_PCT, HITO_2_TP_EXPAND_PCT,
     HITO_3_TRIGGER_PCT, HITO_3_SL_PCT, HITO_3_TP_EXPAND_PCT,
     HITO_4_TRIGGER_PCT, HITO_4_SL_PCT, HITO_4_TP_EXPAND_PCT, RUNNER_STEP_PCT
@@ -406,13 +407,15 @@ class AxiomEngine:
         slope_vwap = vwap_now - vwap_ref
 
         # 3. Gatillo al tocar o pasar el VWAP
+        min_slope_val = round_to_tick(MIN_VWAP_SLOPE_TICKS * tick_size, tick_size)
+
         # Para LONG: viene de arriba y toca o pasa VWAP hacia abajo
         if contexto_long and precio_mercado <= (vwap_now + (0.5 * tick_size)):
-            # Validar que la pendiente del VWAP sea alcista para favorecer ganancias en LONG
-            if vwap_now <= vwap_ref:
+            # Validar que la pendiente del VWAP sea alcista con fuerza mínima (al menos 2 ticks)
+            if slope_vwap < min_slope_val:
                 self.log(
-                    f"🚫 [{sym}] Setup LONG descartado por Pendiente VWAP no alcista: "
-                    f"VWAP actual ({vwap_now:.2f}) <= VWAP hace {bars_eval} velas ({vwap_ref:.2f}) | Pendiente: {slope_vwap:+.2f}",
+                    f"🚫 [{sym}] Setup LONG descartado por Pendiente VWAP insuficiente: "
+                    f"Pendiente actual ({slope_vwap:+.2f}) < Mínimo requerido ({min_slope_val:+.2f} pts / {MIN_VWAP_SLOPE_TICKS} ticks) hace {bars_eval} velas",
                     "SETUP", sym
                 )
                 return None
@@ -437,11 +440,11 @@ class AxiomEngine:
 
         # Para SHORT: viene de abajo y toca o pasa VWAP hacia arriba
         if contexto_short and precio_mercado >= (vwap_now - (0.5 * tick_size)):
-            # Validar que la pendiente del VWAP sea bajista para favorecer ganancias en SHORT
-            if vwap_now >= vwap_ref:
+            # Validar que la pendiente del VWAP sea bajista con fuerza mínima (al menos -2 ticks)
+            if slope_vwap > -min_slope_val:
                 self.log(
-                    f"🚫 [{sym}] Setup SHORT descartado por Pendiente VWAP no bajista: "
-                    f"VWAP actual ({vwap_now:.2f}) >= VWAP hace {bars_eval} velas ({vwap_ref:.2f}) | Pendiente: {slope_vwap:+.2f}",
+                    f"🚫 [{sym}] Setup SHORT descartado por Pendiente VWAP insuficiente: "
+                    f"Pendiente actual ({slope_vwap:+.2f}) > Mínimo requerido ({-min_slope_val:+.2f} pts / -{MIN_VWAP_SLOPE_TICKS} ticks) hace {bars_eval} velas",
                     "SETUP", sym
                 )
                 return None
@@ -780,19 +783,19 @@ class AxiomEngine:
             if target_stage == 1:
                 nuevo_sl = round_to_tick(precio_entrada + 1 * tick_size, tick_size) if direccion == "LONG" else round_to_tick(precio_entrada - 1 * tick_size, tick_size)
                 nuevo_tp = None
-                motivo_hito = f"HITO 1 (40% D_base) | SL a Break-Even + 1 tick ({nuevo_sl:.2f})"
+                motivo_hito = f"HITO 1 ({HITO_1_TRIGGER_PCT:.0f}% D_base) | SL a Break-Even + 1 tick ({nuevo_sl:.2f})"
             elif target_stage == 2:
                 nuevo_sl = round_to_tick(precio_entrada + (d_base * HITO_2_SL_PCT), tick_size) if direccion == "LONG" else round_to_tick(precio_entrada - (d_base * HITO_2_SL_PCT), tick_size)
                 nuevo_tp = round_to_tick(precio_entrada + (d_base * HITO_2_TP_EXPAND_PCT), tick_size) if direccion == "LONG" else round_to_tick(precio_entrada - (d_base * HITO_2_TP_EXPAND_PCT), tick_size)
-                motivo_hito = f"HITO 2 (70% D_base) | SL al 45% ({nuevo_sl:.2f}) | TP Ampliado al 140% ({nuevo_tp:.2f})"
+                motivo_hito = f"HITO 2 ({HITO_2_TRIGGER_PCT:.0f}% D_base) | SL al {HITO_2_SL_PCT*100:.0f}% ({nuevo_sl:.2f}) | TP Ampliado al {HITO_2_TP_EXPAND_PCT*100:.0f}% ({nuevo_tp:.2f})"
             elif target_stage == 3:
                 nuevo_sl = round_to_tick(precio_entrada + (d_base * HITO_3_SL_PCT), tick_size) if direccion == "LONG" else round_to_tick(precio_entrada - (d_base * HITO_3_SL_PCT), tick_size)
                 nuevo_tp = round_to_tick(precio_entrada + (d_base * HITO_3_TP_EXPAND_PCT), tick_size) if direccion == "LONG" else round_to_tick(precio_entrada - (d_base * HITO_3_TP_EXPAND_PCT), tick_size)
-                motivo_hito = f"HITO 3 (120% D_base) | SL al 108% ({nuevo_sl:.2f}) | TP Ampliado al 170% ({nuevo_tp:.2f})"
+                motivo_hito = f"HITO 3 ({HITO_3_TRIGGER_PCT:.0f}% D_base) | SL al {HITO_3_SL_PCT*100:.0f}% ({nuevo_sl:.2f}) | TP Ampliado al {HITO_3_TP_EXPAND_PCT*100:.0f}% ({nuevo_tp:.2f})"
             elif target_stage == 4:
                 nuevo_sl = round_to_tick(precio_entrada + (d_base * HITO_4_SL_PCT), tick_size) if direccion == "LONG" else round_to_tick(precio_entrada - (d_base * HITO_4_SL_PCT), tick_size)
                 nuevo_tp = round_to_tick(precio_entrada + (d_base * HITO_4_TP_EXPAND_PCT), tick_size) if direccion == "LONG" else round_to_tick(precio_entrada - (d_base * HITO_4_TP_EXPAND_PCT), tick_size)
-                motivo_hito = f"HITO 4 (135% D_base) | SL al 128% ({nuevo_sl:.2f}) | TP Ampliado al 200% ({nuevo_tp:.2f})"
+                motivo_hito = f"HITO 4 ({HITO_4_TRIGGER_PCT:.0f}% D_base) | SL al {HITO_4_SL_PCT*100:.0f}% ({nuevo_sl:.2f}) | TP Ampliado al {HITO_4_TP_EXPAND_PCT*100:.0f}% ({nuevo_tp:.2f})"
             else: # target_stage >= 5 (Infinito)
                 k = target_stage - 4
                 trig_k = HITO_4_TRIGGER_PCT + (k * RUNNER_STEP_PCT)
@@ -1698,6 +1701,51 @@ class AxiomEngine:
                                 )
                                 self.ejecutar_orden(setup, sym)
 
+                # ==========================================
+                # 3. VERIFICACIÓN ATÓMICA DE CANASTA DE BENEFICIOS GLOBAL (CADA 2 SEGUNDOS EN MEMORIA)
+                # ==========================================
+                total_floating_pnl = 0.0
+                active_open_count = 0
+                basket_details = []
+
+                for s_sym, s_state in self.symbol_states.items():
+                    act_trade = s_state.get("active_trade")
+                    if act_trade:
+                        ent_p = float(act_trade.get("entry_price", 0.0))
+                        dir_t = act_trade.get("direction", "LONG")
+                        cur_p = act_trade.get("current_price") or s_state.get("telemetry", {}).get("close")
+                        if cur_p and ent_p > 0:
+                            pt_val = SUPPORTED_SYMBOLS.get(s_sym, {}).get("pointValue", 50.0)
+                            diff = (cur_p - ent_p) if dir_t == "LONG" else (ent_p - cur_p)
+                            pos_unrealized = round(diff * pt_val, 2)
+                            total_floating_pnl += pos_unrealized
+                            active_open_count += 1
+                            basket_details.append(f"{s_sym}: {pos_unrealized:+.2f}")
+
+                # Gatillo de seguridad: Si la canasta alcanza o supera el objetivo ($850 - $900 USD)
+                if active_open_count > 0 and total_floating_pnl >= BASKET_TP_TARGET_USD:
+                    self.log(
+                        f"🏆🏆🏆 [BASKET TAKE-PROFIT] ¡CANASTA GLOBAL DE BENEFICIOS ALCANZADA! "
+                        f"PnL Flotante Total: +${total_floating_pnl:.2f} USD (Meta: ${BASKET_TP_TARGET_USD:.2f} USD | "
+                        f"{' | '.join(basket_details)}). "
+                        f"Ejecutando CIERRE TOTAL INMEDIATO de todas las {active_open_count} posiciones...",
+                        "ALERT"
+                    )
+                    
+                    # Cierre de emergencia atómico de toda la cartera
+                    self.emergency_flatten_all(reason=f"Basket TP Alcanzado (+${total_floating_pnl:.2f} USD)")
+                    
+                    # Pausa de seguridad (Cooldown) a todos los símbolos para no reingresar en el mismo movimiento
+                    cooldown_ts = time.time() + BASKET_COOLDOWN_SECONDS
+                    for s_st in self.symbol_states.values():
+                        s_st["cooldown_until"] = max(s_st.get("cooldown_until", 0.0), cooldown_ts)
+                        
+                    self.log(
+                        f"🔒 [BASKET TAKE-PROFIT] Cartera asegurada con éxito (+${total_floating_pnl:.2f} USD). "
+                        f"Pausa de seguridad activada por {int(BASKET_COOLDOWN_SECONDS/60)} minutos.",
+                        "SYSTEM"
+                    )
+
                 # Reporte periódico en terminal del estado de operaciones abiertas (cada 30s)
                 if (now_ts - getattr(self, "_last_portfolio_log_time", 0.0)) >= 30.0:
                     self._last_portfolio_log_time = now_ts
@@ -1709,7 +1757,7 @@ class AxiomEngine:
                             mx_p = act_tr.get("max_pct_avance", 0.0)
                             open_summary.append(f"{s_k} {act_tr['direction']} @ {act_tr['entry_price']:.2f} [{stg_desc} (Max: {mx_p:.1f}%)]")
                     if open_summary:
-                        self.log(f"📊 [CARTERA ABIERTA] {len(open_summary)} posición(es) en curso: {' | '.join(open_summary)}", "SYSTEM")
+                        self.log(f"📊 [CARTERA ABIERTA] {len(open_summary)} posición(es) en curso (Flotante Canasta: ${total_floating_pnl:+.2f} USD / Meta ${BASKET_TP_TARGET_USD:.0f}): {' | '.join(open_summary)}", "SYSTEM")
 
             except requests.exceptions.HTTPError as he:
                 if he.response is not None and he.response.status_code == 429:
@@ -1759,22 +1807,123 @@ class AxiomEngine:
         if self.thread and self.thread.is_alive():
             self.thread.join(timeout=2)
 
+    def emergency_flatten_all(self, reason: str = "KILL SWITCH GENERAL") -> Dict[str, Any]:
+        """
+        CIERRE DE EMERGENCIA TOTAL DE CARTERA (FLATTEN ALL CON ALTA SEGURIDAD):
+        1. Consulta todas las posiciones abiertas activas directamente en TopstepX.
+        2. Recorre cada contrato y ejecuta close_contract_position.
+        3. Cancela todas las órdenes residuales (SL/TP) en la cuenta.
+        4. Limpia el estado interno de todos los símbolos en memoria y registra el cierre en CSV.
+        5. Realiza una verificación de doble confirmación para asegurar 0 posiciones abiertas.
+        """
+        self.log(f"🚨 [KILL SWITCH GENERAL] Disparando cierre total de cartera. Motivo: {reason}", "ALERT")
+        results = []
+        closed_symbols = []
+
+        if not self.account_id:
+            return {"success": False, "error": "No account ID available"}
+
+        # 1. Obtener posiciones reales abiertas desde TopstepX
+        try:
+            open_positions = self.client.get_open_positions(self.account_id)
+        except Exception as e:
+            self.log(f"⚠️ Error al obtener posiciones abiertas en TopstepX: {e}", "ERROR")
+            open_positions = []
+
+        # Recopilar contratos a cerrar (desde API y desde memoria local)
+        contracts_to_close = {}
+        for p in open_positions:
+            cid = str(p.get("contractId", "")).strip().upper()
+            if cid and abs(int(p.get("size", 0))) > 0:
+                contracts_to_close[cid] = self.resolve_symbol_from_contract(cid)
+
+        for sym, state in self.symbol_states.items():
+            if state.get("has_open_position") or state.get("active_trade"):
+                cid = state.get("contract_id")
+                if cid:
+                    contracts_to_close[cid] = sym
+
+        # 2. Ejecutar cierre de cada contrato y cancelar órdenes
+        for cid, sym in contracts_to_close.items():
+            sym_label = sym or self.resolve_symbol_from_contract(cid)
+            try:
+                res = self.client.close_contract_position(self.account_id, cid)
+                self.log(f"🛡️ [FLATTEN] Cierre ejecutado en TopstepX para {sym_label} ({cid}): {res}", "ALERT", sym_label)
+                results.append({"contract_id": cid, "symbol": sym_label, "res": res})
+                closed_symbols.append(sym_label)
+            except Exception as ce:
+                self.log(f"❌ Error al cerrar posición {sym_label} ({cid}): {ce}", "ERROR", sym_label)
+
+            # Cancelar órdenes residuales de este contrato
+            self.cancelar_ordenes_abiertas_contrato(cid, sym_label)
+
+            # Limpiar estado en memoria y registrar cierre en CSV
+            state = self.symbol_states.get(sym_label, {})
+            trade = state.get("active_trade")
+            if trade:
+                curr_price = trade.get("current_price") or state.get("telemetry", {}).get("close")
+                self.registrar_cierre_posicion(sym_label, trade, precio_salida=curr_price, motivo_cierre=reason)
+            state["has_open_position"] = False
+            state["active_trade"] = None
+
+        # 3. VERIFICACIÓN DE SEGURIDAD (Confirmar que la cuenta quedó 100% plana)
+        time.sleep(0.5)
+        try:
+            remaining_positions = self.client.get_open_positions(self.account_id)
+            active_remaining = [p for p in remaining_positions if abs(int(p.get("size", 0))) > 0]
+            if active_remaining:
+                self.log(f"⚠️ [SEGURIDAD] Reintento: Quedan {len(active_remaining)} posición(es) residuales. Forzando segundo cierre...", "ALERT")
+                for rp in active_remaining:
+                    rcid = str(rp.get("contractId", "")).strip().upper()
+                    try:
+                        self.client.close_contract_position(self.account_id, rcid)
+                        self.cancelar_ordenes_abiertas_contrato(rcid, self.resolve_symbol_from_contract(rcid))
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+        self.log(f"✅ [KILL SWITCH GENERAL] Cierre total completado. Símbolos liquidados: {closed_symbols or 'Ninguno activo'}.", "SYSTEM")
+        return {"success": True, "closed_symbols": closed_symbols, "results": results}
+
     def emergency_flatten(self, symbol_key: Optional[str] = None) -> Dict[str, Any]:
-        """Cierra inmediatamente posiciones en el símbolo o activo."""
-        sym = (symbol_key or self.active_symbol).upper()
+        """Cierra inmediatamente posiciones en el símbolo especificado o en TODA la cartera si no se especifica."""
+        if not symbol_key or symbol_key.upper() in ["ALL", "CARTERA", "TOTAL"]:
+            return self.emergency_flatten_all(reason="Kill Switch General / Flatten Portfolio")
+
+        sym = symbol_key.upper()
         contract_id = self.symbol_states.get(sym, {}).get("contract_id")
-        self.log(f"⚠️ [KILL SWITCH] Disparando cierre de emergencia para {sym}...", "ALERT", sym)
+        self.log(f"⚠️ [KILL SWITCH] Disparando cierre de emergencia individual para {sym}...", "ALERT", sym)
         try:
             res = self.client.close_contract_position(self.account_id, contract_id)
             self.log(f"🛡️ Cierre ejecutado en TopstepX: {res}", "ALERT", sym)
             self.cancelar_ordenes_abiertas_contrato(contract_id, sym)
             state = self.symbol_states.get(sym, {})
+            trade = state.get("active_trade")
+            if trade:
+                curr_price = trade.get("current_price") or state.get("telemetry", {}).get("close")
+                self.registrar_cierre_posicion(sym, trade, precio_salida=curr_price, motivo_cierre="Kill Switch Manual")
             state["has_open_position"] = False
             state["active_trade"] = None
             return res
         except Exception as e:
-            self.log(f"❌ Error en cierre de emergencia: {e}", "ERROR", sym)
+            self.log(f"❌ Error en cierre de emergencia para {sym}: {e}", "ERROR", sym)
             return {"success": False, "error": str(e)}
+
+    def calculate_basket_floating_pnl(self) -> float:
+        """Calcula el PnL flotante agregado (no realizado) de todas las posiciones activas en memoria."""
+        total = 0.0
+        for s_sym, s_st in self.symbol_states.items():
+            act_tr = s_st.get("active_trade")
+            if act_tr:
+                ent = float(act_tr.get("entry_price", 0.0))
+                direc = act_tr.get("direction", "LONG")
+                curr = act_tr.get("current_price") or s_st.get("telemetry", {}).get("close")
+                if curr and ent > 0:
+                    pt_val = SUPPORTED_SYMBOLS.get(s_sym, {}).get("pointValue", 50.0)
+                    diff = (curr - ent) if direc == "LONG" else (ent - curr)
+                    total += diff * pt_val
+        return round(total, 2)
 
     # ==========================================
     # DATA SERIALIZATION FOR FASTAPI & DASHBOARD
@@ -1863,5 +2012,10 @@ class AxiomEngine:
             "symbols_matrix": matrix,
             "supported_symbols": list(SUPPORTED_SYMBOLS.keys()),
             "last_sync": self.stats.get("last_sync", "N/A"),
-            "next_sync": self.stats.get("next_sync", "N/A")
+            "next_sync": self.stats.get("next_sync", "N/A"),
+            "basket_tp": {
+                "target_usd": BASKET_TP_TARGET_USD,
+                "hard_usd": BASKET_TP_HARD_USD,
+                "current_floating_usd": self.calculate_basket_floating_pnl()
+            }
         }

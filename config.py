@@ -42,30 +42,41 @@ INITIAL_SL_TICKS = int(os.getenv("INITIAL_SL_TICKS", "35"))
 # Lookback de velas de 5m para evaluar la pendiente direccional del VWAP institucional
 VWAP_SLOPE_LOOKBACK_BARS = int(os.getenv("VWAP_SLOPE_LOOKBACK_BARS", "10"))
 
+# Pendiente mínima requerida en ticks para validar el setup (filtra mercados planos y caídas lentas)
+MIN_VWAP_SLOPE_TICKS = int(os.getenv("MIN_VWAP_SLOPE_TICKS", "2"))
+
 # Intervalo central de monitoreo y actualización de mercado (2.0 segundos)
 POLL_INTERVAL_SECONDS = float(os.getenv("POLL_INTERVAL_SECONDS", "2.0"))
 
-# Escalera de Hitos Dinámicos Infinitos (Porcentajes sobre D_base)
-# Hito 1: Al 40% de recorrido -> SL a BE + 1 tick
-HITO_1_TRIGGER_PCT = 40.0
+# Escalera de Hitos Dinámicos Optimizada (Porcentajes sobre D_base)
+# Hito 1: Al 35% de recorrido -> SL a BE + 1 tick (protección temprana de capital)
+HITO_1_TRIGGER_PCT = float(os.getenv("HITO_1_TRIGGER_PCT", "35.0"))
 
-# Hito 2: Al 70% de recorrido -> SL al 45%, TP ampliado al 140% (para permitir avance hacia Hito 3)
-HITO_2_TRIGGER_PCT = 70.0
-HITO_2_SL_PCT = 0.45
-HITO_2_TP_EXPAND_PCT = 1.40
+# Hito 2: Al 50% de recorrido -> Asegura 25% de D_base, TP ampliado al 120%
+HITO_2_TRIGGER_PCT = float(os.getenv("HITO_2_TRIGGER_PCT", "50.0"))
+HITO_2_SL_PCT = float(os.getenv("HITO_2_SL_PCT", "0.25"))
+HITO_2_TP_EXPAND_PCT = float(os.getenv("HITO_2_TP_EXPAND_PCT", "1.20"))
 
-# Hito 3: Al 120% de recorrido -> SL al 108% (90% de 120%), TP ampliado al 170%
-HITO_3_TRIGGER_PCT = 120.0
-HITO_3_SL_PCT = 1.08
-HITO_3_TP_EXPAND_PCT = 1.70
+# Hito 3: Al 80% de recorrido -> Asegura 55% de D_base, TP ampliado al 150%
+HITO_3_TRIGGER_PCT = float(os.getenv("HITO_3_TRIGGER_PCT", "80.0"))
+HITO_3_SL_PCT = float(os.getenv("HITO_3_SL_PCT", "0.55"))
+HITO_3_TP_EXPAND_PCT = float(os.getenv("HITO_3_TP_EXPAND_PCT", "1.50"))
 
-# Hito 4: Al 135% de recorrido -> SL al 128%, TP ampliado al 200%
-HITO_4_TRIGGER_PCT = 135.0
-HITO_4_SL_PCT = 1.28
-HITO_4_TP_EXPAND_PCT = 2.00
+# Hito 4: Al 110% de recorrido -> Asegura 85% de D_base, TP ampliado al 180%
+HITO_4_TRIGGER_PCT = float(os.getenv("HITO_4_TRIGGER_PCT", "110.0"))
+HITO_4_SL_PCT = float(os.getenv("HITO_4_SL_PCT", "0.85"))
+HITO_4_TP_EXPAND_PCT = float(os.getenv("HITO_4_TP_EXPAND_PCT", "1.80"))
 
-# Hitos Infinitos (Paso recurrente de expansión cada 20% adicional)
-RUNNER_STEP_PCT = 20.0
+# Hitos Infinitos (Paso recurrente de expansión cada 20% adicional protegiendo el 85%)
+RUNNER_STEP_PCT = float(os.getenv("RUNNER_STEP_PCT", "20.0"))
+
+# ==========================================
+# Canasta de Ganancia Global (Portfolio Basket Take-Profit)
+# ==========================================
+# Umbral de recogida en bloque: si la suma flotante de todas las posiciones alcanza $850 USD, se asegura la ganancia
+BASKET_TP_TARGET_USD = float(os.getenv("BASKET_TP_TARGET_USD", "850.0"))
+BASKET_TP_HARD_USD = float(os.getenv("BASKET_TP_HARD_USD", "900.0"))
+BASKET_COOLDOWN_SECONDS = int(os.getenv("BASKET_COOLDOWN_SECONDS", "300")) # 5 minutos de pausa tras cerrar la canasta
 
 # ==========================================
 # Supported Institutional CME Futures Specifications

@@ -190,7 +190,7 @@ class TestPureVWAPStrategy(unittest.TestCase):
         self.assertEqual(kwargs_short["tp_ticks"], -160, "TopstepX exige signo negativo para TP en SHORT")
 
     def test_escalera_de_hitos_long(self):
-        """Prueba los hitos en LONG: 40% (BE+1), 70% (SL 45%, TP 140%), 120% (SL 108%, TP 170%)."""
+        """Prueba los hitos optimizados en LONG: 35% (BE+1), 50% (SL 25%, TP 120%), 80% (SL 55%, TP 150%), 110% (SL 85%, TP 180%)."""
         setup = {
             "simbolo": "ES",
             "direccion": "LONG",
@@ -205,35 +205,35 @@ class TestPureVWAPStrategy(unittest.TestCase):
         trade = self.engine.symbol_states["ES"]["active_trade"]
         self.assertIsNotNone(trade)
         
-        # 1. Al 20% (Precio 5008.0): Aún no alcanza el 40% -> Sin cambios (stage 0)
+        # 1. Al 20% (Precio 5008.0): Aún no alcanza el 35% -> Sin cambios (stage 0)
         self.engine.monitorear_posicion_abierta("ES", current_price=5008.0)
         self.assertEqual(trade["sl_stage"], 0)
         
-        # 2. Al 45% (Precio 5018.0 >= 40% de 40.0 = 16.0 pts): Hito 1 -> SL a BE + 1 tick (5000.25)
-        self.engine.monitorear_posicion_abierta("ES", current_price=5018.0)
+        # 2. Al 40% (Precio 5016.0 >= 35% de 40.0 = 14.0 pts): Hito 1 -> SL a BE + 1 tick (5000.25)
+        self.engine.monitorear_posicion_abierta("ES", current_price=5016.0)
         self.assertEqual(trade["sl_stage"], 1)
         self.assertEqual(trade["current_sl_price"], 5000.25)
         
-        # 3. Al 75% (Precio 5030.0 >= 70% de 40.0 = 28.0 pts): Hito 2 -> SL a 45% (5018.0), TP a 140% (5056.0)
-        self.engine.monitorear_posicion_abierta("ES", current_price=5030.0)
+        # 3. Al 55% (Precio 5022.0 >= 50% de 40.0 = 20.0 pts): Hito 2 -> SL a 25% (5010.0), TP a 120% (5048.0)
+        self.engine.monitorear_posicion_abierta("ES", current_price=5022.0)
         self.assertEqual(trade["sl_stage"], 2)
-        self.assertEqual(trade["current_sl_price"], 5018.0)
-        self.assertEqual(trade["current_tp_price"], 5056.0)
+        self.assertEqual(trade["current_sl_price"], 5010.0)
+        self.assertEqual(trade["current_tp_price"], 5048.0)
         
-        # 4. Al 125% (Precio 5050.0 >= 120% de 40.0 = 48.0 pts): Hito 3 -> SL a 108% (5043.25), TP a 170% (5068.0)
-        self.engine.monitorear_posicion_abierta("ES", current_price=5050.0)
+        # 4. Al 85% (Precio 5034.0 >= 80% de 40.0 = 32.0 pts): Hito 3 -> SL a 55% (5022.0), TP a 150% (5060.0)
+        self.engine.monitorear_posicion_abierta("ES", current_price=5034.0)
         self.assertEqual(trade["sl_stage"], 3)
-        self.assertAlmostEqual(trade["current_sl_price"], 5043.25, places=2)
-        self.assertEqual(trade["current_tp_price"], 5068.0)
+        self.assertAlmostEqual(trade["current_sl_price"], 5022.0, places=2)
+        self.assertEqual(trade["current_tp_price"], 5060.0)
 
-        # 5. Al 136% (Precio 5054.5 >= 135% de 40.0 = 54.0 pts): Hito 4 -> SL a 128% (5051.25), TP a 200% (5080.0)
-        self.engine.monitorear_posicion_abierta("ES", current_price=5054.5)
+        # 5. Al 115% (Precio 5046.0 >= 110% de 40.0 = 44.0 pts): Hito 4 -> SL a 85% (5034.0), TP a 180% (5072.0)
+        self.engine.monitorear_posicion_abierta("ES", current_price=5046.0)
         self.assertEqual(trade["sl_stage"], 4)
-        self.assertAlmostEqual(trade["current_sl_price"], 5051.25, places=2)
-        self.assertEqual(trade["current_tp_price"], 5080.0)
+        self.assertAlmostEqual(trade["current_sl_price"], 5034.0, places=2)
+        self.assertEqual(trade["current_tp_price"], 5072.0)
 
     def test_escalera_de_hitos_short(self):
-        """Prueba los hitos en SHORT: sin UnboundLocalError y calculando correctamente ganancia."""
+        """Prueba los hitos optimizados en SHORT: calculando correctamente protección de ganancia."""
         setup = {
             "simbolo": "ES",
             "direccion": "SHORT",
@@ -252,16 +252,16 @@ class TestPureVWAPStrategy(unittest.TestCase):
         self.engine.monitorear_posicion_abierta("ES", current_price=4992.0)
         self.assertEqual(trade["sl_stage"], 0)
         
-        # 2. Al 45% (Precio 4982.0 <= 5000 - 16.0 = 4984.0): Hito 1 -> SL a BE - 1 tick (4999.75)
-        self.engine.monitorear_posicion_abierta("ES", current_price=4982.0)
+        # 2. Al 40% (Precio 4984.0 <= 5000 - 14.0 = 4986.0): Hito 1 -> SL a BE - 1 tick (4999.75)
+        self.engine.monitorear_posicion_abierta("ES", current_price=4984.0)
         self.assertEqual(trade["sl_stage"], 1)
         self.assertEqual(trade["current_sl_price"], 4999.75)
         
-        # 3. Al 75% (Precio 4970.0 <= 5000 - 28.0 = 4972.0): Hito 2 -> SL a 45% (4982.0), TP a 140% (4944.0)
-        self.engine.monitorear_posicion_abierta("ES", current_price=4970.0)
+        # 3. Al 55% (Precio 4978.0 <= 5000 - 20.0 = 4980.0): Hito 2 -> SL a 25% (4990.0), TP a 120% (4952.0)
+        self.engine.monitorear_posicion_abierta("ES", current_price=4978.0)
         self.assertEqual(trade["sl_stage"], 2)
-        self.assertEqual(trade["current_sl_price"], 4982.0)
-        self.assertEqual(trade["current_tp_price"], 4944.0)
+        self.assertEqual(trade["current_sl_price"], 4990.0)
+        self.assertEqual(trade["current_tp_price"], 4952.0)
 
     def test_no_phantom_past_high_liquidation(self):
         """Verifica que un High previo en la vela 5m no provoque liquidación inmediata a los 2 segundos."""
@@ -489,6 +489,42 @@ class TestPureVWAPStrategy(unittest.TestCase):
         self.assertEqual(primera_vela['NY_Time'].minute, 0)
         self.assertEqual(primera_vela['Cum_Vol'], 100)
         self.assertEqual(df_res.iloc[-1]['Cum_Vol'], len(df_res) * 100)
+
+    def test_setup_long_rechazado_por_pendiente_insuficiente(self):
+        """Verifica que si la pendiente es positiva pero menor a MIN_VWAP_SLOPE_TICKS (2 ticks = 0.50 en ES), se rechace."""
+        bars = []
+        for i in range(15):
+            # Pendiente micro de 0.01 por barra = 0.10 en 10 barras (< 0.50)
+            bars.append({
+                'Timestamp': self.now - timedelta(minutes=(15 - i) * 5),
+                'Open': 5000.0 + i * 0.01, 'High': 5005.0 + i * 0.01, 'Low': 4995.0 + i * 0.01, 'Close': 5000.0 + i * 0.01,
+                'Volume': 1000,
+                'VWAP': 5000.0 + i * 0.01,
+                'Upper_Band': 5040.0, 'Lower_Band': 4960.0
+            })
+        df_flat = pd.DataFrame(bars)
+        df_flat.iloc[-2, df_flat.columns.get_loc('Low')] = df_flat.iloc[-2]['VWAP'] + 1.0
+        precio_actual = float(df_flat.iloc[-1]['VWAP'])
+
+        setup = self.engine.verificar_setup_vwap(df_flat, "ES", current_price=precio_actual)
+        self.assertIsNone(setup, "Debe rechazar LONG porque la pendiente (+0.10) es menor al mínimo requerido (+0.50 pts / 2 ticks)")
+
+    def test_canasta_profit_flatten_all(self):
+        """Verifica que emergency_flatten_all liquide y cancele órdenes para todos los contratos abiertos."""
+        self.mock_client.close_contract_position.return_value = {"success": True}
+        # Primera llamada devuelve 2 posiciones, segunda llamada (verificación de seguridad) devuelve [] confirmando flat
+        self.mock_client.get_open_positions.side_effect = [
+            [{"contractId": "CON_ES_TEST", "size": 1}, {"contractId": "CON_YM_TEST", "size": 1}],
+            []
+        ]
+        self.engine.symbol_states["ES"]["has_open_position"] = True
+        self.engine.symbol_states["ES"]["active_trade"] = {"symbol": "ES", "contract_id": "CON_ES_TEST", "entry_price": 5000.0, "direction": "LONG"}
+        
+        res = self.engine.emergency_flatten_all(reason="Test Basket TP")
+        self.assertTrue(res["success"])
+        self.assertFalse(self.engine.symbol_states["ES"]["has_open_position"])
+        self.assertIsNone(self.engine.symbol_states["ES"]["active_trade"])
+        self.assertEqual(self.mock_client.close_contract_position.call_count, 2)
 
 if __name__ == '__main__':
     unittest.main()
