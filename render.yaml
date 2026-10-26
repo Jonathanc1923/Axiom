@@ -24,3 +24,9 @@ services:
         value: ES
       - key: AUTO_START_ENGINE
         value: "true"
+      - key: MIN_SLOPE_POINTS_INDICES
+        value: "2.0"
+      - key: MIN_SLOPE_POINTS_OIL
+        value: "0.03"
+      - key: MIN_SLOPE_POINTS_GOLD
+        value: "1.5"

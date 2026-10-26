@@ -697,7 +697,7 @@ document.addEventListener('DOMContentLoaded', () => {
         });
 
         if (filtered.length === 0) {
-            operationsTableBody.innerHTML = `<tr><td colspan="15" style="text-align:center; color:#64748B; padding:20px;">No hay registros de operaciones para el filtro seleccionado (${filterVal}).</td></tr>`;
+            operationsTableBody.innerHTML = `<tr><td colspan="17" style="text-align:center; color:#64748B; padding:20px;">No hay registros de operaciones para el filtro seleccionado (${filterVal}).</td></tr>`;
             return;
         }
 
@@ -776,8 +776,22 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
             }
             
+            const horaApertura = r.Hora_Apertura || r.Hora || '--:--:--';
+            let horaCierre = r.Hora_Cierre;
+            if (!horaCierre || horaCierre === 'N/A' || horaCierre === 'PENDIENTE') {
+                if (isClosed) {
+                    horaCierre = (r.Ultima_Actualizacion && r.Ultima_Actualizacion.includes(' ')) 
+                        ? r.Ultima_Actualizacion.split(' ')[1] 
+                        : (r.Hora || '--:--:--');
+                } else {
+                    horaCierre = '<span style="color:#10B981; font-weight:600;">EN CURSO</span>';
+                }
+            }
+            
             tr.innerHTML = `
-                <td>${r.Fecha || ''} ${r.Hora || ''}</td>
+                <td>${escapeHtml(r.Fecha || '')}</td>
+                <td style="font-family:var(--font-mono); font-weight:600; color:#38BDF8;">${escapeHtml(horaApertura)}</td>
+                <td style="font-family:var(--font-mono); font-weight:600; color:${isClosed ? '#94A3B8' : '#10B981'};">${horaCierre}</td>
                 <td><span class="badge-sym">${sym}</span></td>
                 <td><span class="badge ${badgeClass}">${escapeHtml(r.Estado || 'N/A')}</span></td>
                 <td><span class="badge ${isLong ? 'badge-long' : 'badge-short'}">${r.Direccion || ''}</span></td>

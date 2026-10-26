@@ -42,8 +42,40 @@ INITIAL_SL_TICKS = int(os.getenv("INITIAL_SL_TICKS", "35"))
 # Lookback de velas de 5m para evaluar la pendiente direccional del VWAP institucional
 VWAP_SLOPE_LOOKBACK_BARS = int(os.getenv("VWAP_SLOPE_LOOKBACK_BARS", "10"))
 
-# Pendiente mínima requerida en ticks para validar el setup (filtra mercados planos y caídas lentas)
+# Pendiente mínima requerida en ticks (mantiene compatibilidad con variables previas)
 MIN_VWAP_SLOPE_TICKS = int(os.getenv("MIN_VWAP_SLOPE_TICKS", "2"))
+
+# ==========================================
+# Institutional Minimum Slope Thresholds by Asset Class
+# ==========================================
+# Índices bursátiles (ES, MES, NQ, MNQ, YM, MYM, RTY, M2K): Mínimo +2.0 puntos en dirección del trade
+MIN_SLOPE_POINTS_INDICES = float(os.getenv("MIN_SLOPE_POINTS_INDICES", "2.0"))
+
+# Petróleo / Materias primas (CL, MCL): Mínimo acorde a su dinámica (0.03 puntos / 3 ticks)
+MIN_SLOPE_POINTS_OIL = float(os.getenv("MIN_SLOPE_POINTS_OIL", "0.03"))
+
+# Oro (GC, MGC): Mínimo acorde a su dinámica (1.5 puntos / 15 ticks)
+MIN_SLOPE_POINTS_GOLD = float(os.getenv("MIN_SLOPE_POINTS_GOLD", "1.5"))
+
+MIN_SLOPE_POINTS_BY_SYMBOL = {
+    "ES": MIN_SLOPE_POINTS_INDICES,
+    "MES": MIN_SLOPE_POINTS_INDICES,
+    "NQ": MIN_SLOPE_POINTS_INDICES,
+    "MNQ": MIN_SLOPE_POINTS_INDICES,
+    "YM": MIN_SLOPE_POINTS_INDICES,
+    "MYM": MIN_SLOPE_POINTS_INDICES,
+    "RTY": MIN_SLOPE_POINTS_INDICES,
+    "M2K": MIN_SLOPE_POINTS_INDICES,
+    "CL": MIN_SLOPE_POINTS_OIL,
+    "MCL": MIN_SLOPE_POINTS_OIL,
+    "GC": MIN_SLOPE_POINTS_GOLD,
+    "MGC": MIN_SLOPE_POINTS_GOLD,
+}
+
+def get_min_slope_points(symbol: str) -> float:
+    """Devuelve la pendiente mínima requerida en puntos para el símbolo especificado."""
+    s = (symbol or "").upper()
+    return MIN_SLOPE_POINTS_BY_SYMBOL.get(s, MIN_SLOPE_POINTS_INDICES)
 
 # Intervalo central de monitoreo y actualización de mercado (2.0 segundos)
 POLL_INTERVAL_SECONDS = float(os.getenv("POLL_INTERVAL_SECONDS", "2.0"))

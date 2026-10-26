@@ -29,7 +29,7 @@ if hasattr(sys.stderr, "reconfigure"):
 from config import (
     CSV_PATH, CSV_DIR, SUPPORTED_SYMBOLS, DEFAULT_SYMBOL, DATA_DIR,
     INITIAL_SL_TICKS, POLL_INTERVAL_SECONDS, VWAP_SLOPE_LOOKBACK_BARS,
-    MIN_VWAP_SLOPE_TICKS, BASKET_TP_TARGET_USD, BASKET_TP_HARD_USD, BASKET_COOLDOWN_SECONDS,
+    MIN_VWAP_SLOPE_TICKS, get_min_slope_points, BASKET_TP_TARGET_USD, BASKET_TP_HARD_USD, BASKET_COOLDOWN_SECONDS,
     HITO_1_TRIGGER_PCT, HITO_2_TRIGGER_PCT, HITO_2_SL_PCT, HITO_2_TP_EXPAND_PCT,
     HITO_3_TRIGGER_PCT, HITO_3_SL_PCT, HITO_3_TP_EXPAND_PCT,
     HITO_4_TRIGGER_PCT, HITO_4_SL_PCT, HITO_4_TP_EXPAND_PCT, RUNNER_STEP_PCT
@@ -407,15 +407,17 @@ class AxiomEngine:
         slope_vwap = vwap_now - vwap_ref
 
         # 3. Gatillo al tocar o pasar el VWAP
-        min_slope_val = round_to_tick(MIN_VWAP_SLOPE_TICKS * tick_size, tick_size)
+        min_slope_target = get_min_slope_points(sym)
+        min_slope_val = round_to_tick(min_slope_target, tick_size)
+        min_slope_ticks = round(min_slope_val / tick_size, 1)
 
         # Para LONG: viene de arriba y toca o pasa VWAP hacia abajo
         if contexto_long and precio_mercado <= (vwap_now + (0.5 * tick_size)):
-            # Validar que la pendiente del VWAP sea alcista con fuerza mínima (al menos 2 ticks)
+            # Validar que la pendiente del VWAP sea alcista con fuerza mínima en puntos
             if slope_vwap < min_slope_val:
                 self.log(
                     f"🚫 [{sym}] Setup LONG descartado por Pendiente VWAP insuficiente: "
-                    f"Pendiente actual ({slope_vwap:+.2f}) < Mínimo requerido ({min_slope_val:+.2f} pts / {MIN_VWAP_SLOPE_TICKS} ticks) hace {bars_eval} velas",
+                    f"Pendiente actual ({slope_vwap:+.2f}) < Mínimo requerido ({min_slope_val:+.2f} pts / {min_slope_ticks} ticks) hace {bars_eval} velas",
                     "SETUP", sym
                 )
                 return None
@@ -440,11 +442,11 @@ class AxiomEngine:
 
         # Para SHORT: viene de abajo y toca o pasa VWAP hacia arriba
         if contexto_short and precio_mercado >= (vwap_now - (0.5 * tick_size)):
-            # Validar que la pendiente del VWAP sea bajista con fuerza mínima (al menos -2 ticks)
+            # Validar que la pendiente del VWAP sea bajista con fuerza mínima en puntos
             if slope_vwap > -min_slope_val:
                 self.log(
                     f"🚫 [{sym}] Setup SHORT descartado por Pendiente VWAP insuficiente: "
-                    f"Pendiente actual ({slope_vwap:+.2f}) > Mínimo requerido ({-min_slope_val:+.2f} pts / -{MIN_VWAP_SLOPE_TICKS} ticks) hace {bars_eval} velas",
+                    f"Pendiente actual ({slope_vwap:+.2f}) > Mínimo requerido ({-min_slope_val:+.2f} pts / -{min_slope_ticks} ticks) hace {bars_eval} velas",
                     "SETUP", sym
                 )
                 return None
@@ -606,6 +608,10 @@ class AxiomEngine:
                 order_id = res.get("orderId", "N/A")
                 self.symbol_states[sym]["has_open_position"] = True
                 
+                now_entry = datetime.now()
+                hora_apertura = now_entry.strftime('%H:%M:%S')
+                fecha_apertura = now_entry.strftime('%Y-%m-%d')
+                
                 # Inicializar seguimiento activo e independiente con D_base congelado
                 self.symbol_states[sym]["active_trade"] = {
                     "symbol": sym,
@@ -626,10 +632,12 @@ class AxiomEngine:
                     "sl_stage": 0, # 0=Inicio, 1=Hito 1 (40%), 2=Hito 2 (70%), 3=Hito 3 (120%)
                     "max_pct_avance": 0.0,
                     "entry_timestamp": time.time(),
+                    "entry_time_str": hora_apertura,
+                    "entry_date_str": fecha_apertura,
                     "last_check_time": time.time()
                 }
                 
-                self.log(f"✅ Orden ejecutada con éxito en TopstepX. Order ID: {order_id} | Trailing 2s inicializado.", "ORDER", sym)
+                self.log(f"🚀 [{sym}] Orden EJECUTADA | Apertura: {hora_apertura} | {direccion} @ {precio_entrada:.2f} | Order ID: {order_id} | SL: {ticks_sl}t | TP: {ticks_tp}t", "ORDER", sym)
                 self.registrar_en_csv(
                     simbolo=sym,
                     direccion=direccion,
@@ -1031,17 +1039,46 @@ class AxiomEngine:
                 "last_check_time": time.time()
             }
             
+            now_dt = datetime.now()
+            hora_str = now_dt.strftime('%H:%M:%S')
+            fecha_str = now_dt.strftime('%Y-%m-%d')
+            
+            adopted_trade = {
+                "symbol": sym,
+                "contract_id": contract_id,
+                "direction": direccion,
+                "entry_price": entry_price,
+                "current_price": entry_price,
+                "highest_price": entry_price,
+                "lowest_price": entry_price,
+                "initial_sl_price": sl_price,
+                "current_sl_price": sl_price,
+                "initial_tp_price": tp_price,
+                "current_tp_price": tp_price,
+                "base_tp_pts": recorrido_tp_pts,
+                "initial_sl_ticks": sl_ticks,
+                "tp_ticks": tp_ticks,
+                "order_id": target_pos.get("id", "ADOPTADO"),
+                "sl_stage": 0,
+                "max_pct_avance": 0.0,
+                "entry_timestamp": time.time(),
+                "entry_time_str": hora_str,
+                "entry_date_str": fecha_str,
+                "last_check_time": time.time()
+            }
+            
             state["active_trade"] = adopted_trade
             state["has_open_position"] = True
             state["contract_id"] = contract_id
             
-            self.log(f"🎯 [{sym}] Posición abierta adoptada en TopstepX: {direccion} @ {entry_price:.2f}.", "ORDER", sym)
+            self.log(f"🎯 [{sym}] Posición abierta adoptada en TopstepX | Apertura: {hora_str} | {direccion} @ {entry_price:.2f}.", "ORDER", sym)
             
             # Registrar posición adoptada en CSV para visibilidad inmediata en panel
-            now_dt = datetime.now()
             self._guardar_o_actualizar_en_csv({
-                'Fecha': now_dt.strftime('%Y-%m-%d'),
-                'Hora': now_dt.strftime('%H:%M:%S'),
+                'Fecha': fecha_str,
+                'Hora_Apertura': hora_str,
+                'Hora_Cierre': "EN CURSO",
+                'Hora': hora_str,
                 'Simbolo': sym,
                 'Estado': "EN CURSO (OCO)",
                 'Direccion': direccion,
@@ -1074,11 +1111,12 @@ class AxiomEngine:
         """
         Inserta una nueva fila o actualiza en su lugar la existente (por Order_ID)
         para evitar duplicar registros abiertos cuando se actualizan hitos o se cierran operaciones.
+        Preserva de manera inmutable la hora de apertura original.
         """
         try:
             os.makedirs(os.path.dirname(os.path.abspath(self.csv_path)), exist_ok=True)
             fieldnames = [
-                'Fecha', 'Hora', 'Simbolo', 'Estado', 'Direccion', 'Precio_Mercado',
+                'Fecha', 'Hora_Apertura', 'Hora_Cierre', 'Hora', 'Simbolo', 'Estado', 'Direccion', 'Precio_Mercado',
                 'Precio_Entrada_Real', 'Precio_Salida_Real', 'SL_Ticks', 'TP_Ticks',
                 'Hito_Alcanzado', 'Max_Pct_TP',
                 'PnL_Bruto_USD', 'Comisiones_USD', 'PnL_Neto_USD', 'Order_ID',
@@ -1090,6 +1128,15 @@ class AxiomEngine:
                 with open(self.csv_path, mode='r', encoding='utf-8') as file:
                     reader = csv.DictReader(file, delimiter=';')
                     for r in reader:
+                        # Auto-poblar Hora_Apertura y Hora_Cierre si faltan de versiones anteriores
+                        if not r.get('Hora_Apertura') or r.get('Hora_Apertura') in ('N/A', ''):
+                            r['Hora_Apertura'] = r.get('Hora', 'N/A')
+                        if not r.get('Hora_Cierre') or r.get('Hora_Cierre') in ('N/A', ''):
+                            estado = (r.get('Estado') or '').upper()
+                            if 'CERRADA' in estado:
+                                r['Hora_Cierre'] = r.get('Ultima_Actualizacion', '').split(' ')[1] if ' ' in r.get('Ultima_Actualizacion', '') else r.get('Hora', 'N/A')
+                            else:
+                                r['Hora_Cierre'] = 'EN CURSO'
                         rows.append(r)
             
             updated = False
@@ -1101,6 +1148,9 @@ class AxiomEngine:
                     if r_oid == target_oid:
                         for k, v in row_data.items():
                             if v is not None and v != "":
+                                # Proteger Hora_Apertura y Hora para no sobreescribir la entrada original al cerrar
+                                if k in ('Hora_Apertura', 'Hora') and r.get(k) and r.get(k) not in ('N/A', ''):
+                                    continue
                                 r[k] = v
                         rows[i] = r
                         updated = True
@@ -1122,12 +1172,14 @@ class AxiomEngine:
     def registrar_cierre_posicion(self, sym: str, trade: Dict[str, Any], precio_salida: Optional[float] = None, motivo_cierre: str = "Cierre de mercado"):
         """Registra el cierre definitivo de una operación con cálculo exacto de PnL y estado institucional."""
         try:
-            fecha_actual = datetime.now().strftime('%Y-%m-%d')
-            hora_actual = datetime.now().strftime('%H:%M:%S')
+            now_dt = datetime.now()
+            fecha_actual = now_dt.strftime('%Y-%m-%d')
+            hora_actual = now_dt.strftime('%H:%M:%S')
             
             precio_entrada = float(trade.get("entry_price", 0.0))
             direccion = trade.get("direction", "LONG")
             order_id = str(trade.get("order_id", "N/A"))
+            hora_apertura = trade.get("entry_time_str") or trade.get("Hora_Apertura") or hora_actual
             stage = trade.get("sl_stage", 0)
             hito_desc = self.format_milestone(stage)
             max_pct = trade.get("max_pct_avance", 0.0)
@@ -1192,14 +1244,16 @@ class AxiomEngine:
             estado_cierre = f"CERRADA ({sign_str}${net_pnl:.2f} USD)"
             
             self.log(
-                f"🏁 [{sym}] Operación CERRADA ({direccion}) | In: {precio_entrada:.2f} | Out: {p_salida:.2f} | "
+                f"🏁 [{sym}] Operación CERRADA ({direccion}) | Apertura: {hora_apertura} | Cierre: {hora_actual} | In: {precio_entrada:.2f} | Out: {p_salida:.2f} | "
                 f"PnL: {sign_str}${net_pnl:.2f} USD | Hito final: {hito_desc} (Max: {max_pct:.1f}%) | Motivo: {motivo_cierre}",
                 "ORDER", sym
             )
             
             row_data = {
                 'Fecha': fecha_actual,
-                'Hora': hora_actual,
+                'Hora_Apertura': hora_apertura,
+                'Hora_Cierre': hora_actual,
+                'Hora': hora_apertura,
                 'Simbolo': sym,
                 'Estado': estado_cierre,
                 'Direccion': direccion,
@@ -1282,6 +1336,8 @@ class AxiomEngine:
             
             row_data = {
                 'Fecha': fecha_actual,
+                'Hora_Apertura': hora_actual,
+                'Hora_Cierre': "EN CURSO" if exito else "RECHAZADA",
                 'Hora': hora_actual,
                 'Simbolo': simbolo,
                 'Estado': estado,
@@ -1440,6 +1496,7 @@ class AxiomEngine:
                             comms = None
                             exit_oid = "SYNC_CLOSE"
                             
+                            exit_time_str = datetime.now().strftime('%H:%M:%S')
                             for fill in reversed(raw_trades):
                                 f_sym = self.resolve_symbol_from_contract(fill.get("contractId", ""))
                                 if f_sym == sym and fill.get("profitAndLoss") is not None:
@@ -1449,6 +1506,12 @@ class AxiomEngine:
                                     f_comms = float(fill.get("commissions") or 0.0)
                                     comms = round(f_fees + f_comms, 2)
                                     exit_oid = str(fill.get("orderId", "SYNC_CLOSE"))
+                                    fill_ts = fill.get("creationTimestamp", "")
+                                    if fill_ts and "T" in fill_ts:
+                                        try:
+                                            exit_time_str = fill_ts.split("T")[1].split(".")[0]
+                                        except Exception:
+                                            pass
                                     break
                                     
                             p_entrada = float(r.get("Precio_Entrada_Real") or r.get("Precio_Mercado") or 0.0)
@@ -1495,6 +1558,9 @@ class AxiomEngine:
                             r["Comisiones_USD"] = f"{comms:.2f}"
                             r["PnL_Neto_USD"] = f"{net_pnl:.2f}"
                             r["Exit_Order_ID"] = exit_oid
+                            r["Hora_Cierre"] = exit_time_str
+                            if not r.get("Hora_Apertura") or r.get("Hora_Apertura") in ("N/A", ""):
+                                r["Hora_Apertura"] = r.get("Hora", "N/A")
                             r["Ultima_Actualizacion"] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                             cambios = True
                             
@@ -1526,6 +1592,15 @@ class AxiomEngine:
             with open(self.csv_path, mode='r', encoding='utf-8') as f:
                 reader = csv.DictReader(f, delimiter=';')
                 for row in reader:
+                    # Garantizar compatibilidad con Hora_Apertura y Hora_Cierre
+                    if not row.get('Hora_Apertura') or row.get('Hora_Apertura') in ('N/A', ''):
+                        row['Hora_Apertura'] = row.get('Hora', 'N/A')
+                    if not row.get('Hora_Cierre') or row.get('Hora_Cierre') in ('N/A', ''):
+                        estado = (row.get('Estado') or '').upper()
+                        if 'CERRADA' in estado:
+                            row['Hora_Cierre'] = row.get('Ultima_Actualizacion', '').split(' ')[1] if ' ' in row.get('Ultima_Actualizacion', '') else row.get('Hora', 'N/A')
+                        else:
+                            row['Hora_Cierre'] = 'EN CURSO'
                     records.append(row)
         except Exception as e:
             self.log(f"⚠️ Error al leer operaciones de CSV: {e}", "ERROR")

@@ -507,7 +507,66 @@ class TestPureVWAPStrategy(unittest.TestCase):
         precio_actual = float(df_flat.iloc[-1]['VWAP'])
 
         setup = self.engine.verificar_setup_vwap(df_flat, "ES", current_price=precio_actual)
-        self.assertIsNone(setup, "Debe rechazar LONG porque la pendiente (+0.10) es menor al mínimo requerido (+0.50 pts / 2 ticks)")
+        self.assertIsNone(setup, "Debe rechazar LONG porque la pendiente (+0.10) es menor al mínimo requerido (+2.00 pts / 8 ticks en ES)")
+
+    def test_pendiente_minima_petroleo_cl(self):
+        """Verifica que para CL la pendiente mínima sea 0.03 puntos (3 ticks) y rechace pendientes planas."""
+        self.engine.symbol_states["CL"]["tick_size"] = 0.01
+        bars_flat = []
+        for i in range(15):
+            # Pendiente de 0.001 por barra = 0.01 en 10 barras (< 0.03 pts)
+            bars_flat.append({
+                'Timestamp': self.now - timedelta(minutes=(15 - i) * 5),
+                'Open': 100.0 + i * 0.001, 'High': 100.5 + i * 0.001, 'Low': 99.5 + i * 0.001, 'Close': 100.0 + i * 0.001,
+                'Volume': 500,
+                'VWAP': 100.0 + i * 0.001,
+                'Upper_Band': 102.0, 'Lower_Band': 98.0
+            })
+        df_cl_flat = pd.DataFrame(bars_flat)
+        df_cl_flat.iloc[-2, df_cl_flat.columns.get_loc('Low')] = df_cl_flat.iloc[-2]['VWAP'] + 0.10
+        precio_actual = float(df_cl_flat.iloc[-1]['VWAP'])
+
+        setup_cl_flat = self.engine.verificar_setup_vwap(df_cl_flat, "CL", current_price=precio_actual)
+        self.assertIsNone(setup_cl_flat, "Debe rechazar CL si la pendiente (+0.01 pts) es menor a 0.03 pts")
+
+        # Ahora probamos con pendiente válida para petróleo (+0.05 pts en 10 barras)
+        bars_ok = []
+        for i in range(15):
+            bars_ok.append({
+                'Timestamp': self.now - timedelta(minutes=(15 - i) * 5),
+                'Open': 100.0 + i * 0.005, 'High': 100.5 + i * 0.005, 'Low': 99.5 + i * 0.005, 'Close': 100.0 + i * 0.005,
+                'Volume': 500,
+                'VWAP': 100.0 + i * 0.005,
+                'Upper_Band': 102.0, 'Lower_Band': 98.0
+            })
+        df_cl_ok = pd.DataFrame(bars_ok)
+        df_cl_ok.iloc[-2, df_cl_ok.columns.get_loc('Low')] = df_cl_ok.iloc[-2]['VWAP'] + 0.10
+        precio_actual_ok = float(df_cl_ok.iloc[-1]['VWAP'])
+
+        setup_cl_ok = self.engine.verificar_setup_vwap(df_cl_ok, "CL", current_price=precio_actual_ok)
+        self.assertIsNotNone(setup_cl_ok, "Debe aprobar CL si la pendiente (+0.05 pts) supera 0.03 pts")
+        self.assertEqual(setup_cl_ok["direccion"], "LONG")
+
+    def test_csv_registro_hora_apertura_y_cierre(self):
+        """Verifica que el CSV registre Hora_Apertura y Hora_Cierre de forma independiente e inmutable."""
+        trade = {
+            "symbol": "ES",
+            "direction": "LONG",
+            "entry_price": 5000.0,
+            "current_price": 5010.0,
+            "order_id": 888123,
+            "entry_time_str": "10:26:22",
+            "initial_sl_ticks": 35,
+            "tp_ticks": 40
+        }
+        self.engine.registrar_cierre_posicion("ES", trade, precio_salida=5010.0, motivo_cierre="Test Cierre")
+        
+        historial = self.engine.load_operations_history()
+        self.assertTrue(len(historial) > 0)
+        ultima_op = historial[-1]
+        self.assertEqual(ultima_op["Hora_Apertura"], "10:26:22")
+        self.assertIn(":", ultima_op["Hora_Cierre"])
+        self.assertNotEqual(ultima_op["Hora_Cierre"], "EN CURSO")
 
     def test_canasta_profit_flatten_all(self):
         """Verifica que emergency_flatten_all liquide y cancele órdenes para todos los contratos abiertos."""
