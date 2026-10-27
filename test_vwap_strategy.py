@@ -550,6 +550,22 @@ class TestPureVWAPStrategy(unittest.TestCase):
         self.assertIsNotNone(setup_cl_ok, "Debe aprobar CL si la pendiente (+0.05 pts) supera 0.03 pts")
         self.assertEqual(setup_cl_ok["direccion"], "LONG")
 
+    def test_umbrales_pendientes_minimas_todos_los_simbolos(self):
+        """Verifica que los umbrales de pendiente mínima por símbolo coincidan exactamente con la especificación institucional."""
+        from config import get_min_slope_points
+        self.assertEqual(get_min_slope_points("ES"), 1.0)
+        self.assertEqual(get_min_slope_points("MES"), 1.0)
+        self.assertEqual(get_min_slope_points("NQ"), 1.5)
+        self.assertEqual(get_min_slope_points("MNQ"), 1.5)
+        self.assertEqual(get_min_slope_points("YM"), 2.0)
+        self.assertEqual(get_min_slope_points("MYM"), 2.0)
+        self.assertEqual(get_min_slope_points("RTY"), 0.30)
+        self.assertEqual(get_min_slope_points("M2K"), 0.30)
+        self.assertEqual(get_min_slope_points("CL"), 0.03)
+        self.assertEqual(get_min_slope_points("MCL"), 0.03)
+        self.assertEqual(get_min_slope_points("GC"), 1.0)
+        self.assertEqual(get_min_slope_points("MGC"), 1.0)
+
     def test_csv_registro_hora_apertura_y_cierre(self):
         """Verifica que el CSV registre Hora_Apertura y Hora_Cierre de forma independiente e inmutable."""
         trade = {
