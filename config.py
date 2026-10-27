@@ -39,33 +39,31 @@ CSV_PATH = os.path.join(DATA_DIR, "registro_operaciones.csv")
 # Stop Loss Inicial universal fijo (35 ticks para todos los activos)
 INITIAL_SL_TICKS = int(os.getenv("INITIAL_SL_TICKS", "35"))
 
-# Lookback de velas de 5m para evaluar la pendiente direccional del VWAP institucional
-VWAP_SLOPE_LOOKBACK_BARS = int(os.getenv("VWAP_SLOPE_LOOKBACK_BARS", "10"))
+# Lookback de velas de 5m para evaluar la pendiente direccional del VWAP institucional (7 velas = 35 minutos)
+VWAP_SLOPE_LOOKBACK_BARS = int(os.getenv("VWAP_SLOPE_LOOKBACK_BARS", "7"))
 
 # Pendiente mínima requerida en ticks (mantiene compatibilidad con variables previas)
 MIN_VWAP_SLOPE_TICKS = int(os.getenv("MIN_VWAP_SLOPE_TICKS", "2"))
 
 # ==========================================
-# Institutional Minimum Slope Thresholds by Asset Class
+# Institutional Minimum Slope Thresholds by Asset (Pure VWAP 35 min)
 # ==========================================
-# Índices bursátiles (ES, MES, NQ, MNQ, YM, MYM, RTY, M2K): Mínimo +2.0 puntos en dirección del trade
-MIN_SLOPE_POINTS_INDICES = float(os.getenv("MIN_SLOPE_POINTS_INDICES", "2.0"))
-
-# Petróleo / Materias primas (CL, MCL): Mínimo acorde a su dinámica (0.03 puntos / 3 ticks)
-MIN_SLOPE_POINTS_OIL = float(os.getenv("MIN_SLOPE_POINTS_OIL", "0.03"))
-
-# Oro (GC, MGC): Mínimo acorde a su dinámica (1.5 puntos / 15 ticks)
-MIN_SLOPE_POINTS_GOLD = float(os.getenv("MIN_SLOPE_POINTS_GOLD", "1.5"))
+MIN_SLOPE_POINTS_ES = float(os.getenv("MIN_SLOPE_POINTS_ES", "1.0"))      # 1.0 punto (4 ticks)
+MIN_SLOPE_POINTS_NQ = float(os.getenv("MIN_SLOPE_POINTS_NQ", "2.5"))      # 2.5 puntos (10 ticks)
+MIN_SLOPE_POINTS_YM = float(os.getenv("MIN_SLOPE_POINTS_YM", "5.0"))      # 5.0 puntos (5 ticks)
+MIN_SLOPE_POINTS_RTY = float(os.getenv("MIN_SLOPE_POINTS_RTY", "0.60"))   # 0.60 puntos (6 ticks)
+MIN_SLOPE_POINTS_OIL = float(os.getenv("MIN_SLOPE_POINTS_OIL", "0.03"))   # 0.03 puntos (3 ticks)
+MIN_SLOPE_POINTS_GOLD = float(os.getenv("MIN_SLOPE_POINTS_GOLD", "1.5"))  # 1.5 puntos (15 ticks)
 
 MIN_SLOPE_POINTS_BY_SYMBOL = {
-    "ES": MIN_SLOPE_POINTS_INDICES,
-    "MES": MIN_SLOPE_POINTS_INDICES,
-    "NQ": MIN_SLOPE_POINTS_INDICES,
-    "MNQ": MIN_SLOPE_POINTS_INDICES,
-    "YM": MIN_SLOPE_POINTS_INDICES,
-    "MYM": MIN_SLOPE_POINTS_INDICES,
-    "RTY": MIN_SLOPE_POINTS_INDICES,
-    "M2K": MIN_SLOPE_POINTS_INDICES,
+    "ES": MIN_SLOPE_POINTS_ES,
+    "MES": MIN_SLOPE_POINTS_ES,
+    "NQ": MIN_SLOPE_POINTS_NQ,
+    "MNQ": MIN_SLOPE_POINTS_NQ,
+    "YM": MIN_SLOPE_POINTS_YM,
+    "MYM": MIN_SLOPE_POINTS_YM,
+    "RTY": MIN_SLOPE_POINTS_RTY,
+    "M2K": MIN_SLOPE_POINTS_RTY,
     "CL": MIN_SLOPE_POINTS_OIL,
     "MCL": MIN_SLOPE_POINTS_OIL,
     "GC": MIN_SLOPE_POINTS_GOLD,
@@ -73,34 +71,52 @@ MIN_SLOPE_POINTS_BY_SYMBOL = {
 }
 
 def get_min_slope_points(symbol: str) -> float:
-    """Devuelve la pendiente mínima requerida en puntos para el símbolo especificado."""
+    """Devuelve la pendiente mínima requerida del VWAP en 35 minutos para el símbolo especificado."""
     s = (symbol or "").upper()
-    return MIN_SLOPE_POINTS_BY_SYMBOL.get(s, MIN_SLOPE_POINTS_INDICES)
+    return MIN_SLOPE_POINTS_BY_SYMBOL.get(s, 1.0)
+
+# Filtro Horario de Inicio de Sesión CME: Bloqueo de 2:30h tras apertura (18:00 a 20:30 ET)
+CME_OPEN_BUFFER_MINUTES = int(os.getenv("CME_OPEN_BUFFER_MINUTES", "150"))
 
 # Intervalo central de monitoreo y actualización de mercado (2.0 segundos)
 POLL_INTERVAL_SECONDS = float(os.getenv("POLL_INTERVAL_SECONDS", "2.0"))
 
+# ==========================================
 # Escalera de Hitos Dinámicos Optimizada (Porcentajes sobre D_base)
-# Hito 1: Al 35% de recorrido -> SL a BE + 1 tick (protección temprana de capital)
+# ==========================================
+# Micro-Escudo Temprano: Al 20% de recorrido -> Reduce SL inicial a 15 ticks (corta el riesgo más del 55%)
+HITO_MICRO_TRIGGER_PCT = float(os.getenv("HITO_MICRO_TRIGGER_PCT", "20.0"))
+HITO_MICRO_SL_TICKS = int(os.getenv("HITO_MICRO_SL_TICKS", "15"))
+
+# Hito 1: Al 35% de recorrido -> SL a BE + 1 tick (Riesgo Cero Garantizado)
 HITO_1_TRIGGER_PCT = float(os.getenv("HITO_1_TRIGGER_PCT", "35.0"))
 
-# Hito 2: Al 50% de recorrido -> Asegura 25% de D_base, TP ampliado al 120%
+# Hito 2: Al 50% de recorrido -> Asegura 35% de D_base, TP ampliado al 120%
 HITO_2_TRIGGER_PCT = float(os.getenv("HITO_2_TRIGGER_PCT", "50.0"))
-HITO_2_SL_PCT = float(os.getenv("HITO_2_SL_PCT", "0.25"))
+HITO_2_SL_PCT = float(os.getenv("HITO_2_SL_PCT", "0.35"))
 HITO_2_TP_EXPAND_PCT = float(os.getenv("HITO_2_TP_EXPAND_PCT", "1.20"))
 
-# Hito 3: Al 80% de recorrido -> Asegura 55% de D_base, TP ampliado al 150%
-HITO_3_TRIGGER_PCT = float(os.getenv("HITO_3_TRIGGER_PCT", "80.0"))
-HITO_3_SL_PCT = float(os.getenv("HITO_3_SL_PCT", "0.55"))
+# Hito 3: Al 75% de recorrido -> Asegura 65% de D_base, TP ampliado al 150%
+HITO_3_TRIGGER_PCT = float(os.getenv("HITO_3_TRIGGER_PCT", "75.0"))
+HITO_3_SL_PCT = float(os.getenv("HITO_3_SL_PCT", "0.65"))
 HITO_3_TP_EXPAND_PCT = float(os.getenv("HITO_3_TP_EXPAND_PCT", "1.50"))
 
-# Hito 4: Al 110% de recorrido -> Asegura 85% de D_base, TP ampliado al 180%
-HITO_4_TRIGGER_PCT = float(os.getenv("HITO_4_TRIGGER_PCT", "110.0"))
+# Hito 4: Al 100% de recorrido (TP inicial alcanzado) -> Asegura 85% de D_base, TP ampliado al 180%
+HITO_4_TRIGGER_PCT = float(os.getenv("HITO_4_TRIGGER_PCT", "100.0"))
 HITO_4_SL_PCT = float(os.getenv("HITO_4_SL_PCT", "0.85"))
 HITO_4_TP_EXPAND_PCT = float(os.getenv("HITO_4_TP_EXPAND_PCT", "1.80"))
 
-# Hitos Infinitos (Paso recurrente de expansión cada 20% adicional protegiendo el 85%)
+# Modo Runner Trailing: Persigue al precio a 15 ticks fijos por detrás del máximo alcanzado tras superar el 100%
+RUNNER_TRAILING_TICKS = int(os.getenv("RUNNER_TRAILING_TICKS", "15"))
 RUNNER_STEP_PCT = float(os.getenv("RUNNER_STEP_PCT", "20.0"))
+
+# ==========================================
+# Candado de Ganancia Diaria Trailing (Trailing Daily Profit Lock)
+# ==========================================
+# Umbral de activación: Al superar +$750 USD de beneficio acumulado en el día
+TRAILING_DAILY_PROFIT_TRIGGER_USD = float(os.getenv("TRAILING_DAILY_PROFIT_TRIGGER_USD", "750.0"))
+# Porcentaje de retención obligatoria: Conserva el 70% del pico máximo alcanzado en el día
+TRAILING_DAILY_PROFIT_RETAIN_PCT = float(os.getenv("TRAILING_DAILY_PROFIT_RETAIN_PCT", "0.70"))
 
 # ==========================================
 # Canasta de Ganancia Global (Portfolio Basket Take-Profit)

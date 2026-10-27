@@ -190,7 +190,7 @@ class TestPureVWAPStrategy(unittest.TestCase):
         self.assertEqual(kwargs_short["tp_ticks"], -160, "TopstepX exige signo negativo para TP en SHORT")
 
     def test_escalera_de_hitos_long(self):
-        """Prueba los hitos optimizados en LONG: 35% (BE+1), 50% (SL 25%, TP 120%), 80% (SL 55%, TP 150%), 110% (SL 85%, TP 180%)."""
+        """Prueba los hitos optimizados en LONG: Micro-escudo 20% (SL 15t), 35% (BE+1), 50% (SL 35%, TP 120%), 75% (SL 65%, TP 150%), 100% (SL 85%, TP 180%) y Runner Trailing."""
         setup = {
             "simbolo": "ES",
             "direccion": "LONG",
@@ -205,35 +205,37 @@ class TestPureVWAPStrategy(unittest.TestCase):
         trade = self.engine.symbol_states["ES"]["active_trade"]
         self.assertIsNotNone(trade)
         
-        # 1. Al 20% (Precio 5008.0): Aún no alcanza el 35% -> Sin cambios (stage 0)
+        # 1. Al 20% (Precio 5008.0 = 5000 + 8 pts = 20% de 40.0 pts): Micro-Escudo -> SL reducido a 15 ticks (4996.25)
         self.engine.monitorear_posicion_abierta("ES", current_price=5008.0)
-        self.assertEqual(trade["sl_stage"], 0)
+        self.assertEqual(trade["sl_stage"], 0.5)
+        self.assertEqual(trade["current_sl_price"], 4996.25) # 5000 - 15 * 0.25
         
         # 2. Al 40% (Precio 5016.0 >= 35% de 40.0 = 14.0 pts): Hito 1 -> SL a BE + 1 tick (5000.25)
         self.engine.monitorear_posicion_abierta("ES", current_price=5016.0)
         self.assertEqual(trade["sl_stage"], 1)
         self.assertEqual(trade["current_sl_price"], 5000.25)
         
-        # 3. Al 55% (Precio 5022.0 >= 50% de 40.0 = 20.0 pts): Hito 2 -> SL a 25% (5010.0), TP a 120% (5048.0)
+        # 3. Al 55% (Precio 5022.0 >= 50% de 40.0 = 20.0 pts): Hito 2 -> SL a 35% (5014.0), TP a 120% (5048.0)
         self.engine.monitorear_posicion_abierta("ES", current_price=5022.0)
         self.assertEqual(trade["sl_stage"], 2)
-        self.assertEqual(trade["current_sl_price"], 5010.0)
+        self.assertEqual(trade["current_sl_price"], 5014.0)
         self.assertEqual(trade["current_tp_price"], 5048.0)
         
-        # 4. Al 85% (Precio 5034.0 >= 80% de 40.0 = 32.0 pts): Hito 3 -> SL a 55% (5022.0), TP a 150% (5060.0)
-        self.engine.monitorear_posicion_abierta("ES", current_price=5034.0)
+        # 4. Al 80% (Precio 5032.0 >= 75% de 40.0 = 30.0 pts): Hito 3 -> SL a 65% (5026.0), TP a 150% (5060.0)
+        self.engine.monitorear_posicion_abierta("ES", current_price=5032.0)
         self.assertEqual(trade["sl_stage"], 3)
-        self.assertAlmostEqual(trade["current_sl_price"], 5022.0, places=2)
+        self.assertAlmostEqual(trade["current_sl_price"], 5026.0, places=2)
         self.assertEqual(trade["current_tp_price"], 5060.0)
 
-        # 5. Al 115% (Precio 5046.0 >= 110% de 40.0 = 44.0 pts): Hito 4 -> SL a 85% (5034.0), TP a 180% (5072.0)
-        self.engine.monitorear_posicion_abierta("ES", current_price=5046.0)
+        # 5. Al 105% (Precio 5042.0 >= 100% de 40.0 = 40.0 pts): Hito 4 -> SL al 85% (5034.0) y Runner trailing persigue a 15 ticks de 5042.0 (5038.25)
+        self.engine.monitorear_posicion_abierta("ES", current_price=5042.0)
         self.assertEqual(trade["sl_stage"], 4)
-        self.assertAlmostEqual(trade["current_sl_price"], 5034.0, places=2)
+        # Runner trailing: 5042.0 - (15 * 0.25 = 3.75) = 5038.25 > 5034.0
+        self.assertAlmostEqual(trade["current_sl_price"], 5038.25, places=2)
         self.assertEqual(trade["current_tp_price"], 5072.0)
 
     def test_escalera_de_hitos_short(self):
-        """Prueba los hitos optimizados en SHORT: calculando correctamente protección de ganancia."""
+        """Prueba los hitos optimizados en SHORT con Micro-escudo temprano."""
         setup = {
             "simbolo": "ES",
             "direccion": "SHORT",
@@ -248,19 +250,20 @@ class TestPureVWAPStrategy(unittest.TestCase):
         trade = self.engine.symbol_states["ES"]["active_trade"]
         self.assertIsNotNone(trade)
         
-        # 1. Al 20% (Precio 4992.0): Sin cambios (stage 0)
+        # 1. Al 20% (Precio 4992.0 <= 5000 - 8 pts = 20% de 40.0 pts): Micro-escudo -> SL a 15 ticks (5003.75)
         self.engine.monitorear_posicion_abierta("ES", current_price=4992.0)
-        self.assertEqual(trade["sl_stage"], 0)
+        self.assertEqual(trade["sl_stage"], 0.5)
+        self.assertEqual(trade["current_sl_price"], 5003.75) # 5000 + 15 * 0.25
         
         # 2. Al 40% (Precio 4984.0 <= 5000 - 14.0 = 4986.0): Hito 1 -> SL a BE - 1 tick (4999.75)
         self.engine.monitorear_posicion_abierta("ES", current_price=4984.0)
         self.assertEqual(trade["sl_stage"], 1)
         self.assertEqual(trade["current_sl_price"], 4999.75)
         
-        # 3. Al 55% (Precio 4978.0 <= 5000 - 20.0 = 4980.0): Hito 2 -> SL a 25% (4990.0), TP a 120% (4952.0)
+        # 3. Al 55% (Precio 4978.0 <= 5000 - 20.0 = 4980.0): Hito 2 -> SL a 35% (4986.0), TP a 120% (4952.0)
         self.engine.monitorear_posicion_abierta("ES", current_price=4978.0)
         self.assertEqual(trade["sl_stage"], 2)
-        self.assertEqual(trade["current_sl_price"], 4990.0)
+        self.assertEqual(trade["current_sl_price"], 4986.0)
         self.assertEqual(trade["current_tp_price"], 4952.0)
 
     def test_no_phantom_past_high_liquidation(self):
@@ -320,13 +323,13 @@ class TestPureVWAPStrategy(unittest.TestCase):
         self.assertIn("Hito 1", history[0]["Hito_Alcanzado"])
         self.assertEqual(history[0]["Max_Pct_TP"], "45.0%")
 
-        # 3. Avance a Hito 2 (5030.0): SL a 45%, TP a 140%
-        self.engine.monitorear_posicion_abierta("ES", current_price=5030.0)
+        # 3. Avance a Hito 2 (5022.0 = 55% de 40 pts): SL al 35%, TP al 120%
+        self.engine.monitorear_posicion_abierta("ES", current_price=5022.0)
         history = self.engine.load_operations_history()
         self.assertEqual(len(history), 1, "Debe seguir existiendo exactamente 1 fila")
         self.assertIn("Hito 2", history[0]["Estado"])
         self.assertIn("Hito 2", history[0]["Hito_Alcanzado"])
-        self.assertEqual(history[0]["Max_Pct_TP"], "75.0%")
+        self.assertEqual(history[0]["Max_Pct_TP"], "55.0%")
 
     def test_cierre_posicion_marca_csv_cerrada_y_calcula_pnl(self):
         """Verifica que al cerrarse la posición en el mercado, el CSV se actualice a CERRADA con PnL y Hito final."""
@@ -342,8 +345,8 @@ class TestPureVWAPStrategy(unittest.TestCase):
         }
         self.engine.ejecutar_orden(setup, "ES", ignore_schedule=True)
         
-        # Avanzar a Hito 2 (5030.0)
-        self.engine.monitorear_posicion_abierta("ES", current_price=5030.0)
+        # Avanzar a Hito 2 (5022.0 = 55% de 40 pts)
+        self.engine.monitorear_posicion_abierta("ES", current_price=5022.0)
         trade = self.engine.symbol_states["ES"]["active_trade"]
         self.assertEqual(trade["sl_stage"], 2)
         
@@ -351,7 +354,7 @@ class TestPureVWAPStrategy(unittest.TestCase):
         trade["entry_timestamp"] = trade["entry_timestamp"] - 10.0
         self.mock_client.get_open_positions.return_value = []
         
-        self.engine.monitorear_posicion_abierta("ES", current_price=5030.0)
+        self.engine.monitorear_posicion_abierta("ES", current_price=5022.0)
         
         # active_trade debe haber concluido
         self.assertIsNone(self.engine.symbol_states["ES"]["active_trade"])
@@ -362,10 +365,10 @@ class TestPureVWAPStrategy(unittest.TestCase):
         self.assertEqual(len(history), 1)
         self.assertIn("CERRADA", history[0]["Estado"])
         self.assertIn("Hito 2", history[0]["Hito_Alcanzado"])
-        self.assertEqual(history[0]["Max_Pct_TP"], "75.0%")
-        self.assertEqual(history[0]["Precio_Salida_Real"], "5030.00")
+        self.assertEqual(history[0]["Max_Pct_TP"], "55.0%")
+        self.assertEqual(history[0]["Precio_Salida_Real"], "5022.00")
         pnl_net = float(history[0]["PnL_Neto_USD"])
-        self.assertGreater(pnl_net, 0) # 30 pts * $50 - $3.78 = $1496.22
+        self.assertGreater(pnl_net, 0)
 
     def test_sync_reconcilia_operaciones_abiertas_y_cerradas(self):
         """Verifica que sync_real_data_from_topstep concilie órdenes huérfanas en CSV para que solo figuren abiertas las reales."""
@@ -450,8 +453,8 @@ class TestPureVWAPStrategy(unittest.TestCase):
         setup = self.engine.verificar_setup_vwap(df_5m, "ES", current_price=precio_actual)
         self.assertIsNone(setup, "Debe rechazar SHORT porque la pendiente del VWAP va en subida")
 
-    def test_setup_aprobado_pendiente_vwap_10_velas(self):
-        """Verifica que si la pendiente en 10 velas va en la dirección deseada, se apruebe con datos de pendiente."""
+    def test_setup_aprobado_pendiente_vwap_7_velas_35_min(self):
+        """Verifica que si la pendiente en 7 velas (35 min) va en la dirección deseada, se apruebe con datos de pendiente."""
         bars_long = []
         for i in range(15):
             bars_long.append({
@@ -466,10 +469,10 @@ class TestPureVWAPStrategy(unittest.TestCase):
         precio_mercado = float(df_long.iloc[-1]['VWAP'])
 
         setup = self.engine.verificar_setup_vwap(df_long, "ES", current_price=precio_mercado)
-        self.assertIsNotNone(setup, "Debe aprobar LONG con pendiente alcista en 10 velas de 5m")
+        self.assertIsNotNone(setup, "Debe aprobar LONG con pendiente alcista en 7 velas (35m) de 5m")
         self.assertEqual(setup["direccion"], "LONG")
         self.assertGreater(setup["vwap_slope"], 0.0)
-        self.assertEqual(setup["slope_bars"], 10)
+        self.assertEqual(setup["slope_bars"], 7)
 
     def test_calcular_vwap_sesion_completa_desde_18h(self):
         """Verifica que calcular_vwap_sesion aísle la sesión actual iniciando a las 18:00 ET y acumulando velas de 5m."""
@@ -584,6 +587,70 @@ class TestPureVWAPStrategy(unittest.TestCase):
         self.assertFalse(self.engine.symbol_states["ES"]["has_open_position"])
         self.assertIsNone(self.engine.symbol_states["ES"]["active_trade"])
         self.assertEqual(self.mock_client.close_contract_position.call_count, 2)
+
+    def test_bloqueo_apertura_cme_primeras_dos_horas_media(self):
+        """Verifica que las primeras 2:30h tras la apertura de CME (18:00 a 20:30 ET) estén estrictamente bloqueadas."""
+        from unittest.mock import patch
+        from zoneinfo import ZoneInfo
+
+        # 1. 18:05 ET (Lunes) -> Bloqueado
+        with patch("engine.datetime") as mock_dt:
+            mock_dt.now.return_value = datetime(2026, 10, 26, 18, 5, 0, tzinfo=ZoneInfo("America/New_York"))
+            operable, motivo = self.engine.es_horario_operable()
+            self.assertFalse(operable)
+            self.assertIn("18:00-20:30 ET", motivo)
+
+        # 2. 19:45 ET (Lunes) -> Bloqueado
+        with patch("engine.datetime") as mock_dt:
+            mock_dt.now.return_value = datetime(2026, 10, 26, 19, 45, 0, tzinfo=ZoneInfo("America/New_York"))
+            operable, motivo = self.engine.es_horario_operable()
+            self.assertFalse(operable)
+            self.assertIn("18:00-20:30 ET", motivo)
+
+        # 3. 20:29 ET (Lunes) -> Bloqueado
+        with patch("engine.datetime") as mock_dt:
+            mock_dt.now.return_value = datetime(2026, 10, 26, 20, 29, 0, tzinfo=ZoneInfo("America/New_York"))
+            operable, motivo = self.engine.es_horario_operable()
+            self.assertFalse(operable)
+            self.assertIn("18:00-20:30 ET", motivo)
+
+        # 4. 20:31 ET (Lunes) -> APROBADO (Fin del buffer de apertura)
+        with patch("engine.datetime") as mock_dt:
+            mock_dt.now.return_value = datetime(2026, 10, 26, 20, 31, 0, tzinfo=ZoneInfo("America/New_York"))
+            operable, motivo = self.engine.es_horario_operable()
+            self.assertTrue(operable)
+            self.assertIn("Sesión regular activa", motivo)
+
+    def test_candado_ganancia_diaria_trailing(self):
+        """Verifica que al superar +$750 USD se active el piso del 70% y liquide/bloquee si retrocede."""
+        self.mock_client.close_contract_position.return_value = {"success": True}
+        self.mock_client.get_open_positions.return_value = []
+
+        # 1. Ganancia de +$1,000 USD (supera $750 USD): activa piso a 70% = $700 USD
+        self.engine.verificar_candado_ganancia_diaria(total_floating_pnl=1000.0)
+        self.assertFalse(self.engine.daily_lock_active)
+        self.assertEqual(self.engine.daily_peak_pnl, 1000.0)
+        self.assertEqual(self.engine.daily_floor_pnl, 700.0)
+
+        # 2. Ganancia sube a +$1,500 USD: nuevo pico $1,500, nuevo piso 70% = $1,050 USD
+        self.engine.verificar_candado_ganancia_diaria(total_floating_pnl=1500.0)
+        self.assertFalse(self.engine.daily_lock_active)
+        self.assertEqual(self.engine.daily_peak_pnl, 1500.0)
+        self.assertEqual(self.engine.daily_floor_pnl, 1050.0)
+
+        # 3. Pullback moderado a +$1,200 USD: sigue por encima del piso de $1,050 -> Sigue operando
+        self.engine.verificar_candado_ganancia_diaria(total_floating_pnl=1200.0)
+        self.assertFalse(self.engine.daily_lock_active)
+
+        # 4. Pullback perfora el piso a +$950 USD (< $1,050 USD): ¡Dispara Candado Trailing!
+        self.engine.verificar_candado_ganancia_diaria(total_floating_pnl=950.0)
+        self.assertTrue(self.engine.daily_lock_active)
+        self.assertIn("Piso Trailing Diario Alcanzado", self.engine.daily_lock_reason)
+
+        # 5. Verifica que es_horario_operable() bloquee nuevas operaciones por el resto del día
+        operable, motivo = self.engine.es_horario_operable()
+        self.assertFalse(operable)
+        self.assertIn("Candado de Ganancia Diaria", motivo)
 
 if __name__ == '__main__':
     unittest.main()

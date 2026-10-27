@@ -30,9 +30,11 @@ from config import (
     CSV_PATH, CSV_DIR, SUPPORTED_SYMBOLS, DEFAULT_SYMBOL, DATA_DIR,
     INITIAL_SL_TICKS, POLL_INTERVAL_SECONDS, VWAP_SLOPE_LOOKBACK_BARS,
     MIN_VWAP_SLOPE_TICKS, get_min_slope_points, BASKET_TP_TARGET_USD, BASKET_TP_HARD_USD, BASKET_COOLDOWN_SECONDS,
+    HITO_MICRO_TRIGGER_PCT, HITO_MICRO_SL_TICKS,
     HITO_1_TRIGGER_PCT, HITO_2_TRIGGER_PCT, HITO_2_SL_PCT, HITO_2_TP_EXPAND_PCT,
     HITO_3_TRIGGER_PCT, HITO_3_SL_PCT, HITO_3_TP_EXPAND_PCT,
-    HITO_4_TRIGGER_PCT, HITO_4_SL_PCT, HITO_4_TP_EXPAND_PCT, RUNNER_STEP_PCT
+    HITO_4_TRIGGER_PCT, HITO_4_SL_PCT, HITO_4_TP_EXPAND_PCT, RUNNER_TRAILING_TICKS, RUNNER_STEP_PCT,
+    CME_OPEN_BUFFER_MINUTES, TRAILING_DAILY_PROFIT_TRIGGER_USD, TRAILING_DAILY_PROFIT_RETAIN_PCT
 )
 from topstep_client import TopstepClient
 
@@ -141,11 +143,18 @@ class AxiomEngine:
         # Cache de hitos por orden
         self.trade_milestones_cache: Dict[str, Dict[str, Any]] = {}
 
+        # Candado de Ganancia Diaria Trailing (Trailing Daily Profit Lock)
+        self.daily_lock_active: bool = False
+        self.daily_peak_pnl: float = 0.0
+        self.daily_floor_pnl: float = 0.0
+        self.daily_lock_reason: Optional[str] = None
+        self.current_trading_day: Optional[str] = None
+
     @staticmethod
-    def format_milestone(stage: int) -> str:
+    def format_milestone(stage: float) -> str:
         """Formatea el hito alcanzado de forma descriptiva e infinita según config.py."""
         if stage >= 5:
-            k = stage - 4
+            k = int(stage - 4)
             trig_k = HITO_4_TRIGGER_PCT + (k * RUNNER_STEP_PCT)
             sl_k = (HITO_4_SL_PCT + (k * (RUNNER_STEP_PCT / 100.0))) * 100.0
             tp_k = (HITO_4_TP_EXPAND_PCT + (k * (RUNNER_STEP_PCT / 100.0))) * 100.0
@@ -158,6 +167,8 @@ class AxiomEngine:
             return f"Hito 2 ({HITO_2_TRIGGER_PCT:.0f}% SL{HITO_2_SL_PCT*100:.0f}/TP{HITO_2_TP_EXPAND_PCT*100:.0f})"
         elif stage == 1:
             return f"Hito 1 ({HITO_1_TRIGGER_PCT:.0f}% BE+1)"
+        elif stage == 0.5:
+            return f"Micro-Escudo ({HITO_MICRO_TRIGGER_PCT:.0f}% SL{HITO_MICRO_SL_TICKS}t)"
         return "Inicial"
 
     # ==========================================
@@ -399,11 +410,13 @@ class AxiomEngine:
         # Para SHORT: vela previa 100% por debajo de VWAP (High < VWAP)
         contexto_short = prev_high < (vwap_prev - (0.5 * tick_size))
 
-        # 2. Validación de Pendiente Institucional del VWAP (Últimas 10 velas de 5 minutos)
+        # 2. Validación de Pendiente Institucional del VWAP (7 velas de 5m = 35 minutos)
+        # Calculada estrictamente sobre la curva del VWAP: VWAP_actual - VWAP_hace_35m
         lookback_bars = VWAP_SLOPE_LOOKBACK_BARS
         idx_ref = max(0, len(df_5m) - 1 - lookback_bars)
         vwap_ref = float(df_5m.iloc[idx_ref]['VWAP'])
         bars_eval = (len(df_5m) - 1) - idx_ref
+        mins_eval = bars_eval * 5
         slope_vwap = vwap_now - vwap_ref
 
         # 3. Gatillo al tocar o pasar el VWAP
@@ -417,7 +430,7 @@ class AxiomEngine:
             if slope_vwap < min_slope_val:
                 self.log(
                     f"🚫 [{sym}] Setup LONG descartado por Pendiente VWAP insuficiente: "
-                    f"Pendiente actual ({slope_vwap:+.2f}) < Mínimo requerido ({min_slope_val:+.2f} pts / {min_slope_ticks} ticks) hace {bars_eval} velas",
+                    f"Pendiente VWAP ({slope_vwap:+.2f}) < Mínimo requerido ({min_slope_val:+.2f} pts / {min_slope_ticks} ticks) en {mins_eval}m ({bars_eval} velas)",
                     "SETUP", sym
                 )
                 return None
@@ -446,7 +459,7 @@ class AxiomEngine:
             if slope_vwap > -min_slope_val:
                 self.log(
                     f"🚫 [{sym}] Setup SHORT descartado por Pendiente VWAP insuficiente: "
-                    f"Pendiente actual ({slope_vwap:+.2f}) > Mínimo requerido ({-min_slope_val:+.2f} pts / -{min_slope_ticks} ticks) hace {bars_eval} velas",
+                    f"Pendiente VWAP ({slope_vwap:+.2f}) > Mínimo requerido ({-min_slope_val:+.2f} pts / -{min_slope_ticks} ticks) en {mins_eval}m ({bars_eval} velas)",
                     "SETUP", sym
                 )
                 return None
@@ -476,11 +489,16 @@ class AxiomEngine:
     # ==========================================
     def es_horario_operable(self) -> tuple[bool, str]:
         """
-        Evalúa si el mercado CME está activo.
+        Evalúa si el mercado CME está activo y es operable:
+        - Candado de ganancia diaria trailing activado -> Bloqueado hasta nueva sesión.
         - Cierre de fin de semana: Viernes 17:00 ET a Domingo 18:00 ET.
         - Mantenimiento diario CME: 17:00 a 18:00 ET (Lunes a Jueves).
-        - 24/7 durante toda la semana operativa regular (incluyendo apertura 18:00 ET).
+        - Filtro de Apertura CME: Primeras 2:30h tras apertura (18:00 a 20:30 ET de Domingo a Jueves).
+        - Sesión regular activa en el resto de horarios.
         """
+        if self.daily_lock_active:
+            return False, f"Candado de Ganancia Diaria activado: {self.daily_lock_reason}"
+
         try:
             ny_time = datetime.now(ZoneInfo("America/New_York"))
         except Exception:
@@ -503,6 +521,11 @@ class AxiomEngine:
         # Mantenimiento diario CME (17:00 a 18:00 ET)
         if hour == 17:
             return False, f"Receso diario de mantenimiento CME (17:00-18:00 ET - {time_str})"
+
+        # Filtro de apertura CME: Bloqueo de las primeras 2:30h (18:00 a 20:30 ET)
+        # La apertura electrónica ocurre a las 18:00 ET de Domingo a Jueves
+        if (hour == 18) or (hour == 19) or (hour == 20 and minute < 30):
+            return False, f"Pausa de seguridad: Primeras 2:30h apertura CME (18:00-20:30 ET - {time_str})"
             
         return True, f"Sesión regular activa ({time_str})"
 
@@ -769,9 +792,12 @@ class AxiomEngine:
         contract_id = trade["contract_id"]
         order_id = str(trade.get("order_id", "N/A"))
 
-        # EVALUACIÓN DE ESCALERA DE HITOS INFINITA (D_base runners)
+        # EVALUACIÓN DE ESCALERA DE HITOS OPTIMIZADA CON MICRO-ESCUDO
         target_stage = sl_stage
         
+        # Micro-Escudo: Al 20% de D_base -> reduce SL inicial de 35 a 15 ticks (corta >55% del riesgo temprano)
+        if max_pct >= HITO_MICRO_TRIGGER_PCT and target_stage < 0.5:
+            target_stage = 0.5
         if max_pct >= HITO_1_TRIGGER_PCT and target_stage < 1:
             target_stage = 1
         if max_pct >= HITO_2_TRIGGER_PCT and target_stage < 2:
@@ -788,7 +814,11 @@ class AxiomEngine:
         motivo_hito = ""
 
         if target_stage > sl_stage:
-            if target_stage == 1:
+            if target_stage == 0.5:
+                nuevo_sl = round_to_tick(precio_entrada - (HITO_MICRO_SL_TICKS * tick_size), tick_size) if direccion == "LONG" else round_to_tick(precio_entrada + (HITO_MICRO_SL_TICKS * tick_size), tick_size)
+                nuevo_tp = None
+                motivo_hito = f"MICRO-ESCUDO ({HITO_MICRO_TRIGGER_PCT:.0f}% D_base) | SL reducido a {HITO_MICRO_SL_TICKS} ticks ({nuevo_sl:.2f})"
+            elif target_stage == 1:
                 nuevo_sl = round_to_tick(precio_entrada + 1 * tick_size, tick_size) if direccion == "LONG" else round_to_tick(precio_entrada - 1 * tick_size, tick_size)
                 nuevo_tp = None
                 motivo_hito = f"HITO 1 ({HITO_1_TRIGGER_PCT:.0f}% D_base) | SL a Break-Even + 1 tick ({nuevo_sl:.2f})"
@@ -805,7 +835,7 @@ class AxiomEngine:
                 nuevo_tp = round_to_tick(precio_entrada + (d_base * HITO_4_TP_EXPAND_PCT), tick_size) if direccion == "LONG" else round_to_tick(precio_entrada - (d_base * HITO_4_TP_EXPAND_PCT), tick_size)
                 motivo_hito = f"HITO 4 ({HITO_4_TRIGGER_PCT:.0f}% D_base) | SL al {HITO_4_SL_PCT*100:.0f}% ({nuevo_sl:.2f}) | TP Ampliado al {HITO_4_TP_EXPAND_PCT*100:.0f}% ({nuevo_tp:.2f})"
             else: # target_stage >= 5 (Infinito)
-                k = target_stage - 4
+                k = int(target_stage - 4)
                 trig_k = HITO_4_TRIGGER_PCT + (k * RUNNER_STEP_PCT)
                 sl_k_pct = HITO_4_SL_PCT + (k * (RUNNER_STEP_PCT / 100.0))
                 tp_k_pct = HITO_4_TP_EXPAND_PCT + (k * (RUNNER_STEP_PCT / 100.0))
@@ -814,10 +844,39 @@ class AxiomEngine:
                 nuevo_tp = round_to_tick(precio_entrada + (d_base * tp_k_pct), tick_size) if direccion == "LONG" else round_to_tick(precio_entrada - (d_base * tp_k_pct), tick_size)
                 motivo_hito = f"HITO {target_stage} ({trig_k:.0f}% D_base) | SL al {sl_k_pct*100:.0f}% ({nuevo_sl:.2f}) | TP Ampliado al {tp_k_pct*100:.0f}% ({nuevo_tp:.2f})"
 
+        # MODO RUNNER TRAILING DINÁMICO: Persigue al precio a RUNNER_TRAILING_TICKS (15 ticks) tras superar el 100% de D_base
+        if target_stage >= 4 or max_pct >= HITO_4_TRIGGER_PCT:
+            if direccion == "LONG":
+                trailing_runner_sl = round_to_tick(highest_since_entry - (RUNNER_TRAILING_TICKS * tick_size), tick_size)
+                if nuevo_sl is None:
+                    if trailing_runner_sl > (sl_actual + 0.01 * tick_size):
+                        nuevo_sl = trailing_runner_sl
+                        motivo_hito = f"RUNNER TRAILING ({RUNNER_TRAILING_TICKS}t tras pico {highest_since_entry:.2f}) | SL a {nuevo_sl:.2f}"
+                else:
+                    nuevo_sl = max(nuevo_sl, trailing_runner_sl)
+            else: # SHORT
+                trailing_runner_sl = round_to_tick(lowest_since_entry + (RUNNER_TRAILING_TICKS * tick_size), tick_size)
+                if nuevo_sl is None:
+                    if trailing_runner_sl < (sl_actual - 0.01 * tick_size):
+                        nuevo_sl = trailing_runner_sl
+                        motivo_hito = f"RUNNER TRAILING ({RUNNER_TRAILING_TICKS}t tras pico {lowest_since_entry:.2f}) | SL a {nuevo_sl:.2f}"
+                else:
+                    nuevo_sl = min(nuevo_sl, trailing_runner_sl)
+
+        necesita_ajuste = False
+        if target_stage > sl_stage:
+            necesita_ajuste = True
+        elif nuevo_sl is not None:
+            if direccion == "LONG" and nuevo_sl > (sl_actual + 0.01 * tick_size):
+                necesita_ajuste = True
+            elif direccion == "SHORT" and nuevo_sl < (sl_actual - 0.01 * tick_size):
+                necesita_ajuste = True
+
+        if necesita_ajuste and (nuevo_sl is not None or nuevo_tp is not None):
             # Ajustar órdenes de forma atómica en TopstepX con una sola consulta
             mod_ok = self.ajustar_bracket_en_topstep(contract_id, nuevo_sl, nuevo_tp, sym)
             if mod_ok:
-                trade["sl_stage"] = target_stage
+                trade["sl_stage"] = max(trade.get("sl_stage", 0), target_stage)
                 if nuevo_sl is not None:
                     trade["current_sl_price"] = nuevo_sl
                 if nuevo_tp is not None:
@@ -829,11 +888,13 @@ class AxiomEngine:
                 self.log(f"⚠️ [{sym}] Error al ajustar brackets en TopstepX. Se reintentará automáticamente en el próximo ciclo de 2s...", "ORDER", sym)
 
         # SALVAGUARDA FAIL-SAFE POR SOFTWARE
-        # Si ya se activó al menos el Hito 1 y el precio retrocede traspasando el SL protegido:
-        if trade.get("sl_stage", 0) >= 1:
+        # Si ya se activó al menos el Micro-Escudo o Hito 1 y el precio retrocede traspasando el SL protegido:
+        if trade.get("sl_stage", 0) >= 0.5:
             sl_protegido = trade["current_sl_price"]
             sl_alcanzado = False
             if direccion == "LONG" and precio_actual < sl_protegido:
+                sl_alcanzado = True
+            elif direccion == "SHORT" and precio_actual > sl_protegido:
                 sl_alcanzado = True
             elif direccion == "SHORT" and precio_actual > sl_protegido:
                 sl_alcanzado = True
@@ -1821,6 +1882,11 @@ class AxiomEngine:
                         "SYSTEM"
                     )
 
+                # ==========================================
+                # 4. CANDADO DE GANANCIA DIARIA TRAILING (TRAILING DAILY PROFIT LOCK)
+                # ==========================================
+                self.verificar_candado_ganancia_diaria(total_floating_pnl)
+
                 # Reporte periódico en terminal del estado de operaciones abiertas (cada 30s)
                 if (now_ts - getattr(self, "_last_portfolio_log_time", 0.0)) >= 30.0:
                     self._last_portfolio_log_time = now_ts
@@ -2000,6 +2066,86 @@ class AxiomEngine:
                     total += diff * pt_val
         return round(total, 2)
 
+    def verificar_candado_ganancia_diaria(self, total_floating_pnl: float):
+        """
+        Candado de Ganancia Diaria Trailing (Trailing Daily Profit Lock):
+        - Determina el día operativo CME actual (resetea a las 18:00 ET).
+        - Suma el PnL neto realizado hoy (desde el registro CSV) + PnL flotante actual.
+        - Registra el pico máximo de ganancia diaria alcanzado (daily_peak_pnl).
+        - Si el pico supera TRAILING_DAILY_PROFIT_TRIGGER_USD (+$750.0 USD):
+          Se activa un piso flotante que retiene obligatoriamente el TRAILING_DAILY_PROFIT_RETAIN_PCT (70%) de dicho pico.
+        - Si el beneficio total retrocede perforando ese piso:
+          Ejecuta cierre inmediato de emergencia de toda la cartera y bloquea la apertura de nuevas operaciones por el resto del día.
+        """
+        try:
+            ny_time = datetime.now(ZoneInfo("America/New_York"))
+        except Exception:
+            utc_now = datetime.now(timezone.utc)
+            ny_time = utc_now - timedelta(hours=4)
+
+        # En futuros CME, a las 18:00 ET comienza la sesión operativa del día siguiente
+        cme_trade_date = (ny_time + timedelta(hours=6)).strftime("%Y-%m-%d")
+        
+        # Reset de sesión cuando cambia el día operativo
+        if self.current_trading_day != cme_trade_date:
+            self.current_trading_day = cme_trade_date
+            self.daily_lock_active = False
+            self.daily_peak_pnl = 0.0
+            self.daily_floor_pnl = 0.0
+            self.daily_lock_reason = None
+
+        if self.daily_lock_active:
+            return
+
+        # Calcular PnL neto realizado hoy desde CSV
+        realized_today = 0.0
+        try:
+            records = self.load_operations_history()
+            cal_date_today = ny_time.strftime("%Y-%m-%d")
+            for r in records:
+                r_fecha = r.get("Fecha", "")
+                if r_fecha in (cme_trade_date, cal_date_today):
+                    estado = (r.get("Estado") or "").upper()
+                    if "CERRADA" in estado:
+                        try:
+                            realized_today += float(r.get("PnL_Neto_USD", 0.0) or 0.0)
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+
+        today_total_pnl = round(realized_today + total_floating_pnl, 2)
+
+        # Actualizar pico diario
+        if today_total_pnl > self.daily_peak_pnl:
+            self.daily_peak_pnl = today_total_pnl
+
+        # Si el pico diario alcanza o supera el umbral de activación (+$750 USD)
+        if self.daily_peak_pnl >= TRAILING_DAILY_PROFIT_TRIGGER_USD:
+            nuevo_piso = round(self.daily_peak_pnl * TRAILING_DAILY_PROFIT_RETAIN_PCT, 2)
+            if nuevo_piso > self.daily_floor_pnl:
+                self.daily_floor_pnl = nuevo_piso
+                self.log(
+                    f"🛡️ [PISO TRAILING DIARIO] Pico alcanzado: +${self.daily_peak_pnl:.2f} USD | "
+                    f"Piso de protección 70% elevado a: +${self.daily_floor_pnl:.2f} USD (Permite hasta 30% de pullback para buscar más ganancia)",
+                    "SYSTEM"
+                )
+
+            # Verificar si el beneficio total perforó el piso de protección
+            if today_total_pnl < self.daily_floor_pnl:
+                self.daily_lock_active = True
+                self.daily_lock_reason = (
+                    f"Piso Trailing Diario Alcanzado: PnL retrocedió a ${today_total_pnl:.2f} USD "
+                    f"(Piso de seguridad: ${self.daily_floor_pnl:.2f} USD / 70% de Pico ${self.daily_peak_pnl:.2f} USD). "
+                    f"Capital blindado con éxito."
+                )
+                self.log(
+                    f"🔒🔒🔒 [DAILY PROFIT LOCK] ¡ALERTA DE PROTECCIÓN DE CAPITAL! {self.daily_lock_reason}. "
+                    f"Ejecutando CIERRE TOTAL de cartera y congelando operaciones por el resto del día.",
+                    "ALERT"
+                )
+                self.emergency_flatten_all(reason=self.daily_lock_reason)
+
     # ==========================================
     # DATA SERIALIZATION FOR FASTAPI & DASHBOARD
     # ==========================================
@@ -2092,5 +2238,14 @@ class AxiomEngine:
                 "target_usd": BASKET_TP_TARGET_USD,
                 "hard_usd": BASKET_TP_HARD_USD,
                 "current_floating_usd": self.calculate_basket_floating_pnl()
+            },
+            "daily_lock": {
+                "active": self.daily_lock_active,
+                "trading_day": self.current_trading_day,
+                "peak_pnl_usd": self.daily_peak_pnl,
+                "floor_pnl_usd": self.daily_floor_pnl,
+                "trigger_threshold_usd": TRAILING_DAILY_PROFIT_TRIGGER_USD,
+                "retain_pct": TRAILING_DAILY_PROFIT_RETAIN_PCT,
+                "reason": self.daily_lock_reason
             }
         }
