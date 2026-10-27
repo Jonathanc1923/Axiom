@@ -31,7 +31,7 @@ services:
       - key: MIN_SLOPE_POINTS_NQ
         value: "2.5"
       - key: MIN_SLOPE_POINTS_YM
-        value: "5.0"
+        value: "3.0"
       - key: MIN_SLOPE_POINTS_RTY
         value: "0.60"
       - key: MIN_SLOPE_POINTS_OIL

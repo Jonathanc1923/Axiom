@@ -50,7 +50,7 @@ MIN_VWAP_SLOPE_TICKS = int(os.getenv("MIN_VWAP_SLOPE_TICKS", "2"))
 # ==========================================
 MIN_SLOPE_POINTS_ES = float(os.getenv("MIN_SLOPE_POINTS_ES", "1.0"))      # 1.0 punto (4 ticks)
 MIN_SLOPE_POINTS_NQ = float(os.getenv("MIN_SLOPE_POINTS_NQ", "2.5"))      # 2.5 puntos (10 ticks)
-MIN_SLOPE_POINTS_YM = float(os.getenv("MIN_SLOPE_POINTS_YM", "5.0"))      # 5.0 puntos (5 ticks)
+MIN_SLOPE_POINTS_YM = float(os.getenv("MIN_SLOPE_POINTS_YM", "3.0"))      # 3.0 puntos (3 ticks)
 MIN_SLOPE_POINTS_RTY = float(os.getenv("MIN_SLOPE_POINTS_RTY", "0.60"))   # 0.60 puntos (6 ticks)
 MIN_SLOPE_POINTS_OIL = float(os.getenv("MIN_SLOPE_POINTS_OIL", "0.03"))   # 0.03 puntos (3 ticks)
 MIN_SLOPE_POINTS_GOLD = float(os.getenv("MIN_SLOPE_POINTS_GOLD", "1.5"))  # 1.5 puntos (15 ticks)
