@@ -1532,15 +1532,52 @@ class AxiomEngine:
             open_contract_ids = {str(p.get("contractId", "")).strip() for p in open_positions if abs(int(p.get("size", 0))) > 0}
             open_symbols = {self.resolve_symbol_from_contract(cid) for cid in open_contract_ids}
             
+            fieldnames = [
+                'Fecha', 'Hora_Apertura', 'Hora_Cierre', 'Hora', 'Simbolo', 'Estado', 'Direccion', 'Precio_Mercado',
+                'Precio_Entrada_Real', 'Precio_Salida_Real', 'SL_Ticks', 'TP_Ticks',
+                'Hito_Alcanzado', 'Max_Pct_TP',
+                'PnL_Bruto_USD', 'Comisiones_USD', 'PnL_Neto_USD', 'Order_ID',
+                'Exit_Order_ID', 'Motivo_Rechazo', 'Codigo_Error', 'Condicion_Tecnica', 'Ultima_Actualizacion'
+            ]
+
+            # Detección de Cambio de Cuenta / Reset:
+            # Si el account_id cambió (ej. de 28966620 a 29034856 tras reset en TopstepX) y la nueva cuenta está en $150k con 0 trades,
+            # archivamos el CSV de la cuenta anterior para que la nueva cuenta inicie en 0 de forma limpia.
+            account_marker_file = os.path.join(os.path.dirname(os.path.abspath(self.csv_path)), ".current_account_id")
+            previous_acc_id = None
+            if os.path.isfile(account_marker_file):
+                try:
+                    with open(account_marker_file, "r") as af:
+                        previous_acc_id = af.read().strip()
+                except Exception:
+                    pass
+
+            current_acc_id_str = str(self.account_id)
+            account_changed = (previous_acc_id is not None) and (previous_acc_id != current_acc_id_str)
+
+            if account_changed and not raw_trades and balance >= 150000.0:
+                if os.path.isfile(self.csv_path) and os.path.getsize(self.csv_path) > 0:
+                    backup_name = os.path.join(
+                        os.path.dirname(os.path.abspath(self.csv_path)),
+                        f"registro_operaciones_cuenta_{previous_acc_id}_{int(time.time())}.csv"
+                    )
+                    try:
+                        import shutil
+                        shutil.copy2(self.csv_path, backup_name)
+                        with open(self.csv_path, mode='w', newline='', encoding='utf-8') as file:
+                            writer = csv.DictWriter(file, fieldnames=fieldnames, delimiter=';')
+                            writer.writeheader()
+                        self.log(f"🧹 [RESET] Cambio de cuenta detectado ({previous_acc_id} -> {current_acc_id_str}). Historial anterior respaldado en {os.path.basename(backup_name)}.", "SYSTEM")
+                    except Exception as ce:
+                        self.log(f"⚠️ Error archivando CSV anterior: {ce}", "ERROR")
+
+            try:
+                with open(account_marker_file, "w") as af:
+                    af.write(current_acc_id_str)
+            except Exception:
+                pass
+
             if os.path.isfile(self.csv_path) and os.path.getsize(self.csv_path) > 0:
-                fieldnames = [
-                    'Fecha', 'Hora_Apertura', 'Hora_Cierre', 'Hora', 'Simbolo', 'Estado', 'Direccion', 'Precio_Mercado',
-                    'Precio_Entrada_Real', 'Precio_Salida_Real', 'SL_Ticks', 'TP_Ticks',
-                    'Hito_Alcanzado', 'Max_Pct_TP',
-                    'PnL_Bruto_USD', 'Comisiones_USD', 'PnL_Neto_USD', 'Order_ID',
-                    'Exit_Order_ID', 'Motivo_Rechazo', 'Codigo_Error', 'Condicion_Tecnica', 'Ultima_Actualizacion'
-                ]
-                
                 rows = []
                 with open(self.csv_path, mode='r', encoding='utf-8') as file:
                     reader = csv.DictReader(file, delimiter=';')
@@ -1696,6 +1733,11 @@ class AxiomEngine:
             elif balance > 0:
                 with self.lock:
                     self.stats["sync_api_authoritative"] = True
+                    self.stats["total_trades"] = 0
+                    self.stats["executed_trades"] = 0
+                    self.stats["rejected_trades"] = 0
+                    self.stats["longs"] = 0
+                    self.stats["shorts"] = 0
                     self.stats["gross_pnl_usd"] = 0.0
                     self.stats["total_fees_usd"] = 0.0
                     self.stats["net_pnl_usd"] = 0.0
