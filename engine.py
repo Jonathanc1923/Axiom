@@ -28,7 +28,9 @@ if hasattr(sys.stderr, "reconfigure"):
 
 from config import (
     CSV_PATH, CSV_DIR, SUPPORTED_SYMBOLS, DEFAULT_SYMBOL, DATA_DIR,
-    INITIAL_SL_TICKS, POLL_INTERVAL_SECONDS, VWAP_SLOPE_LOOKBACK_BARS,
+    INITIAL_SL_TICKS, get_default_sl_ticks, get_micro_shield_sl_ticks, DEFAULT_ENABLED_SYMBOLS,
+    get_vwap_trigger_distance_ticks, VWAP_TRIGGER_DISTANCE_TICKS_ES,
+    POLL_INTERVAL_SECONDS, VWAP_SLOPE_LOOKBACK_BARS,
     MIN_VWAP_SLOPE_TICKS, get_min_slope_points, BASKET_TP_TARGET_USD, BASKET_TP_HARD_USD, BASKET_COOLDOWN_SECONDS,
     HITO_MICRO_TRIGGER_PCT, HITO_MICRO_SL_TICKS,
     HITO_1_TRIGGER_PCT, HITO_2_TRIGGER_PCT, HITO_2_SL_PCT, HITO_2_TP_EXPAND_PCT,
@@ -86,7 +88,7 @@ class AxiomEngine:
             self.symbol_states[sym] = {
                 "symbol": sym,
                 "name": spec.get("name", sym),
-                "enabled": (sym in ["ES", "NQ"]), # ES y NQ habilitados por defecto
+                "enabled": (sym in DEFAULT_ENABLED_SYMBOLS), # Minis y Micros habilitados simultáneamente por defecto
                 "contract_id": None,
                 "contract_name": "N/A",
                 "tick_size": spec.get("tickSize", 0.25),
@@ -419,13 +421,16 @@ class AxiomEngine:
         mins_eval = bars_eval * 5
         slope_vwap = vwap_now - vwap_ref
 
-        # 3. Gatillo al tocar o pasar el VWAP
+        # 3. Gatillo de proximidad al VWAP (15 ticks o menos en ES, proporcional en los demás)
         min_slope_target = get_min_slope_points(sym)
         min_slope_val = round_to_tick(min_slope_target, tick_size)
         min_slope_ticks = round(min_slope_val / tick_size, 1)
 
-        # Para LONG: viene de arriba y toca o pasa VWAP hacia abajo
-        if contexto_long and precio_mercado <= (vwap_now + (0.5 * tick_size)):
+        trigger_ticks = get_vwap_trigger_distance_ticks(sym)
+        trigger_dist = trigger_ticks * tick_size
+
+        # Para LONG: viene de arriba y está a trigger_dist (≤15 ticks en ES) del VWAP o cruzándolo
+        if contexto_long and precio_mercado <= (vwap_now + trigger_dist):
             # Validar que la pendiente del VWAP sea alcista con fuerza mínima en puntos
             if slope_vwap < min_slope_val:
                 self.log(
@@ -443,6 +448,7 @@ class AxiomEngine:
                 "direccion": "LONG",
                 "precio_entrada": precio_mercado,
                 "vwap_cruce": vwap_now,
+                "trigger_ticks": trigger_ticks,
                 "upper_band": upper_band_now,
                 "lower_band": lower_band_now,
                 "target_band": upper_band_now,
@@ -453,8 +459,8 @@ class AxiomEngine:
                 "timestamp_vela": vela_5m_actual['Timestamp']
             }
 
-        # Para SHORT: viene de abajo y toca o pasa VWAP hacia arriba
-        if contexto_short and precio_mercado >= (vwap_now - (0.5 * tick_size)):
+        # Para SHORT: viene de abajo y está a trigger_dist (≤15 ticks en ES) del VWAP o cruzándolo
+        if contexto_short and precio_mercado >= (vwap_now - trigger_dist):
             # Validar que la pendiente del VWAP sea bajista con fuerza mínima en puntos
             if slope_vwap > -min_slope_val:
                 self.log(
@@ -472,6 +478,7 @@ class AxiomEngine:
                 "direccion": "SHORT",
                 "precio_entrada": precio_mercado,
                 "vwap_cruce": vwap_now,
+                "trigger_ticks": trigger_ticks,
                 "upper_band": upper_band_now,
                 "lower_band": lower_band_now,
                 "target_band": lower_band_now,
@@ -589,30 +596,39 @@ class AxiomEngine:
         tick_size = spec.get("tickSize", 0.25)
         contract_id = self.symbol_states[sym]["contract_id"]
         precio_entrada = round_to_tick(float(setup["precio_entrada"]), tick_size)
+        vwap_cruce = round_to_tick(float(setup.get("vwap_cruce", precio_entrada)), tick_size)
         d_base = float(setup["d_base"])
         
-        # 1. SL Inicial: Universal en 25 ticks
-        ticks_sl = INITIAL_SL_TICKS
+        # 1. SL Inicial: Anclado exactamente a la línea VWAP (adaptado a cada símbolo), NO desde el precio de entrada
+        ticks_sl_vwap = get_default_sl_ticks(sym) # ej. 35t en ES/MES, 90t en NQ/MNQ, 50t en YM/MYM
         ticks_tp = max(round(d_base / tick_size), 10)
 
         if direccion == "LONG":
-            precio_sl = round_to_tick(precio_entrada - (ticks_sl * tick_size), tick_size)
+            # SL colocado a ticks_sl_vwap por debajo de la línea VWAP
+            precio_sl = round_to_tick(vwap_cruce - (ticks_sl_vwap * tick_size), tick_size)
             precio_tp = round_to_tick(precio_entrada + (ticks_tp * tick_size), tick_size)
             side = 0
+            # Distancia real en ticks desde la entrada hasta el SL para la orden bracket de TopstepX
+            ticks_sl_order_val = max(round((precio_entrada - precio_sl) / tick_size), 5)
             # Convención oficial TopstepX: LONG -> SL negativo (-), TP positivo (+)
-            sl_ticks_order = -ticks_sl
+            sl_ticks_order = -ticks_sl_order_val
             tp_ticks_order = ticks_tp
         else: # SHORT
-            precio_sl = round_to_tick(precio_entrada + (ticks_sl * tick_size), tick_size)
+            # SL colocado a ticks_sl_vwap por encima de la línea VWAP
+            precio_sl = round_to_tick(vwap_cruce + (ticks_sl_vwap * tick_size), tick_size)
             precio_tp = round_to_tick(precio_entrada - (ticks_tp * tick_size), tick_size)
             side = 1
+            # Distancia real en ticks desde la entrada hasta el SL para la orden bracket de TopstepX
+            ticks_sl_order_val = max(round((precio_sl - precio_entrada) / tick_size), 5)
             # Convención oficial TopstepX: SHORT -> SL positivo (+), TP negativo (-)
-            sl_ticks_order = ticks_sl
+            sl_ticks_order = ticks_sl_order_val
             tp_ticks_order = -ticks_tp
 
+        trigger_ticks = setup.get("trigger_ticks", get_vwap_trigger_distance_ticks(sym))
         condicion_str = (
-            f"VWAP Touch Reversion. Entrada: {precio_entrada:.2f} | "
-            f"SL inicial: {ticks_sl}t ({precio_sl:.2f}) | TP inicial Banda: {ticks_tp}t ({precio_tp:.2f}) | D_base: {d_base:.2f} pts | Pendiente VWAP ({setup.get('slope_bars', 10)}b): {setup.get('vwap_slope', 0):+.2f}"
+            f"VWAP Proximity Reversion (≤{trigger_ticks}t). Entrada: {precio_entrada:.2f} | "
+            f"VWAP: {vwap_cruce:.2f} | SL inicial VWAP: {ticks_sl_vwap}t ({precio_sl:.2f} | dist {ticks_sl_order_val}t) | "
+            f"TP inicial Banda: {ticks_tp}t ({precio_tp:.2f}) | D_base: {d_base:.2f} pts | Pendiente VWAP ({setup.get('slope_bars', 10)}b): {setup.get('vwap_slope', 0):+.2f}"
         )
         self.log(f"🚨 DISPARANDO {direccion} A MERCADO | {condicion_str}", "ORDER", sym)
         
@@ -641,6 +657,8 @@ class AxiomEngine:
                     "contract_id": contract_id,
                     "direction": direccion,
                     "entry_price": precio_entrada,
+                    "vwap_cruce": vwap_cruce,
+                    "ticks_sl_vwap": ticks_sl_vwap,
                     "current_price": precio_entrada,
                     "highest_price": precio_entrada,
                     "lowest_price": precio_entrada,
@@ -649,7 +667,7 @@ class AxiomEngine:
                     "initial_tp_price": precio_tp,
                     "current_tp_price": precio_tp,
                     "base_tp_pts": d_base,
-                    "initial_sl_ticks": ticks_sl,
+                    "initial_sl_ticks": ticks_sl_order_val,
                     "tp_ticks": ticks_tp,
                     "order_id": order_id,
                     "sl_stage": 0, # 0=Inicio, 1=Hito 1 (40%), 2=Hito 2 (70%), 3=Hito 3 (120%)
@@ -660,12 +678,12 @@ class AxiomEngine:
                     "last_check_time": time.time()
                 }
                 
-                self.log(f"🚀 [{sym}] Orden EJECUTADA | Apertura: {hora_apertura} | {direccion} @ {precio_entrada:.2f} | Order ID: {order_id} | SL: {ticks_sl}t | TP: {ticks_tp}t", "ORDER", sym)
+                self.log(f"🚀 [{sym}] Orden EJECUTADA | Apertura: {hora_apertura} | {direccion} @ {precio_entrada:.2f} | Order ID: {order_id} | SL: {ticks_sl_order_val}t ({precio_sl:.2f} / {ticks_sl_vwap}t desde VWAP) | TP: {ticks_tp}t", "ORDER", sym)
                 self.registrar_en_csv(
                     simbolo=sym,
                     direccion=direccion,
                     precio=precio_entrada,
-                    ticks_sl=ticks_sl,
+                    ticks_sl=ticks_sl_order_val,
                     ticks_tp=ticks_tp,
                     condicion=condicion_str,
                     exito=True,
@@ -815,9 +833,14 @@ class AxiomEngine:
 
         if target_stage > sl_stage:
             if target_stage == 0.5:
-                nuevo_sl = round_to_tick(precio_entrada - (HITO_MICRO_SL_TICKS * tick_size), tick_size) if direccion == "LONG" else round_to_tick(precio_entrada + (HITO_MICRO_SL_TICKS * tick_size), tick_size)
+                micro_sl_ticks = get_micro_shield_sl_ticks(sym)
+                vwap_cruce = trade.get("vwap_cruce")
+                if vwap_cruce is not None:
+                    nuevo_sl = round_to_tick(vwap_cruce - (micro_sl_ticks * tick_size), tick_size) if direccion == "LONG" else round_to_tick(vwap_cruce + (micro_sl_ticks * tick_size), tick_size)
+                else:
+                    nuevo_sl = round_to_tick(precio_entrada - (micro_sl_ticks * tick_size), tick_size) if direccion == "LONG" else round_to_tick(precio_entrada + (micro_sl_ticks * tick_size), tick_size)
                 nuevo_tp = None
-                motivo_hito = f"MICRO-ESCUDO ({HITO_MICRO_TRIGGER_PCT:.0f}% D_base) | SL reducido a {HITO_MICRO_SL_TICKS} ticks ({nuevo_sl:.2f})"
+                motivo_hito = f"MICRO-ESCUDO ({HITO_MICRO_TRIGGER_PCT:.0f}% D_base) | SL reducido a {micro_sl_ticks} ticks desde VWAP ({nuevo_sl:.2f})"
             elif target_stage == 1:
                 nuevo_sl = round_to_tick(precio_entrada + 1 * tick_size, tick_size) if direccion == "LONG" else round_to_tick(precio_entrada - 1 * tick_size, tick_size)
                 nuevo_tp = None
@@ -1067,7 +1090,8 @@ class AxiomEngine:
             if sl_order and sl_order.get("stopPrice") is not None:
                 current_sl_price = float(sl_order["stopPrice"])
             else:
-                current_sl_price = (entry_price - INITIAL_SL_TICKS * tick_size) if direccion == "LONG" else (entry_price + INITIAL_SL_TICKS * tick_size)
+                sl_fallback = get_default_sl_ticks(sym)
+                current_sl_price = (entry_price - sl_fallback * tick_size) if direccion == "LONG" else (entry_price + sl_fallback * tick_size)
                 
             if tp_order and tp_order.get("limitPrice") is not None:
                 tp_price = float(tp_order["limitPrice"])
@@ -1948,8 +1972,10 @@ class AxiomEngine:
                             setup = self.verificar_setup_vwap(df_5m, sym, current_price=current_price)
                             if setup:
                                 state["last_executed_candle_ts"] = vela_ts
+                                trg_t = setup.get('trigger_ticks', 15)
+                                dist_t = abs(current_price - setup['vwap_cruce']) / tick_size
                                 self.log(
-                                    f"⚡ [{sym}] ¡Gatillo VWAP activado! Precio: {current_price:.2f} tocó VWAP ({setup['vwap_cruce']:.2f}). "
+                                    f"⚡ [{sym}] ¡Gatillo de Proximidad VWAP activado! Precio: {current_price:.2f} a {dist_t:.1f}t de VWAP ({setup['vwap_cruce']:.2f} | límite ≤{trg_t}t). "
                                     f"Abriendo {setup['direccion']}...",
                                     "ORDER", sym
                                 )

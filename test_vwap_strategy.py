@@ -566,6 +566,114 @@ class TestPureVWAPStrategy(unittest.TestCase):
         self.assertEqual(get_min_slope_points("GC"), 1.0)
         self.assertEqual(get_min_slope_points("MGC"), 1.0)
 
+    def test_default_sl_ticks_by_symbol(self):
+        """Verifica que el SL inicial por símbolo esté ajustado correctamente (ES: 35t, NQ: 90t, etc.)."""
+        from config import get_default_sl_ticks, get_micro_shield_sl_ticks
+        self.assertEqual(get_default_sl_ticks("ES"), 35)
+        self.assertEqual(get_default_sl_ticks("MES"), 35)
+        self.assertEqual(get_default_sl_ticks("NQ"), 90)
+        self.assertEqual(get_default_sl_ticks("MNQ"), 90)
+        self.assertEqual(get_default_sl_ticks("YM"), 50)
+        self.assertEqual(get_default_sl_ticks("MYM"), 50)
+        
+        # Micro-escudo proporcional
+        self.assertEqual(get_micro_shield_sl_ticks("ES"), 15)
+        self.assertEqual(get_micro_shield_sl_ticks("NQ"), 39)
+
+    def test_ejecutar_orden_nq_usa_sl_ticks_90(self):
+        """Verifica que NQ ejecute la orden con SL de 90 ticks (22.50 pts) en lugar de 35 ticks."""
+        setup_nq = {
+            "simbolo": "NQ",
+            "direccion": "LONG",
+            "precio_entrada": 20000.0,
+            "vwap_cruce": 20000.0,
+            "upper_band": 20100.0,
+            "lower_band": 19900.0,
+            "target_band": 20100.0,
+            "d_base": 100.0
+        }
+        self.engine.ejecutar_orden(setup_nq, "NQ", ignore_schedule=True)
+        _, kwargs_nq = self.mock_client.place_order.call_args
+        self.assertEqual(kwargs_nq["side"], 0)
+        self.assertEqual(kwargs_nq["sl_ticks"], -90, "NQ debe enviar -90 ticks de SL para LONG (TopstepX)")
+        self.assertEqual(kwargs_nq["tp_ticks"], 400)
+
+    def test_micros_y_minis_habilitados_por_defecto(self):
+        """Verifica que tanto minis (ES, NQ) como micros (MES, MNQ) estén habilitados simultáneamente."""
+        self.assertTrue(self.engine.symbol_states["ES"]["enabled"])
+        self.assertTrue(self.engine.symbol_states["NQ"]["enabled"])
+        self.assertTrue(self.engine.symbol_states["MES"]["enabled"])
+        self.assertTrue(self.engine.symbol_states["MNQ"]["enabled"])
+
+    def test_gatillo_proximidad_15_ticks_long_y_sl_desde_vwap(self):
+        """
+        Verifica que:
+        1. A 15 ticks (3.75 pts en ES) del VWAP (5003.75 vs 5000.00), el gatillo LONG se active SIN tocar VWAP.
+        2. A 16 ticks (5004.00 vs 5000.00), NO se active.
+        3. El Stop Loss se coloque exactamente a 35 ticks desde el VWAP (4991.25), con distancia de orden = 50 ticks.
+        """
+        df_5m = pd.DataFrame([
+            {
+                'Timestamp': self.now - timedelta(minutes=5),
+                'Open': 5015.0, 'High': 5025.0, 'Low': 5006.0, 'Close': 5020.0, # 100% arriba de VWAP 4995.0
+                'Volume': 1000, 'VWAP': 4995.0, 'Upper_Band': 5040.0, 'Lower_Band': 4960.0
+            },
+            {
+                'Timestamp': self.now,
+                'Open': 5015.0, 'High': 5018.0, 'Low': 5003.0, 'Close': 5003.75,
+                'Volume': 1000, 'VWAP': 5000.0, 'Upper_Band': 5040.0, 'Lower_Band': 4960.0
+            }
+        ])
+
+        # Caso A: A 16 ticks del VWAP (5004.00 vs VWAP 5000.00) -> NO DEBE ACTIVARSE
+        setup_16t = self.engine.verificar_setup_vwap(df_5m, "ES", current_price=5004.00)
+        self.assertIsNone(setup_16t, "A 16 ticks del VWAP no debe activarse")
+
+        # Caso B: A 15 ticks exactos del VWAP (5003.75 vs VWAP 5000.00) -> DEBE ACTIVARSE
+        setup_15t = self.engine.verificar_setup_vwap(df_5m, "ES", current_price=5003.75)
+        self.assertIsNotNone(setup_15t, "A 15 ticks del VWAP debe activarse")
+        self.assertEqual(setup_15t["direccion"], "LONG")
+        self.assertEqual(setup_15t["precio_entrada"], 5003.75)
+        self.assertEqual(setup_15t["vwap_cruce"], 5000.0)
+
+        # Caso C: Ejecutar orden y verificar que el SL se coloque a 35 ticks del VWAP (4991.25)
+        self.engine.ejecutar_orden(setup_15t, "ES", ignore_schedule=True)
+        _, kwargs = self.mock_client.place_order.call_args
+        # Distancia en ticks desde entrada (5003.75) hasta SL (4991.25) = (5003.75 - 4991.25) / 0.25 = 50 ticks
+        self.assertEqual(kwargs["sl_ticks"], -50, "TopstepX debe recibir -50 ticks (35t desde VWAP + 15t desde entrada)")
+        trade = self.engine.symbol_states["ES"]["active_trade"]
+        self.assertEqual(trade["current_sl_price"], 4991.25, "El precio de SL debe ser exactamente 5000.00 - 35*0.25 = 4991.25")
+
+    def test_gatillo_proximidad_short_y_sl_desde_vwap(self):
+        """Verifica gatillo SHORT a 15 ticks debajo de VWAP (4996.25 vs 5000.00) con SL a 35t arriba de VWAP (5008.75)."""
+        df_5m = pd.DataFrame([
+            {
+                'Timestamp': self.now - timedelta(minutes=5),
+                'Open': 4980.0, 'High': 4990.0, 'Low': 4975.0, 'Close': 4985.0, # 100% abajo de VWAP 5005.0
+                'Volume': 1000, 'VWAP': 5005.0, 'Upper_Band': 5040.0, 'Lower_Band': 4960.0
+            },
+            {
+                'Timestamp': self.now,
+                'Open': 4985.0, 'High': 4997.0, 'Low': 4980.0, 'Close': 4996.25,
+                'Volume': 1000, 'VWAP': 5000.0, 'Upper_Band': 5040.0, 'Lower_Band': 4960.0
+            }
+        ])
+
+        self.engine.symbol_states["ES"]["has_open_position"] = False
+        self.engine.symbol_states["ES"]["active_trade"] = None
+
+        # A 15 ticks debajo del VWAP (4996.25) -> Activa SHORT
+        setup = self.engine.verificar_setup_vwap(df_5m, "ES", current_price=4996.25)
+        self.assertIsNotNone(setup)
+        self.assertEqual(setup["direccion"], "SHORT")
+
+        self.engine.ejecutar_orden(setup, "ES", ignore_schedule=True)
+        _, kwargs = self.mock_client.place_order.call_args
+        # Distancia en ticks desde entrada (4996.25) hasta SL (5008.75 = VWAP + 35t): (5008.75 - 4996.25)/0.25 = 50 ticks
+        self.assertEqual(kwargs["sl_ticks"], 50)
+        trade = self.engine.symbol_states["ES"]["active_trade"]
+        self.assertEqual(trade["current_sl_price"], 5008.75)
+
     def test_csv_registro_hora_apertura_y_cierre(self):
         """Verifica que el CSV registre Hora_Apertura y Hora_Cierre de forma independiente e inmutable."""
         trade = {
