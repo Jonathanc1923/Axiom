@@ -1502,13 +1502,14 @@ class AxiomEngine:
                 self.stats["rejected_trades"] = rejected
                 self.stats["longs"] = longs
                 self.stats["shorts"] = shorts
-                self.stats["winning_trades"] = winning
-                self.stats["losing_trades"] = losing
-                self.stats["gross_pnl_usd"] = round(gross_pnl, 2)
-                self.stats["total_fees_usd"] = round(fees, 2)
-                self.stats["net_pnl_usd"] = round(net_pnl, 2)
-                self.stats["win_rate"] = win_rate
-                self.stats["profit_factor"] = profit_factor
+                if not self.stats.get("sync_api_authoritative", False):
+                    self.stats["winning_trades"] = winning
+                    self.stats["losing_trades"] = losing
+                    self.stats["gross_pnl_usd"] = round(gross_pnl, 2)
+                    self.stats["total_fees_usd"] = round(fees, 2)
+                    self.stats["net_pnl_usd"] = round(net_pnl, 2)
+                    self.stats["win_rate"] = win_rate
+                    self.stats["profit_factor"] = profit_factor
         except Exception as e:
             self.log(f"⚠️ Error al recalcular métricas desde CSV: {e}", "ERROR")
 
@@ -1533,7 +1534,7 @@ class AxiomEngine:
             
             if os.path.isfile(self.csv_path) and os.path.getsize(self.csv_path) > 0:
                 fieldnames = [
-                    'Fecha', 'Hora', 'Simbolo', 'Estado', 'Direccion', 'Precio_Mercado',
+                    'Fecha', 'Hora_Apertura', 'Hora_Cierre', 'Hora', 'Simbolo', 'Estado', 'Direccion', 'Precio_Mercado',
                     'Precio_Entrada_Real', 'Precio_Salida_Real', 'SL_Ticks', 'TP_Ticks',
                     'Hito_Alcanzado', 'Max_Pct_TP',
                     'PnL_Bruto_USD', 'Comisiones_USD', 'PnL_Neto_USD', 'Order_ID',
@@ -1544,6 +1545,15 @@ class AxiomEngine:
                 with open(self.csv_path, mode='r', encoding='utf-8') as file:
                     reader = csv.DictReader(file, delimiter=';')
                     for r in reader:
+                        # Auto-completar Hora_Apertura y Hora_Cierre si faltan
+                        if not r.get('Hora_Apertura') or r.get('Hora_Apertura') in ('N/A', ''):
+                            r['Hora_Apertura'] = r.get('Hora', 'N/A')
+                        if not r.get('Hora_Cierre') or r.get('Hora_Cierre') in ('N/A', ''):
+                            estado = (r.get('Estado') or '').upper()
+                            if 'CERRADA' in estado:
+                                r['Hora_Cierre'] = r.get('Ultima_Actualizacion', '').split(' ')[1] if ' ' in r.get('Ultima_Actualizacion', '') else r.get('Hora', 'N/A')
+                            else:
+                                r['Hora_Cierre'] = 'EN CURSO'
                         rows.append(r)
                         
                 cambios = False
@@ -1604,6 +1614,7 @@ class AxiomEngine:
                                 if d_base > 0:
                                     pct = (diff_pts / d_base) * 100.0
                                     stg = 0
+                                    if pct >= HITO_MICRO_TRIGGER_PCT: stg = 0.5
                                     if pct >= HITO_1_TRIGGER_PCT: stg = 1
                                     if pct >= HITO_2_TRIGGER_PCT: stg = 2
                                     if pct >= HITO_3_TRIGGER_PCT: stg = 3
@@ -1631,14 +1642,79 @@ class AxiomEngine:
                         writer.writeheader()
                         for r in rows:
                             writer.writerow({fn: r.get(fn, "N/A") for fn in fieldnames})
+
+            # Recalcular métricas de trades
+            self._recalcular_stats_desde_csv()
+            
+            # Sincronización autoritativa directa de PnL y comisiones reales desde TopstepX API
+            if raw_trades:
+                topstep_winning = 0
+                topstep_losing = 0
+                topstep_gross = 0.0
+                topstep_fees = 0.0
+                by_sym_stats = {}
+
+                for t in raw_trades:
+                    cid = t.get("contractId", "")
+                    t_sym = self.resolve_symbol_from_contract(cid) or "OTHER"
+                    if t_sym not in by_sym_stats:
+                        by_sym_stats[t_sym] = {"total": 0, "gross": 0.0, "fees": 0.0, "net_pnl": 0.0}
+
+                    pnl = t.get("profitAndLoss")
+                    if pnl is not None:
+                        val = float(pnl)
+                        topstep_gross += val
+                        by_sym_stats[t_sym]["gross"] += val
+                        by_sym_stats[t_sym]["total"] += 1
+                        if val >= 0:
+                            topstep_winning += 1
+                        else:
+                            topstep_losing += 1
+
+                    f_fee = float(t.get("fees") or 0.0) + float(t.get("commissions") or 0.0)
+                    topstep_fees += f_fee
+                    by_sym_stats[t_sym]["fees"] += f_fee
+
+                for s_data in by_sym_stats.values():
+                    s_data["net_pnl"] = round(s_data["gross"] - s_data["fees"], 2)
+
+                topstep_net = round(topstep_gross - topstep_fees, 2)
+                topstep_closed = topstep_winning + topstep_losing
+                topstep_win_rate = round((topstep_winning / topstep_closed * 100.0), 1) if topstep_closed > 0 else 0.0
+                topstep_profit_factor = round(abs(topstep_gross / topstep_fees), 2) if topstep_fees > 0 else 0.0
+
+                with self.lock:
+                    self.stats["sync_api_authoritative"] = True
+                    self.stats["gross_pnl_usd"] = round(topstep_gross, 2)
+                    self.stats["total_fees_usd"] = round(topstep_fees, 2)
+                    self.stats["net_pnl_usd"] = topstep_net
+                    self.stats["winning_trades"] = topstep_winning
+                    self.stats["losing_trades"] = topstep_losing
+                    self.stats["win_rate"] = topstep_win_rate
+                    self.stats["profit_factor"] = topstep_profit_factor
+                    self.stats["by_symbol"] = by_sym_stats
+            elif balance > 0:
+                with self.lock:
+                    self.stats["sync_api_authoritative"] = True
+                    self.stats["gross_pnl_usd"] = 0.0
+                    self.stats["total_fees_usd"] = 0.0
+                    self.stats["net_pnl_usd"] = 0.0
+                    self.stats["winning_trades"] = 0
+                    self.stats["losing_trades"] = 0
+                    self.stats["win_rate"] = 0.0
+                    self.stats["profit_factor"] = 0.0
                             
             now_dt = datetime.now()
             self.last_sync_time = time.time()
             self.stats["last_sync"] = now_dt.strftime("%Y-%m-%d %H:%M:%S")
             self.stats["next_sync"] = (now_dt + timedelta(seconds=self.sync_interval_seconds)).strftime("%Y-%m-%d %H:%M:%S")
             
-            self._recalcular_stats_desde_csv()
-            self.log(f"🔄 [SYNC] Sincronización completada. Posiciones abiertas en TopstepX: {len(open_positions)} | Balance: ${self.stats['real_balance']:,.2f}", "SYSTEM")
+            self.log(
+                f"🔄 [SYNC] Sincronización oficial TopstepX completada. Balance: ${self.stats['real_balance']:,.2f} | "
+                f"PnL Bruto: ${self.stats['gross_pnl_usd']:+,.2f} | Comisiones: ${self.stats['total_fees_usd']:,.2f} | "
+                f"PnL Neto Real: ${self.stats['net_pnl_usd']:+,.2f} USD",
+                "SYSTEM"
+            )
             return self.stats
         except Exception as e:
             self.log(f"⚠️ Error al sincronizar con TopstepX: {e}", "ERROR")

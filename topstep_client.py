@@ -75,25 +75,23 @@ class TopstepClient:
         # Intento 1: Coincidencia por nombre específico configurado
         matched = None
         if target:
-            # Buscar en lista activa primero si canTrade == True
-            for acc in active_accounts:
+            # Buscar primero coincidencia en all_accounts que tenga canTrade == True
+            for acc in all_accounts:
                 n = acc.get("name", "").upper()
                 if (target in n or n in target) and acc.get("canTrade", False):
                     matched = acc
                     break
             
-            # Si no está en las activas, buscar en all_accounts
+            # Si no hay con canTrade == True, vincular la cuenta solicitada aunque canTrade sea False
             if not matched:
                 for acc in all_accounts:
                     n = acc.get("name", "").upper()
                     if target in n or n in target:
-                        if acc.get("canTrade", False):
-                            matched = acc
-                            break
-                        else:
-                            print(f"⚠️ [TOPSTEP] Cuenta solicitada {acc.get('name')} detectada pero 'canTrade' es False.", flush=True)
+                        matched = acc
+                        print(f"⚠️ [TOPSTEP] Cuenta solicitada {acc.get('name')} vinculada (ID: {acc.get('id')}). AVISO: 'canTrade' es False en TopstepX.", flush=True)
+                        break
 
-        # Intento 2: Si la cuenta específica no puede operar o no se definió, buscar la cuenta activa de práctica
+        # Intento 2: Si no se especificó cuenta o no se encontró, buscar la cuenta activa de práctica con canTrade == True
         if not matched:
             for acc in active_accounts:
                 name_upper = acc.get("name", "").upper()
@@ -320,14 +318,16 @@ class TopstepClient:
         """Obtiene el balance real de la cuenta desde TopstepX."""
         url = f"{self.base_url}/api/Account/search"
         try:
-            res = requests.post(url, json={"onlyActiveAccounts": True}, headers=self.get_headers(), timeout=15)
+            res = requests.post(url, json={"onlyActiveAccounts": False}, headers=self.get_headers(), timeout=15)
             if res.status_code == 200:
                 data = res.json()
                 accounts = data.get("accounts", [])
+                if account_id is not None:
+                    for acc in accounts:
+                        if str(acc.get("id")) == str(account_id):
+                            return float(acc.get("balance", 0.0))
                 for acc in accounts:
-                    if account_id is not None and acc.get("id") == account_id:
-                        return float(acc.get("balance", 0.0))
-                    if account_id is None and ("PRAC" in acc.get("name", "").upper() or "PRACTICE" in acc.get("name", "").upper()):
+                    if ("PRAC" in acc.get("name", "").upper() or "PRACTICE" in acc.get("name", "").upper()) and acc.get("canTrade", False):
                         return float(acc.get("balance", 0.0))
                 if accounts:
                     return float(accounts[0].get("balance", 0.0))
