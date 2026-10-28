@@ -1147,28 +1147,6 @@ class AxiomEngine:
             tp_ticks = round(recorrido_tp_pts / tick_size) if tick_size > 0 else 0
             sl_ticks = round(abs(entry_price - current_sl_price) / tick_size) if tick_size > 0 else 0
             
-            adopted_trade = {
-                "symbol": sym,
-                "contract_id": contract_id,
-                "direction": direccion,
-                "entry_price": entry_price,
-                "current_price": entry_price,
-                "highest_price": entry_price,
-                "lowest_price": entry_price,
-                "initial_sl_price": current_sl_price,
-                "current_sl_price": current_sl_price,
-                "initial_tp_price": tp_price,
-                "current_tp_price": tp_price,
-                "base_tp_pts": recorrido_tp_pts,
-                "initial_sl_ticks": sl_ticks,
-                "tp_ticks": tp_ticks,
-                "order_id": target_pos.get("id", "ADOPTADO"),
-                "sl_stage": 0,
-                "max_pct_avance": 0.0,
-                "entry_timestamp": time.time(),
-                "last_check_time": time.time()
-            }
-            
             now_dt = datetime.now()
             hora_str = now_dt.strftime('%H:%M:%S')
             fecha_str = now_dt.strftime('%Y-%m-%d')
@@ -1181,8 +1159,8 @@ class AxiomEngine:
                 "current_price": entry_price,
                 "highest_price": entry_price,
                 "lowest_price": entry_price,
-                "initial_sl_price": sl_price,
-                "current_sl_price": sl_price,
+                "initial_sl_price": current_sl_price,
+                "current_sl_price": current_sl_price,
                 "initial_tp_price": tp_price,
                 "current_tp_price": tp_price,
                 "base_tp_pts": recorrido_tp_pts,
@@ -1969,6 +1947,9 @@ class AxiomEngine:
 
                     if df_5m is None or df_5m.empty:
                         continue
+
+                    spec = SUPPORTED_SYMBOLS.get(sym, {"tickSize": 0.25})
+                    tick_size = spec.get("tickSize", 0.25)
 
                     live_bar = df_5m.iloc[-1]
                     current_price = float(live_bar['Close'])
