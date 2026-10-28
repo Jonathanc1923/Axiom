@@ -449,8 +449,8 @@ class AxiomEngine:
 
             # Banda siguiente (objetivo) = upper_band_now
             d_target_band = abs(upper_band_now - precio_mercado)
-            if d_target_band < (10 * tick_size):
-                d_target_band = 15 * tick_size
+            if d_target_band < (20 * tick_size):
+                d_target_band = 30 * tick_size
 
             # TP Inicial: 50% de la distancia a la siguiente banda
             tp_dist = INITIAL_TP_TARGET_BAND_RATIO * d_target_band
@@ -498,8 +498,8 @@ class AxiomEngine:
 
             # Banda siguiente (objetivo) = lower_band_now
             d_target_band = abs(precio_mercado - lower_band_now)
-            if d_target_band < (10 * tick_size):
-                d_target_band = 15 * tick_size
+            if d_target_band < (20 * tick_size):
+                d_target_band = 30 * tick_size
 
             # TP Inicial: 50% de la distancia a la siguiente banda
             tp_dist = INITIAL_TP_TARGET_BAND_RATIO * d_target_band
@@ -678,8 +678,8 @@ class AxiomEngine:
                 precio_tp = round_to_tick(precio_entrada - tp_dist, tick_size)
 
         d_tp_ini = abs(precio_tp - precio_entrada)
-        if d_tp_ini < (4 * tick_size):
-            d_tp_ini = 10 * tick_size
+        if d_tp_ini < (16 * tick_size):
+            d_tp_ini = 20 * tick_size
             precio_tp = round_to_tick(precio_entrada + d_tp_ini if direccion == "LONG" else precio_entrada - d_tp_ini, tick_size)
 
         if direccion == "LONG":
@@ -898,9 +898,9 @@ class AxiomEngine:
         if target_stage > sl_stage:
             if target_stage == 1:
                 # Hito 1 (Avance 25% de TP): Sella el SL a Entrada + 5 ticks a favor
-                nuevo_sl = round_to_tick(precio_entrada + (LOCK_PROFIT_TICKS * tick_size), tick_size) if direccion == "LONG" else round_to_tick(precio_entrada - (LOCK_PROFIT_TICKS * tick_size), tick_size)
+                ideal_sl = round_to_tick(precio_entrada + (LOCK_PROFIT_TICKS * tick_size), tick_size) if direccion == "LONG" else round_to_tick(precio_entrada - (LOCK_PROFIT_TICKS * tick_size), tick_size)
                 nuevo_tp = round_to_tick(trade["initial_tp_price"] + (d_tp_ini * 0.25), tick_size) if direccion == "LONG" else round_to_tick(trade["initial_tp_price"] - (d_tp_ini * 0.25), tick_size)
-                motivo_hito = f"HITO 1 (25% TP) | SL Sellado a Entrada + {LOCK_PROFIT_TICKS} ticks ({nuevo_sl:.2f}) | TP Ampliado +25% ({nuevo_tp:.2f})"
+                motivo_base = f"HITO 1 (25% TP) | Sellar SL a Entrada + {LOCK_PROFIT_TICKS} ticks ({ideal_sl:.2f})"
             else:
                 # Hitos subsiguientes (Hito 2=50%, Hito 3=75%, Hito 4=100%...):
                 # Cada vez que avanza 25%, el SL avanza 25% y el TP se amplía 25%
@@ -908,14 +908,35 @@ class AxiomEngine:
                 trig_pct = 25.0 + ((k - 1) * 25.0)
                 sl_advance = (k - 1) * 0.25 * d_tp_ini
                 tp_advance = k * 0.25 * d_tp_ini
-                nuevo_sl = round_to_tick(precio_entrada + sl_advance, tick_size) if direccion == "LONG" else round_to_tick(precio_entrada - sl_advance, tick_size)
+                ideal_sl = round_to_tick(precio_entrada + sl_advance, tick_size) if direccion == "LONG" else round_to_tick(precio_entrada - sl_advance, tick_size)
                 nuevo_tp = round_to_tick(trade["initial_tp_price"] + tp_advance, tick_size) if direccion == "LONG" else round_to_tick(trade["initial_tp_price"] - tp_advance, tick_size)
-                motivo_hito = f"HITO {k} ({trig_pct:.0f}% TP) | SL avanza +25% ({nuevo_sl:.2f}) | TP Ampliado +25% ({nuevo_tp:.2f})"
+                motivo_base = f"HITO {k} ({trig_pct:.0f}% TP) | SL avanza +25% ({ideal_sl:.2f})"
+
+            # CLAMP DE SEGURIDAD CME / TOPSTEPX PARA ÓRDENES STOP:
+            # En CME, un Sell Stop (LONG) DEBE ser estrictamente menor que el precio actual (<= precio_actual - 1 tick).
+            # Un Buy Stop (SHORT) DEBE ser estrictamente mayor que el precio actual (>= precio_actual + 1 tick).
+            # Si el mercado aún no ha rebasado ideal_sl o ha retrocedido ligeramente, se asegura al máximo nivel seguro permitido.
+            if direccion == "LONG":
+                safe_max_sl = round_to_tick(precio_actual - tick_size, tick_size)
+                nuevo_sl = min(ideal_sl, safe_max_sl)
+                if nuevo_sl <= (sl_actual + 0.01 * tick_size):
+                    nuevo_sl = None
+                else:
+                    motivo_hito = f"{motivo_base} [SL Seguro: {nuevo_sl:.2f}] | TP Ampliado +25% ({nuevo_tp:.2f})"
+            else: # SHORT
+                safe_min_sl = round_to_tick(precio_actual + tick_size, tick_size)
+                nuevo_sl = max(ideal_sl, safe_min_sl)
+                if nuevo_sl >= (sl_actual - 0.01 * tick_size):
+                    nuevo_sl = None
+                else:
+                    motivo_hito = f"{motivo_base} [SL Seguro: {nuevo_sl:.2f}] | TP Ampliado +25% ({nuevo_tp:.2f})"
 
         # MODO RUNNER TRAILING DINÁMICO: Persigue al precio a 15 ticks fijos tras superar el 100% del TP inicial
         if target_stage >= 4 or max_pct >= 100.0:
             if direccion == "LONG":
                 trailing_runner_sl = round_to_tick(highest_since_entry - (RUNNER_TRAILING_TICKS * tick_size), tick_size)
+                safe_max_sl = round_to_tick(precio_actual - tick_size, tick_size)
+                trailing_runner_sl = min(trailing_runner_sl, safe_max_sl)
                 if nuevo_sl is None:
                     if trailing_runner_sl > (sl_actual + 0.01 * tick_size):
                         nuevo_sl = trailing_runner_sl
@@ -924,6 +945,8 @@ class AxiomEngine:
                     nuevo_sl = max(nuevo_sl, trailing_runner_sl)
             else: # SHORT
                 trailing_runner_sl = round_to_tick(lowest_since_entry + (RUNNER_TRAILING_TICKS * tick_size), tick_size)
+                safe_min_sl = round_to_tick(precio_actual + tick_size, tick_size)
+                trailing_runner_sl = max(trailing_runner_sl, safe_min_sl)
                 if nuevo_sl is None:
                     if trailing_runner_sl < (sl_actual - 0.01 * tick_size):
                         nuevo_sl = trailing_runner_sl
@@ -942,7 +965,7 @@ class AxiomEngine:
 
         if necesita_ajuste and (nuevo_sl is not None or nuevo_tp is not None):
             # Ajustar órdenes de forma atómica en TopstepX con una sola consulta
-            mod_ok = self.ajustar_bracket_en_topstep(contract_id, nuevo_sl, nuevo_tp, sym)
+            mod_ok = self.ajustar_bracket_en_topstep(contract_id, nuevo_sl, nuevo_tp, sym, current_price=precio_actual)
             if mod_ok:
                 trade["sl_stage"] = max(trade.get("sl_stage", 0), target_stage)
                 if nuevo_sl is not None:
@@ -980,7 +1003,7 @@ class AxiomEngine:
                 state["cooldown_until"] = time.time() + 180
                 return
 
-    def ajustar_bracket_en_topstep(self, contract_id: str, nuevo_sl: Optional[float], nuevo_tp: Optional[float], sym: str) -> bool:
+    def ajustar_bracket_en_topstep(self, contract_id: str, nuevo_sl: Optional[float], nuevo_tp: Optional[float], sym: str, current_price: Optional[float] = None) -> bool:
         """
         Modifica de forma atómica y en una sola consulta de órdenes abiertas el SL y/o TP en TopstepX.
         Utiliza el método oficial Swagger (/api/Order/modify):
@@ -1011,10 +1034,21 @@ class AxiomEngine:
                     if otype == 4 and nuevo_sl is not None:
                         orders_found += 1
                         curr_stop = o.get("stopPrice")
-                        if curr_stop is not None and abs(float(curr_stop) - float(nuevo_sl)) < (0.01 * tick_size):
+                        target_sl = round_to_tick(nuevo_sl, tick_size)
+
+                        # Salvaguarda final contra precios de stop inválidos en TopstepX / CME
+                        last_p = current_price or self.symbol_states.get(sym, {}).get("telemetry", {}).get("close")
+                        order_side = int(o.get("side", -1))
+                        if last_p is not None and float(last_p) > 0:
+                            p_float = float(last_p)
+                            if order_side == 1 and target_sl >= p_float: # Sell Stop
+                                target_sl = round_to_tick(p_float - tick_size, tick_size)
+                            elif order_side == 0 and target_sl <= p_float: # Buy Stop
+                                target_sl = round_to_tick(p_float + tick_size, tick_size)
+
+                        if curr_stop is not None and abs(float(curr_stop) - float(target_sl)) < (0.01 * tick_size):
                             continue # Ya está en el nivel deseado
 
-                        target_sl = round_to_tick(nuevo_sl, tick_size)
                         res = self.client.modify_order(
                             account_id=self.account_id,
                             order_id=order_id,
