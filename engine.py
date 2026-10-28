@@ -35,6 +35,7 @@ from config import (
     INITIAL_SL_OPPOSITE_BAND_RATIO, INITIAL_TP_TARGET_BAND_RATIO,
     TRIGGER_TP_ADVANCE_PCT, LOCK_PROFIT_TICKS, EXPAND_TP_PCT, STEP_SL_PCT,
     MAX_POSITIONS_PER_SYMBOL, MIN_PREV_CANDLE_DIFF_TICKS, USE_VWAP_SLOPE_FILTER,
+    USE_DYNAMIC_TRAILING,
     SESSION_PROFIT_TARGET_USD,
     HITO_MICRO_TRIGGER_PCT, HITO_MICRO_SL_TICKS,
     HITO_1_TRIGGER_PCT, HITO_2_TRIGGER_PCT, HITO_2_SL_PCT, HITO_2_TP_EXPAND_PCT,
@@ -418,9 +419,7 @@ class AxiomEngine:
         slope_vwap = vwap_now - vwap_ref
 
         if USE_VWAP_SLOPE_FILTER:
-            min_slope_target = get_min_slope_points(sym)
-            min_slope_val = round_to_tick(min_slope_target, tick_size)
-            min_slope_ticks = round(min_slope_val / tick_size, 1)
+            min_slope_val = 1 * tick_size
             mins_eval = bars_eval * 5
         else:
             min_slope_val = 0.0
@@ -433,28 +432,28 @@ class AxiomEngine:
             if USE_VWAP_SLOPE_FILTER and slope_vwap < min_slope_val:
                 self.log(
                     f"🚫 [{sym}] Setup LONG descartado por Pendiente VWAP insuficiente: "
-                    f"Pendiente VWAP ({slope_vwap:+.2f}) < Mínimo requerido ({min_slope_val:+.2f} pts) en {mins_eval}m",
+                    f"Pendiente VWAP ({slope_vwap:+.2f}) < Mínimo requerido ({min_slope_val:+.2f} pts / 1t) en {mins_eval}m",
                     "SETUP", sym
                 )
                 return None
 
-            # Banda contraria = lower_band_now
+            # Banda contraria protectora = lower_band_now
             d_opuesta = abs(vwap_now - lower_band_now)
             if d_opuesta < (5 * tick_size):
                 d_opuesta = 15 * tick_size
 
-            # SL Inicial: exactamente 1/5 de la distancia entre la línea VWAP y la banda contraria
+            # SL: Mitad de camino (50%) entre la línea VWAP y la banda contraria
             sl_dist = INITIAL_SL_OPPOSITE_BAND_RATIO * d_opuesta
             precio_sl = round_to_tick(vwap_now - sl_dist, tick_size)
 
             # Banda siguiente (objetivo) = upper_band_now
-            d_target_band = abs(upper_band_now - precio_mercado)
-            if d_target_band < (20 * tick_size):
-                d_target_band = 30 * tick_size
+            d_target_band = abs(upper_band_now - vwap_now)
+            if d_target_band < (10 * tick_size):
+                d_target_band = 20 * tick_size
 
-            # TP Inicial: 50% de la distancia a la siguiente banda
+            # TP: 60% de distancia entre línea VWAP y la siguiente banda
             tp_dist = INITIAL_TP_TARGET_BAND_RATIO * d_target_band
-            precio_tp = round_to_tick(precio_mercado + tp_dist, tick_size)
+            precio_tp = round_to_tick(vwap_now + tp_dist, tick_size)
             d_tp_ini = abs(precio_tp - precio_mercado)
 
             return {
@@ -482,28 +481,28 @@ class AxiomEngine:
             if USE_VWAP_SLOPE_FILTER and slope_vwap > -min_slope_val:
                 self.log(
                     f"🚫 [{sym}] Setup SHORT descartado por Pendiente VWAP insuficiente: "
-                    f"Pendiente VWAP ({slope_vwap:+.2f}) > Mínimo requerido ({-min_slope_val:+.2f} pts) en {mins_eval}m",
+                    f"Pendiente VWAP ({slope_vwap:+.2f}) > Mínimo requerido ({-min_slope_val:+.2f} pts / -1t) en {mins_eval}m",
                     "SETUP", sym
                 )
                 return None
 
-            # Banda contraria = upper_band_now
+            # Banda contraria protectora = upper_band_now
             d_opuesta = abs(upper_band_now - vwap_now)
             if d_opuesta < (5 * tick_size):
                 d_opuesta = 15 * tick_size
 
-            # SL Inicial: exactamente 1/5 de la distancia entre la línea VWAP y la banda contraria
+            # SL: Mitad de camino (50%) entre la línea VWAP y la banda contraria
             sl_dist = INITIAL_SL_OPPOSITE_BAND_RATIO * d_opuesta
             precio_sl = round_to_tick(vwap_now + sl_dist, tick_size)
 
             # Banda siguiente (objetivo) = lower_band_now
-            d_target_band = abs(precio_mercado - lower_band_now)
-            if d_target_band < (20 * tick_size):
-                d_target_band = 30 * tick_size
+            d_target_band = abs(vwap_now - lower_band_now)
+            if d_target_band < (10 * tick_size):
+                d_target_band = 20 * tick_size
 
-            # TP Inicial: 50% de la distancia a la siguiente banda
+            # TP: 60% de distancia entre línea VWAP y la siguiente banda
             tp_dist = INITIAL_TP_TARGET_BAND_RATIO * d_target_band
-            precio_tp = round_to_tick(precio_mercado - tp_dist, tick_size)
+            precio_tp = round_to_tick(vwap_now - tp_dist, tick_size)
             d_tp_ini = abs(precio_mercado - precio_tp)
 
             return {
@@ -669,17 +668,17 @@ class AxiomEngine:
 
         if precio_tp is None:
             if direccion == "LONG":
-                d_tgt = abs(float(setup.get("upper_band", setup.get("target_band", precio_entrada + d_base))) - precio_entrada)
+                d_tgt = abs(float(setup.get("upper_band", setup.get("target_band", vwap_cruce + d_base))) - vwap_cruce)
                 tp_dist = INITIAL_TP_TARGET_BAND_RATIO * d_tgt
-                precio_tp = round_to_tick(precio_entrada + tp_dist, tick_size)
+                precio_tp = round_to_tick(vwap_cruce + tp_dist, tick_size)
             else:
-                d_tgt = abs(precio_entrada - float(setup.get("lower_band", setup.get("target_band", precio_entrada - d_base))))
+                d_tgt = abs(vwap_cruce - float(setup.get("lower_band", setup.get("target_band", vwap_cruce - d_base))))
                 tp_dist = INITIAL_TP_TARGET_BAND_RATIO * d_tgt
-                precio_tp = round_to_tick(precio_entrada - tp_dist, tick_size)
+                precio_tp = round_to_tick(vwap_cruce - tp_dist, tick_size)
 
         d_tp_ini = abs(precio_tp - precio_entrada)
-        if d_tp_ini < (16 * tick_size):
-            d_tp_ini = 20 * tick_size
+        if d_tp_ini < (5 * tick_size):
+            d_tp_ini = 10 * tick_size
             precio_tp = round_to_tick(precio_entrada + d_tp_ini if direccion == "LONG" else precio_entrada - d_tp_ini, tick_size)
 
         if direccion == "LONG":
@@ -697,9 +696,9 @@ class AxiomEngine:
 
         trigger_ticks = setup.get("trigger_ticks", get_vwap_trigger_distance_ticks(sym))
         condicion_str = (
-            f"VWAP Dynamic Reversion. Entrada: {precio_entrada:.2f} | "
-            f"VWAP: {vwap_cruce:.2f} | SL Inicial (1/5 Banda Contraria): {ticks_sl_order_val}t ({precio_sl:.2f}) | "
-            f"TP Inicial (50% Banda): {ticks_tp}t ({precio_tp:.2f} | D_ini: {d_tp_ini:.2f} pts)"
+            f"VWAP Reversion. Entrada: {precio_entrada:.2f} | "
+            f"VWAP: {vwap_cruce:.2f} | SL (Mitad a Banda): {ticks_sl_order_val}t ({precio_sl:.2f}) | "
+            f"TP (60% a Banda): {ticks_tp}t ({precio_tp:.2f} | D_ini: {d_tp_ini:.2f} pts)"
         )
         self.log(f"🚨 DISPARANDO {direccion} A MERCADO | {condicion_str}", "ORDER", sym)
         
@@ -886,94 +885,94 @@ class AxiomEngine:
         contract_id = trade["contract_id"]
         order_id = str(trade.get("order_id", "N/A"))
 
-        # EVALUACIÓN DE ESCALERA DE HITOS (Cada 25% de avance respecto al TP inicial)
-        target_stage = sl_stage
-        if max_pct >= 25.0:
-            target_stage = max(target_stage, 1 + int((max_pct - 25.0) // 25.0))
+        # EVALUACIÓN DE ESCALERA DE HITOS DINÁMICOS (Opcional, desactivado por solicitud "Ya no dinámico")
+        if USE_DYNAMIC_TRAILING:
+            target_stage = sl_stage
+            if max_pct >= 25.0:
+                target_stage = max(target_stage, 1 + int((max_pct - 25.0) // 25.0))
 
-        nuevo_sl = None
-        nuevo_tp = None
-        motivo_hito = ""
+            nuevo_sl = None
+            nuevo_tp = None
+            motivo_hito = ""
 
-        if target_stage > sl_stage:
-            if target_stage == 1:
-                # Hito 1 (Avance 25% de TP): Sella el SL a Entrada + 5 ticks a favor
-                ideal_sl = round_to_tick(precio_entrada + (LOCK_PROFIT_TICKS * tick_size), tick_size) if direccion == "LONG" else round_to_tick(precio_entrada - (LOCK_PROFIT_TICKS * tick_size), tick_size)
-                nuevo_tp = round_to_tick(trade["initial_tp_price"] + (d_tp_ini * 0.25), tick_size) if direccion == "LONG" else round_to_tick(trade["initial_tp_price"] - (d_tp_ini * 0.25), tick_size)
-                motivo_base = f"HITO 1 (25% TP) | Sellar SL a Entrada + {LOCK_PROFIT_TICKS} ticks ({ideal_sl:.2f})"
-            else:
-                # Hitos subsiguientes (Hito 2=50%, Hito 3=75%, Hito 4=100%...):
-                # Cada vez que avanza 25%, el SL avanza 25% y el TP se amplía 25%
-                k = int(target_stage)
-                trig_pct = 25.0 + ((k - 1) * 25.0)
-                sl_advance = (k - 1) * 0.25 * d_tp_ini
-                tp_advance = k * 0.25 * d_tp_ini
-                ideal_sl = round_to_tick(precio_entrada + sl_advance, tick_size) if direccion == "LONG" else round_to_tick(precio_entrada - sl_advance, tick_size)
-                nuevo_tp = round_to_tick(trade["initial_tp_price"] + tp_advance, tick_size) if direccion == "LONG" else round_to_tick(trade["initial_tp_price"] - tp_advance, tick_size)
-                motivo_base = f"HITO {k} ({trig_pct:.0f}% TP) | SL avanza +25% ({ideal_sl:.2f})"
-
-            # CLAMP DE SEGURIDAD CME / TOPSTEPX PARA ÓRDENES STOP:
-            # En CME, un Sell Stop (LONG) DEBE ser estrictamente menor que el precio actual (<= precio_actual - 1 tick).
-            # Un Buy Stop (SHORT) DEBE ser estrictamente mayor que el precio actual (>= precio_actual + 1 tick).
-            # Si el mercado aún no ha rebasado ideal_sl o ha retrocedido ligeramente, se asegura al máximo nivel seguro permitido.
-            if direccion == "LONG":
-                safe_max_sl = round_to_tick(precio_actual - tick_size, tick_size)
-                nuevo_sl = min(ideal_sl, safe_max_sl)
-                if nuevo_sl <= (sl_actual + 0.01 * tick_size):
-                    nuevo_sl = None
+            if target_stage > sl_stage:
+                if target_stage == 1:
+                    # Hito 1 (Avance 25% de TP): Sella el SL a Entrada + 5 ticks a favor
+                    ideal_sl = round_to_tick(precio_entrada + (LOCK_PROFIT_TICKS * tick_size), tick_size) if direccion == "LONG" else round_to_tick(precio_entrada - (LOCK_PROFIT_TICKS * tick_size), tick_size)
+                    nuevo_tp = round_to_tick(trade["initial_tp_price"] + (d_tp_ini * 0.25), tick_size) if direccion == "LONG" else round_to_tick(trade["initial_tp_price"] - (d_tp_ini * 0.25), tick_size)
+                    motivo_base = f"HITO 1 (25% TP) | Sellar SL a Entrada + {LOCK_PROFIT_TICKS} ticks ({ideal_sl:.2f})"
                 else:
-                    motivo_hito = f"{motivo_base} [SL Seguro: {nuevo_sl:.2f}] | TP Ampliado +25% ({nuevo_tp:.2f})"
-            else: # SHORT
-                safe_min_sl = round_to_tick(precio_actual + tick_size, tick_size)
-                nuevo_sl = max(ideal_sl, safe_min_sl)
-                if nuevo_sl >= (sl_actual - 0.01 * tick_size):
-                    nuevo_sl = None
-                else:
-                    motivo_hito = f"{motivo_base} [SL Seguro: {nuevo_sl:.2f}] | TP Ampliado +25% ({nuevo_tp:.2f})"
+                    # Hitos subsiguientes (Hito 2=50%, Hito 3=75%, Hito 4=100%...):
+                    k = int(target_stage)
+                    trig_pct = 25.0 + ((k - 1) * 25.0)
+                    sl_advance = (k - 1) * 0.25 * d_tp_ini
+                    tp_advance = k * 0.25 * d_tp_ini
+                    ideal_sl = round_to_tick(precio_entrada + sl_advance, tick_size) if direccion == "LONG" else round_to_tick(precio_entrada - sl_advance, tick_size)
+                    nuevo_tp = round_to_tick(trade["initial_tp_price"] + tp_advance, tick_size) if direccion == "LONG" else round_to_tick(trade["initial_tp_price"] - tp_advance, tick_size)
+                    motivo_base = f"HITO {k} ({trig_pct:.0f}% TP) | SL avanza +25% ({ideal_sl:.2f})"
 
-        # MODO RUNNER TRAILING DINÁMICO: Persigue al precio a 15 ticks fijos tras superar el 100% del TP inicial
-        if target_stage >= 4 or max_pct >= 100.0:
-            if direccion == "LONG":
-                trailing_runner_sl = round_to_tick(highest_since_entry - (RUNNER_TRAILING_TICKS * tick_size), tick_size)
-                safe_max_sl = round_to_tick(precio_actual - tick_size, tick_size)
-                trailing_runner_sl = min(trailing_runner_sl, safe_max_sl)
-                if nuevo_sl is None:
-                    if trailing_runner_sl > (sl_actual + 0.01 * tick_size):
-                        nuevo_sl = trailing_runner_sl
-                        motivo_hito = f"RUNNER TRAILING ({RUNNER_TRAILING_TICKS}t tras pico {highest_since_entry:.2f}) | SL a {nuevo_sl:.2f}"
-                else:
-                    nuevo_sl = max(nuevo_sl, trailing_runner_sl)
-            else: # SHORT
-                trailing_runner_sl = round_to_tick(lowest_since_entry + (RUNNER_TRAILING_TICKS * tick_size), tick_size)
-                safe_min_sl = round_to_tick(precio_actual + tick_size, tick_size)
-                trailing_runner_sl = max(trailing_runner_sl, safe_min_sl)
-                if nuevo_sl is None:
-                    if trailing_runner_sl < (sl_actual - 0.01 * tick_size):
-                        nuevo_sl = trailing_runner_sl
-                        motivo_hito = f"RUNNER TRAILING ({RUNNER_TRAILING_TICKS}t tras pico {lowest_since_entry:.2f}) | SL a {nuevo_sl:.2f}"
-                else:
-                    nuevo_sl = min(nuevo_sl, trailing_runner_sl)
+                # CLAMP DE SEGURIDAD CME / TOPSTEPX PARA ÓRDENES STOP:
+                if direccion == "LONG":
+                    safe_max_sl = round_to_tick(precio_actual - tick_size, tick_size)
+                    nuevo_sl = min(ideal_sl, safe_max_sl)
+                    if nuevo_sl <= (sl_actual + 0.01 * tick_size):
+                        nuevo_sl = None
+                    else:
+                        motivo_hito = f"{motivo_base} [SL Seguro: {nuevo_sl:.2f}] | TP Ampliado +25% ({nuevo_tp:.2f})"
+                else: # SHORT
+                    safe_min_sl = round_to_tick(precio_actual + tick_size, tick_size)
+                    nuevo_sl = max(ideal_sl, safe_min_sl)
+                    if nuevo_sl >= (sl_actual - 0.01 * tick_size):
+                        nuevo_sl = None
+                    else:
+                        motivo_hito = f"{motivo_base} [SL Seguro: {nuevo_sl:.2f}] | TP Ampliado +25% ({nuevo_tp:.2f})"
 
-        necesita_ajuste = False
-        if target_stage > sl_stage:
-            necesita_ajuste = True
-        elif nuevo_sl is not None:
-            if direccion == "LONG" and nuevo_sl > (sl_actual + 0.01 * tick_size):
+            # MODO RUNNER TRAILING DINÁMICO: Persigue al precio a 15 ticks fijos tras superar el 100% del TP inicial
+            if target_stage >= 4 or max_pct >= 100.0:
+                if direccion == "LONG":
+                    trailing_runner_sl = round_to_tick(highest_since_entry - (RUNNER_TRAILING_TICKS * tick_size), tick_size)
+                    safe_max_sl = round_to_tick(precio_actual - tick_size, tick_size)
+                    trailing_runner_sl = min(trailing_runner_sl, safe_max_sl)
+                    if nuevo_sl is None:
+                        if trailing_runner_sl > (sl_actual + 0.01 * tick_size):
+                            nuevo_sl = trailing_runner_sl
+                            motivo_hito = f"RUNNER TRAILING ({RUNNER_TRAILING_TICKS}t tras pico {highest_since_entry:.2f}) | SL a {nuevo_sl:.2f}"
+                    else:
+                        nuevo_sl = max(nuevo_sl, trailing_runner_sl)
+                else: # SHORT
+                    trailing_runner_sl = round_to_tick(lowest_since_entry + (RUNNER_TRAILING_TICKS * tick_size), tick_size)
+                    safe_min_sl = round_to_tick(precio_actual + tick_size, tick_size)
+                    trailing_runner_sl = max(trailing_runner_sl, safe_min_sl)
+                    if nuevo_sl is None:
+                        if trailing_runner_sl < (sl_actual - 0.01 * tick_size):
+                            nuevo_sl = trailing_runner_sl
+                            motivo_hito = f"RUNNER TRAILING ({RUNNER_TRAILING_TICKS}t tras pico {lowest_since_entry:.2f}) | SL a {nuevo_sl:.2f}"
+                    else:
+                        nuevo_sl = min(nuevo_sl, trailing_runner_sl)
+
+            necesita_ajuste = False
+            if target_stage > sl_stage:
                 necesita_ajuste = True
-            elif direccion == "SHORT" and nuevo_sl < (sl_actual - 0.01 * tick_size):
-                necesita_ajuste = True
+            elif nuevo_sl is not None:
+                if direccion == "LONG" and nuevo_sl > (sl_actual + 0.01 * tick_size):
+                    necesita_ajuste = True
+                elif direccion == "SHORT" and nuevo_sl < (sl_actual - 0.01 * tick_size):
+                    necesita_ajuste = True
 
-        if necesita_ajuste and (nuevo_sl is not None or nuevo_tp is not None):
-            # Ajustar órdenes de forma atómica en TopstepX con una sola consulta
-            mod_ok = self.ajustar_bracket_en_topstep(contract_id, nuevo_sl, nuevo_tp, sym, current_price=precio_actual)
-            if mod_ok:
-                trade["sl_stage"] = max(trade.get("sl_stage", 0), target_stage)
-                if nuevo_sl is not None:
-                    trade["current_sl_price"] = nuevo_sl
-                if nuevo_tp is not None:
-                    trade["current_tp_price"] = nuevo_tp
+            if necesita_ajuste and (nuevo_sl is not None or nuevo_tp is not None):
+                # Ajustar órdenes de forma atómica en TopstepX con una sola consulta
+                mod_ok = self.ajustar_bracket_en_topstep(contract_id, nuevo_sl, nuevo_tp, sym, current_price=precio_actual)
+                if mod_ok:
+                    trade["sl_stage"] = max(trade.get("sl_stage", 0), target_stage)
+                    if nuevo_sl is not None:
+                        trade["current_sl_price"] = nuevo_sl
+                    if nuevo_tp is not None:
+                        trade["current_tp_price"] = nuevo_tp
 
-                self.log(f"🏆 [{sym}] ¡{motivo_hito}! Recorrido máximo: {max_pct:.1f}%", "ORDER", sym)
+                    self.log(f"🏆 [{sym}] ¡{motivo_hito}! Recorrido máximo: {max_pct:.1f}%", "ORDER", sym)
+                    self.registrar_evento_be_en_csv(sym, trade, nuevo_sl or sl_actual, max_pct, motivo_hito)
+                else:
+                    self.log(f"⚠️ [{sym}] Error al ajustar brackets en TopstepX. Se reintentará automáticamente en el próximo ciclo de 2s...", "ORDER", sym)
                 self.registrar_evento_be_en_csv(sym, trade, nuevo_sl or sl_actual, max_pct, motivo_hito)
             else:
                 self.log(f"⚠️ [{sym}] Error al ajustar brackets en TopstepX. Se reintentará automáticamente en el próximo ciclo de 2s...", "ORDER", sym)

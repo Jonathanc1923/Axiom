@@ -16,7 +16,7 @@ TOPSTEP_API_KEY = os.getenv("TOPSTEP_API_KEY", "O/Jvyz5VggKPKRLF69YDGJQjXIcxsKux
 TOPSTEP_BASE_URL = os.getenv("TOPSTEP_BASE_URL", "https://api.topstepx.com").rstrip("/")
 
 # Practice / Safety Filter
-ACCOUNT_NAME = os.getenv("ACCOUNT_NAME", "PRAC-V2-460183-42000681").strip()
+ACCOUNT_NAME = os.getenv("ACCOUNT_NAME", "PRAC-V2-460183-17967819").strip()
 ACCOUNT_FILTER = os.getenv("ACCOUNT_FILTER", "PRAC").upper()
 
 # Default Symbol on Startup
@@ -36,30 +36,31 @@ CSV_PATH = os.path.join(DATA_DIR, "registro_operaciones.csv")
 # ==========================================
 # Institutional Strategy Configuration: Dynamic Band Reversion & Multi-Position
 # ==========================================
-# SL Inicial: 1/5 (20%) de la distancia entre la línea VWAP y la banda contraria
-INITIAL_SL_OPPOSITE_BAND_RATIO = float(os.getenv("INITIAL_SL_OPPOSITE_BAND_RATIO", "0.20"))
+# SL Inicial: Mitad de camino (50%) entre la línea VWAP y la banda contraria (Ya no dinámico)
+INITIAL_SL_OPPOSITE_BAND_RATIO = float(os.getenv("INITIAL_SL_OPPOSITE_BAND_RATIO", "0.50"))
 
-# TP Inicial: 50% de la distancia entre el precio de entrada y la siguiente banda
-INITIAL_TP_TARGET_BAND_RATIO = float(os.getenv("INITIAL_TP_TARGET_BAND_RATIO", "0.50"))
+# TP Inicial: 60% de distancia entre línea VWAP y la siguiente banda (Ya no dinámico)
+INITIAL_TP_TARGET_BAND_RATIO = float(os.getenv("INITIAL_TP_TARGET_BAND_RATIO", "0.60"))
 
-# Gatillo de protección: Cuando el precio avance 25% de la distancia entre Entrada y TP
+# Trailing Dinámico: Desactivado por solicitud ("Ya no dinámico", brackets OCO estáticos en TopstepX)
+USE_DYNAMIC_TRAILING = os.getenv("USE_DYNAMIC_TRAILING", "false").lower() in ("true", "1", "yes")
+
+# Gatillo de protección (mantiene compatibilidad de hitos si se reactiva)
 TRIGGER_TP_ADVANCE_PCT = float(os.getenv("TRIGGER_TP_ADVANCE_PCT", "25.0"))
-
-# Sellado de ganancia: Al llegar al 25% de avance, el SL se mueve a Entrada + 5 ticks a favor
 LOCK_PROFIT_TICKS = int(os.getenv("LOCK_PROFIT_TICKS", "5"))
-
-# Expansión de TP y avance de SL: Cada vez que avance un 25% más, se amplía TP 25% y sube SL 25%
 EXPAND_TP_PCT = float(os.getenv("EXPAND_TP_PCT", "25.0"))
 STEP_SL_PCT = float(os.getenv("STEP_SL_PCT", "25.0"))
 
-# Máximo de operaciones simultáneas permitidas por símbolo (hasta 2 operaciones)
-MAX_POSITIONS_PER_SYMBOL = int(os.getenv("MAX_POSITIONS_PER_SYMBOL", "2"))
+# Máximo de operaciones simultáneas permitidas por símbolo (1 operación por activo para gestión estricta)
+MAX_POSITIONS_PER_SYMBOL = int(os.getenv("MAX_POSITIONS_PER_SYMBOL", "1"))
 
 # Diferencia mínima en ticks requerida para la vela anterior (t-1) respecto al VWAP (1 tick mínimo)
 MIN_PREV_CANDLE_DIFF_TICKS = int(os.getenv("MIN_PREV_CANDLE_DIFF_TICKS", "1"))
 
-# Filtro de Pendiente VWAP: Desactivado por solicitud ("ya no usar tendencia del vwap")
-USE_VWAP_SLOPE_FILTER = os.getenv("USE_VWAP_SLOPE_FILTER", "false").lower() in ("true", "1", "yes")
+# Filtro de Tendencia (Pendiente VWAP): Activo con lookback de 7 velas (35m) y mínimo de 1 tick a favor
+USE_VWAP_SLOPE_FILTER = os.getenv("USE_VWAP_SLOPE_FILTER", "true").lower() in ("true", "1", "yes")
+VWAP_SLOPE_LOOKBACK_BARS = int(os.getenv("VWAP_SLOPE_LOOKBACK_BARS", "7"))
+MIN_VWAP_SLOPE_TICKS = int(os.getenv("MIN_VWAP_SLOPE_TICKS", "1"))
 
 # Stop Loss Inicial de respaldo universal y por activo (ticks) si no hay banda calculada
 INITIAL_SL_TICKS = int(os.getenv("INITIAL_SL_TICKS", "35"))
@@ -70,19 +71,19 @@ INITIAL_SL_TICKS_RTY = int(os.getenv("INITIAL_SL_TICKS_RTY", "40"))
 INITIAL_SL_TICKS_CL = int(os.getenv("INITIAL_SL_TICKS_CL", "35"))
 INITIAL_SL_TICKS_GC = int(os.getenv("INITIAL_SL_TICKS_GC", "35"))
 
-# Lookback de velas de 5m (mantiene compatibilidad)
-VWAP_SLOPE_LOOKBACK_BARS = int(os.getenv("VWAP_SLOPE_LOOKBACK_BARS", "7"))
-MIN_VWAP_SLOPE_TICKS = int(os.getenv("MIN_VWAP_SLOPE_TICKS", "2"))
+# Distancia de activación de entrada al VWAP: 5 ticks exactos para todos los símbolos
+VWAP_TRIGGER_DISTANCE_TICKS = int(os.getenv("VWAP_TRIGGER_DISTANCE_TICKS", "5"))
+VWAP_TRIGGER_DISTANCE_TICKS_ES = VWAP_TRIGGER_DISTANCE_TICKS
 
-# Umbrales de pendiente por símbolo (compatibilidad)
-MIN_SLOPE_POINTS_BY_SYMBOL = {
-    "ES": 1.0, "MES": 1.0, "NQ": 1.5, "MNQ": 1.5,
-    "YM": 2.0, "MYM": 2.0, "RTY": 0.30, "M2K": 0.30,
-    "CL": 0.03, "MCL": 0.03, "GC": 1.0, "MGC": 1.0
-}
+def get_vwap_trigger_distance_ticks(symbol: str) -> int:
+    """Devuelve la distancia máxima en ticks al VWAP para activar la entrada (5 ticks exactos)."""
+    return VWAP_TRIGGER_DISTANCE_TICKS
 
+# Umbrales de pendiente por símbolo: mínimo 1 tick del activo
 def get_min_slope_points(symbol: str) -> float:
-    return MIN_SLOPE_POINTS_BY_SYMBOL.get((symbol or "").upper(), 1.0)
+    s = (symbol or "").upper()
+    spec = SUPPORTED_SYMBOLS.get(s, {})
+    return float(spec.get("tickSize", 0.25) * MIN_VWAP_SLOPE_TICKS)
 
 # Filtro Horario de Inicio de Sesión CME: 0 minutos (apertura inmediata a las 18:00 ET)
 CME_OPEN_BUFFER_MINUTES = int(os.getenv("CME_OPEN_BUFFER_MINUTES", "0"))
@@ -250,16 +251,6 @@ def get_micro_shield_sl_ticks(symbol: str) -> int:
     sl_init = get_default_sl_ticks(symbol)
     shield = round(sl_init * (15.0 / 35.0))
     return max(shield, 10)
-
-# Distancia máxima al VWAP para activación de entrada (en ticks)
-# ES: 15 ticks (3.75 pts). Se escala proporcionalmente para cada símbolo según su SL base.
-VWAP_TRIGGER_DISTANCE_TICKS_ES = int(os.getenv("VWAP_TRIGGER_DISTANCE_TICKS_ES", "15"))
-
-def get_vwap_trigger_distance_ticks(symbol: str) -> int:
-    """Devuelve la distancia máxima en ticks al VWAP para activar la entrada según la volatilidad del símbolo."""
-    sl_init = get_default_sl_ticks(symbol)
-    ratio = VWAP_TRIGGER_DISTANCE_TICKS_ES / float(INITIAL_SL_TICKS_ES)
-    return max(round(sl_init * ratio), 1)
 
 # Símbolos habilitados por defecto en el arranque (Minis y Micros habilitados simultáneamente)
 DEFAULT_ENABLED_SYMBOLS_STR = os.getenv("ENABLED_SYMBOLS", "ES,NQ,MES,MNQ")
