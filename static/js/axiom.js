@@ -726,10 +726,18 @@ document.addEventListener('DOMContentLoaded', () => {
                 ? parseFloat(r.Precio_Salida_Real).toLocaleString('en-US', { minimumFractionDigits: 2 })
                 : (r.Precio_Salida_Real || '--.--');
             
-            // Hito Alcanzado Badge
-            const hito = r.Hito_Alcanzado || 'Inicial';
-            let hitoBadge = `<span style="color:#64748B; font-size:11px;">Inicial</span>`;
-            if (hito.includes('Hito 4')) {
+            // Bracket OCO / Tipo Cierre Badge
+            const hito = r.Hito_Alcanzado || 'Fijo (OCO)';
+            let hitoBadge = `<span style="color:#64748B; font-size:11px;">${escapeHtml(hito)}</span>`;
+            if (hito.includes('Take Profit') || hito.includes('TP (Fijo)')) {
+                hitoBadge = `<span class="badge" style="background:rgba(16,185,129,0.15); color:#10B981; border:1px solid #10B981; font-weight:600;">🎯 ${escapeHtml(hito)}</span>`;
+            } else if (hito.includes('Stop Loss') || hito.includes('SL (Fijo)')) {
+                hitoBadge = `<span class="badge" style="background:rgba(239,68,68,0.15); color:#EF4444; border:1px solid #EF4444; font-weight:600;">🛑 ${escapeHtml(hito)}</span>`;
+            } else if (hito.includes('Break-Even')) {
+                hitoBadge = `<span class="badge" style="background:rgba(59,130,246,0.15); color:#3B82F6; border:1px solid #3B82F6; font-weight:600;">⚖️ ${escapeHtml(hito)}</span>`;
+            } else if (hito.includes('Fijo (OCO)')) {
+                hitoBadge = `<span class="badge" style="background:rgba(100,116,139,0.15); color:#94A3B8; border:1px solid #64748B;">🔒 ${escapeHtml(hito)}</span>`;
+            } else if (hito.includes('Hito 4')) {
                 hitoBadge = `<span class="badge badge-hito-4">${escapeHtml(hito)}</span>`;
             } else if (hito.includes('Hito 3')) {
                 hitoBadge = `<span class="badge badge-hito-3">${escapeHtml(hito)}</span>`;

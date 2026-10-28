@@ -160,6 +160,8 @@ class AxiomEngine:
     @staticmethod
     def format_milestone(stage: float) -> str:
         """Formatea el hito alcanzado según el avance de TP y blindaje de SL (+5t en Hito 1, +25% en Hito 2+)."""
+        if not USE_DYNAMIC_TRAILING:
+            return "Fijo (OCO)"
         if stage >= 2:
             trig_k = 25.0 + ((stage - 1) * 25.0)
             sl_k = (stage - 1) * 25.0
@@ -1353,25 +1355,6 @@ class AxiomEngine:
             if p_salida is None:
                 p_salida = float(trade.get("current_price", precio_entrada))
 
-            # Asegurar que max_pct y stage reflejen al menos el recorrido favorable de salida
-            d_base = float(trade.get("base_tp_pts", 0.0))
-            if p_salida is not None and precio_entrada > 0:
-                diff_pts = (p_salida - precio_entrada) if direccion == "LONG" else (precio_entrada - p_salida)
-                if d_base > 0 and diff_pts > 0:
-                    exit_pct = (diff_pts / d_base) * 100.0
-                    max_pct = max(max_pct, exit_pct)
-                    if max_pct >= HITO_1_TRIGGER_PCT and stage < 1:
-                        stage = 1
-                    if max_pct >= HITO_2_TRIGGER_PCT and stage < 2:
-                        stage = 2
-                    if max_pct >= HITO_3_TRIGGER_PCT and stage < 3:
-                        stage = 3
-                    if max_pct >= HITO_4_TRIGGER_PCT:
-                        runner_tier = 4 + int((max_pct - HITO_4_TRIGGER_PCT) // RUNNER_STEP_PCT)
-                        if runner_tier > stage:
-                            stage = runner_tier
-            hito_desc = self.format_milestone(stage)
-                
             spec = SUPPORTED_SYMBOLS.get(sym, {"pointValue": 50.0})
             pt_val = spec.get("pointValue", 50.0)
             
@@ -1393,6 +1376,33 @@ class AxiomEngine:
                     motivo_cierre = "Stop Loss alcanzado en TopstepX (Fijo)"
                 elif gross_pnl == 0:
                     motivo_cierre = "Break-Even alcanzado en TopstepX"
+
+            if USE_DYNAMIC_TRAILING:
+                # Asegurar que max_pct y stage reflejen al menos el recorrido favorable de salida
+                d_base = float(trade.get("base_tp_pts", 0.0))
+                if p_salida is not None and precio_entrada > 0:
+                    diff_pts = (p_salida - precio_entrada) if direccion == "LONG" else (precio_entrada - p_salida)
+                    if d_base > 0 and diff_pts > 0:
+                        exit_pct = (diff_pts / d_base) * 100.0
+                        max_pct = max(max_pct, exit_pct)
+                        if max_pct >= HITO_1_TRIGGER_PCT and stage < 1:
+                            stage = 1
+                        if max_pct >= HITO_2_TRIGGER_PCT and stage < 2:
+                            stage = 2
+                        if max_pct >= HITO_3_TRIGGER_PCT and stage < 3:
+                            stage = 3
+                        if max_pct >= HITO_4_TRIGGER_PCT:
+                            runner_tier = 4 + int((max_pct - HITO_4_TRIGGER_PCT) // RUNNER_STEP_PCT)
+                            if runner_tier > stage:
+                                stage = runner_tier
+                hito_desc = self.format_milestone(stage)
+            else:
+                if gross_pnl is not None and gross_pnl > 0:
+                    hito_desc = "Take Profit (Fijo)"
+                elif gross_pnl is not None and gross_pnl < 0:
+                    hito_desc = "Stop Loss (Fijo)"
+                else:
+                    hito_desc = "Break-Even (Fijo)"
             
             self.log(
                 f"🏁 [{sym}] Operación CERRADA ({direccion}) | Apertura: {hora_apertura} | Cierre: {hora_actual} | In: {precio_entrada:.2f} | Out: {p_salida:.2f} | "
@@ -1728,28 +1738,36 @@ class AxiomEngine:
                             net_pnl = round(gross_pnl - comms, 2)
                             sign = "+" if net_pnl >= 0 else ""
                             
-                            # Actualizar Hito alcanzado si la operación tuvo avance positivo
-                            curr_hito = r.get("Hito_Alcanzado") or "Inicial"
-                            if curr_hito in ("Inicial", "N/A", "") and diff_pts > 0:
-                                spec = SUPPORTED_SYMBOLS.get(sym, {"tickSize": 0.25})
-                                tick_size = spec.get("tickSize", 0.25)
-                                try:
-                                    tp_ticks = float(r.get("TP_Ticks", 0) or 0)
-                                except Exception:
-                                    tp_ticks = 0
-                                d_base = (tp_ticks * tick_size) if tp_ticks > 0 else (15 * tick_size)
-                                if d_base > 0:
-                                    pct = (diff_pts / d_base) * 100.0
-                                    stg = 0
-                                    if pct >= HITO_MICRO_TRIGGER_PCT: stg = 0.5
-                                    if pct >= HITO_1_TRIGGER_PCT: stg = 1
-                                    if pct >= HITO_2_TRIGGER_PCT: stg = 2
-                                    if pct >= HITO_3_TRIGGER_PCT: stg = 3
-                                    if pct >= HITO_4_TRIGGER_PCT:
-                                        stg = 4 + int((pct - HITO_4_TRIGGER_PCT) // RUNNER_STEP_PCT)
-                                    if stg > 0:
-                                        r["Hito_Alcanzado"] = self.format_milestone(stg)
-                                        r["Max_Pct_TP"] = f"{pct:.1f}%"
+                            # Actualizar Hito / Tipo Cierre alcanzado
+                            if USE_DYNAMIC_TRAILING:
+                                curr_hito = r.get("Hito_Alcanzado") or "Inicial"
+                                if curr_hito in ("Inicial", "N/A", "") and diff_pts > 0:
+                                    spec = SUPPORTED_SYMBOLS.get(sym, {"tickSize": 0.25})
+                                    tick_size = spec.get("tickSize", 0.25)
+                                    try:
+                                        tp_ticks = float(r.get("TP_Ticks", 0) or 0)
+                                    except Exception:
+                                        tp_ticks = 0
+                                    d_base = (tp_ticks * tick_size) if tp_ticks > 0 else (15 * tick_size)
+                                    if d_base > 0:
+                                        pct = (diff_pts / d_base) * 100.0
+                                        stg = 0
+                                        if pct >= HITO_MICRO_TRIGGER_PCT: stg = 0.5
+                                        if pct >= HITO_1_TRIGGER_PCT: stg = 1
+                                        if pct >= HITO_2_TRIGGER_PCT: stg = 2
+                                        if pct >= HITO_3_TRIGGER_PCT: stg = 3
+                                        if pct >= HITO_4_TRIGGER_PCT:
+                                            stg = 4 + int((pct - HITO_4_TRIGGER_PCT) // RUNNER_STEP_PCT)
+                                        if stg > 0:
+                                            r["Hito_Alcanzado"] = self.format_milestone(stg)
+                                            r["Max_Pct_TP"] = f"{pct:.1f}%"
+                            else:
+                                if gross_pnl > 0:
+                                    r["Hito_Alcanzado"] = "Take Profit (Fijo)"
+                                elif gross_pnl < 0:
+                                    r["Hito_Alcanzado"] = "Stop Loss (Fijo)"
+                                else:
+                                    r["Hito_Alcanzado"] = "Break-Even (Fijo)"
                             
                             r["Estado"] = f"CERRADA ({sign}${net_pnl:.2f} USD)"
                             r["Precio_Salida_Real"] = f"{p_salida:.2f}"
