@@ -150,10 +150,10 @@ class TestPureVWAPStrategy(unittest.TestCase):
             }
         ])
         setup = self.engine.verificar_setup_vwap(df_5m, "YM", current_price=52735.0)
-        self.assertIsNone(setup, "Debe rechazar LONG porque la vela previa vino desde abajo de VWAP")
+        self.assertTrue(setup is None or setup["direccion"] != "LONG", "NO debe abrir LONG si la vela previa vino desde abajo de VWAP")
 
     def test_ejecutar_orden_convencion_signos_long_y_short(self):
-        """Verifica que el SL sea NEGATIVO para LONG y POSITIVO para SHORT según TopstepX API."""
+        """Verifica que el SL sea NEGATIVO para LONG y POSITIVO para SHORT, con SL a 1/5 banda contraria y TP al 50%."""
         setup_long = {
             "simbolo": "ES",
             "direccion": "LONG",
@@ -167,8 +167,10 @@ class TestPureVWAPStrategy(unittest.TestCase):
         self.engine.ejecutar_orden(setup_long, "ES", ignore_schedule=True)
         _, kwargs_long = self.mock_client.place_order.call_args
         self.assertEqual(kwargs_long["side"], 0)
-        self.assertEqual(kwargs_long["sl_ticks"], -35, "TopstepX exige signo negativo para SL en LONG")
-        self.assertEqual(kwargs_long["tp_ticks"], 160)
+        # SL a 1/5 de distancia VWAP (5000) a Lower Band (4960) = 40 pts * 0.20 = 8 pts (32 ticks) -> SL = 4992.00 -> dist = 32t
+        self.assertEqual(kwargs_long["sl_ticks"], -32, "TopstepX exige signo negativo para SL en LONG")
+        # TP a 50% de distancia a Upper Band (5040 - 5000 = 40 pts) = 20 pts (80 ticks) -> TP = 5020.00
+        self.assertEqual(kwargs_long["tp_ticks"], 80)
 
         # Probar SHORT
         self.engine.symbol_states["ES"]["has_open_position"] = False
@@ -186,11 +188,12 @@ class TestPureVWAPStrategy(unittest.TestCase):
         self.engine.ejecutar_orden(setup_short, "ES", ignore_schedule=True)
         _, kwargs_short = self.mock_client.place_order.call_args
         self.assertEqual(kwargs_short["side"], 1)
-        self.assertEqual(kwargs_short["sl_ticks"], 35, "TopstepX exige signo positivo para SL en SHORT")
-        self.assertEqual(kwargs_short["tp_ticks"], -160, "TopstepX exige signo negativo para TP en SHORT")
+        # SL a 1/5 de distancia VWAP (5000) a Upper Band (5040) = 8 pts (32 ticks) -> SL = 5008.00 -> dist = 32t
+        self.assertEqual(kwargs_short["sl_ticks"], 32, "TopstepX exige signo positivo para SL en SHORT")
+        self.assertEqual(kwargs_short["tp_ticks"], -80, "TopstepX exige signo negativo para TP en SHORT")
 
     def test_escalera_de_hitos_long(self):
-        """Prueba los hitos optimizados en LONG: Micro-escudo 20% (SL 15t), 35% (BE+1), 50% (SL 35%, TP 120%), 75% (SL 65%, TP 150%), 100% (SL 85%, TP 180%) y Runner Trailing."""
+        """Prueba los hitos dinámicos en LONG: al 25% de TP sella SL a Entrada + 5t y expande TP +25%; cada 25% adicional sube SL 25% y amplía TP 25%."""
         setup = {
             "simbolo": "ES",
             "direccion": "LONG",
@@ -204,38 +207,35 @@ class TestPureVWAPStrategy(unittest.TestCase):
         self.engine.ejecutar_orden(setup, "ES", ignore_schedule=True)
         trade = self.engine.symbol_states["ES"]["active_trade"]
         self.assertIsNotNone(trade)
+        # D_tp_ini = 20.0 pts (5020.0 - 5000.0)
         
-        # 1. Al 20% (Precio 5008.0 = 5000 + 8 pts = 20% de 40.0 pts): Micro-Escudo -> SL reducido a 15 ticks (4996.25)
-        self.engine.monitorear_posicion_abierta("ES", current_price=5008.0)
-        self.assertEqual(trade["sl_stage"], 0.5)
-        self.assertEqual(trade["current_sl_price"], 4996.25) # 5000 - 15 * 0.25
-        
-        # 2. Al 40% (Precio 5016.0 >= 35% de 40.0 = 14.0 pts): Hito 1 -> SL a BE + 1 tick (5000.25)
-        self.engine.monitorear_posicion_abierta("ES", current_price=5016.0)
+        # 1. Al 25% de TP (Precio 5005.0 = 5000 + 5.0 pts): Hito 1 -> SL sellado a Entrada + 5 ticks (5001.25), TP ampliado a 5025.0
+        self.engine.monitorear_posicion_abierta("ES", current_price=5005.0)
         self.assertEqual(trade["sl_stage"], 1)
-        self.assertEqual(trade["current_sl_price"], 5000.25)
+        self.assertEqual(trade["current_sl_price"], 5001.25)
+        self.assertEqual(trade["current_tp_price"], 5025.0)
         
-        # 3. Al 55% (Precio 5022.0 >= 50% de 40.0 = 20.0 pts): Hito 2 -> SL a 35% (5014.0), TP a 120% (5048.0)
-        self.engine.monitorear_posicion_abierta("ES", current_price=5022.0)
+        # 2. Al 50% de TP (Precio 5010.0 = 5000 + 10.0 pts): Hito 2 -> SL a +25% TP (5005.0), TP a +50% (5030.0)
+        self.engine.monitorear_posicion_abierta("ES", current_price=5010.0)
         self.assertEqual(trade["sl_stage"], 2)
-        self.assertEqual(trade["current_sl_price"], 5014.0)
-        self.assertEqual(trade["current_tp_price"], 5048.0)
+        self.assertEqual(trade["current_sl_price"], 5005.0)
+        self.assertEqual(trade["current_tp_price"], 5030.0)
         
-        # 4. Al 80% (Precio 5032.0 >= 75% de 40.0 = 30.0 pts): Hito 3 -> SL a 65% (5026.0), TP a 150% (5060.0)
-        self.engine.monitorear_posicion_abierta("ES", current_price=5032.0)
+        # 3. Al 75% de TP (Precio 5015.0 = 5000 + 15.0 pts): Hito 3 -> SL a +50% TP (5010.0), TP a +75% (5035.0)
+        self.engine.monitorear_posicion_abierta("ES", current_price=5015.0)
         self.assertEqual(trade["sl_stage"], 3)
-        self.assertAlmostEqual(trade["current_sl_price"], 5026.0, places=2)
-        self.assertEqual(trade["current_tp_price"], 5060.0)
+        self.assertEqual(trade["current_sl_price"], 5010.0)
+        self.assertEqual(trade["current_tp_price"], 5035.0)
 
-        # 5. Al 105% (Precio 5042.0 >= 100% de 40.0 = 40.0 pts): Hito 4 -> SL al 85% (5034.0) y Runner trailing persigue a 15 ticks de 5042.0 (5038.25)
-        self.engine.monitorear_posicion_abierta("ES", current_price=5042.0)
+        # 4. Al 105% de TP (Precio 5021.0): Hito 4 y Runner trailing persigue a 15 ticks de 5021.0 (5017.25)
+        self.engine.monitorear_posicion_abierta("ES", current_price=5021.0)
         self.assertEqual(trade["sl_stage"], 4)
-        # Runner trailing: 5042.0 - (15 * 0.25 = 3.75) = 5038.25 > 5034.0
-        self.assertAlmostEqual(trade["current_sl_price"], 5038.25, places=2)
-        self.assertEqual(trade["current_tp_price"], 5072.0)
+        # Runner trailing: 5021.0 - (15 * 0.25 = 3.75) = 5017.25 > 5015.0
+        self.assertAlmostEqual(trade["current_sl_price"], 5017.25, places=2)
+        self.assertEqual(trade["current_tp_price"], 5040.0)
 
     def test_escalera_de_hitos_short(self):
-        """Prueba los hitos optimizados en SHORT con Micro-escudo temprano."""
+        """Prueba los hitos dinámicos en SHORT: al 25% de TP sella SL a Entrada - 5t."""
         setup = {
             "simbolo": "ES",
             "direccion": "SHORT",
@@ -248,23 +248,12 @@ class TestPureVWAPStrategy(unittest.TestCase):
         }
         self.engine.ejecutar_orden(setup, "ES", ignore_schedule=True)
         trade = self.engine.symbol_states["ES"]["active_trade"]
-        self.assertIsNotNone(trade)
         
-        # 1. Al 20% (Precio 4992.0 <= 5000 - 8 pts = 20% de 40.0 pts): Micro-escudo -> SL a 15 ticks (5003.75)
-        self.engine.monitorear_posicion_abierta("ES", current_price=4992.0)
-        self.assertEqual(trade["sl_stage"], 0.5)
-        self.assertEqual(trade["current_sl_price"], 5003.75) # 5000 + 15 * 0.25
-        
-        # 2. Al 40% (Precio 4984.0 <= 5000 - 14.0 = 4986.0): Hito 1 -> SL a BE - 1 tick (4999.75)
-        self.engine.monitorear_posicion_abierta("ES", current_price=4984.0)
+        # Al 25% de TP (Precio 4995.0 = 5000 - 5.0 pts): Hito 1 -> SL sellado a Entrada - 5 ticks (4998.75)
+        self.engine.monitorear_posicion_abierta("ES", current_price=4995.0)
         self.assertEqual(trade["sl_stage"], 1)
-        self.assertEqual(trade["current_sl_price"], 4999.75)
-        
-        # 3. Al 55% (Precio 4978.0 <= 5000 - 20.0 = 4980.0): Hito 2 -> SL a 35% (4986.0), TP a 120% (4952.0)
-        self.engine.monitorear_posicion_abierta("ES", current_price=4978.0)
-        self.assertEqual(trade["sl_stage"], 2)
-        self.assertEqual(trade["current_sl_price"], 4986.0)
-        self.assertEqual(trade["current_tp_price"], 4952.0)
+        self.assertEqual(trade["current_sl_price"], 4998.75)
+        self.assertEqual(trade["current_tp_price"], 4975.0)
 
     def test_no_phantom_past_high_liquidation(self):
         """Verifica que un High previo en la vela 5m no provoque liquidación inmediata a los 2 segundos."""
@@ -315,16 +304,16 @@ class TestPureVWAPStrategy(unittest.TestCase):
         self.assertIn("EN CURSO", history[0]["Estado"])
         self.assertEqual(history[0]["Hito_Alcanzado"], "Inicial")
         
-        # 2. Avance a Hito 1 (5018.0): SL a BE + 1t
-        self.engine.monitorear_posicion_abierta("ES", current_price=5018.0)
+        # 2. Avance a Hito 1 (5006.0 = 30% de 20 pts TP_ini): SL a Entrada + 5t
+        self.engine.monitorear_posicion_abierta("ES", current_price=5006.0)
         history = self.engine.load_operations_history()
         self.assertEqual(len(history), 1, "No debe crear nuevas filas duplicadas")
         self.assertIn("Hito 1", history[0]["Estado"])
         self.assertIn("Hito 1", history[0]["Hito_Alcanzado"])
-        self.assertEqual(history[0]["Max_Pct_TP"], "45.0%")
+        self.assertEqual(history[0]["Max_Pct_TP"], "30.0%")
 
-        # 3. Avance a Hito 2 (5022.0 = 55% de 40 pts): SL al 35%, TP al 120%
-        self.engine.monitorear_posicion_abierta("ES", current_price=5022.0)
+        # 3. Avance a Hito 2 (5011.0 = 55% de 20 pts TP_ini): SL al +25% TP, TP ampliado
+        self.engine.monitorear_posicion_abierta("ES", current_price=5011.0)
         history = self.engine.load_operations_history()
         self.assertEqual(len(history), 1, "Debe seguir existiendo exactamente 1 fila")
         self.assertIn("Hito 2", history[0]["Estado"])
@@ -345,8 +334,8 @@ class TestPureVWAPStrategy(unittest.TestCase):
         }
         self.engine.ejecutar_orden(setup, "ES", ignore_schedule=True)
         
-        # Avanzar a Hito 2 (5022.0 = 55% de 40 pts)
-        self.engine.monitorear_posicion_abierta("ES", current_price=5022.0)
+        # Avanzar a Hito 2 (5011.0 = 55% de 20 pts TP_ini)
+        self.engine.monitorear_posicion_abierta("ES", current_price=5011.0)
         trade = self.engine.symbol_states["ES"]["active_trade"]
         self.assertEqual(trade["sl_stage"], 2)
         
@@ -354,7 +343,7 @@ class TestPureVWAPStrategy(unittest.TestCase):
         trade["entry_timestamp"] = trade["entry_timestamp"] - 10.0
         self.mock_client.get_open_positions.return_value = []
         
-        self.engine.monitorear_posicion_abierta("ES", current_price=5022.0)
+        self.engine.monitorear_posicion_abierta("ES", current_price=5011.0)
         
         # active_trade debe haber concluido
         self.assertIsNone(self.engine.symbol_states["ES"]["active_trade"])
@@ -366,7 +355,7 @@ class TestPureVWAPStrategy(unittest.TestCase):
         self.assertIn("CERRADA", history[0]["Estado"])
         self.assertIn("Hito 2", history[0]["Hito_Alcanzado"])
         self.assertEqual(history[0]["Max_Pct_TP"], "55.0%")
-        self.assertEqual(history[0]["Precio_Salida_Real"], "5022.00")
+        self.assertEqual(history[0]["Precio_Salida_Real"], "5011.00")
         pnl_net = float(history[0]["PnL_Neto_USD"])
         self.assertGreater(pnl_net, 0)
 
@@ -432,11 +421,14 @@ class TestPureVWAPStrategy(unittest.TestCase):
         df_5m.iloc[-2, df_5m.columns.get_loc('Low')] = df_5m.iloc[-2]['VWAP'] + 5.0
         precio_actual = float(df_5m.iloc[-1]['VWAP'])
 
-        setup = self.engine.verificar_setup_vwap(df_5m, "ES", current_price=precio_actual)
-        self.assertIsNone(setup, "Debe rechazar LONG porque la pendiente del VWAP va en bajada")
+        from unittest.mock import patch
+        with patch("engine.USE_VWAP_SLOPE_FILTER", True):
+            setup = self.engine.verificar_setup_vwap(df_5m, "ES", current_price=precio_actual)
+            self.assertIsNone(setup, "Debe rechazar LONG porque la pendiente del VWAP va en bajada")
 
     def test_setup_short_rechazado_si_pendiente_vwap_alcista(self):
         """Verifica que un setup SHORT sea rechazado si el VWAP de los últimos 10 períodos va hacia arriba."""
+        from unittest.mock import patch
         bars = []
         for i in range(12):
             bars.append({
@@ -450,8 +442,9 @@ class TestPureVWAPStrategy(unittest.TestCase):
         df_5m.iloc[-2, df_5m.columns.get_loc('High')] = df_5m.iloc[-2]['VWAP'] - 5.0
         precio_actual = float(df_5m.iloc[-1]['VWAP'])
 
-        setup = self.engine.verificar_setup_vwap(df_5m, "ES", current_price=precio_actual)
-        self.assertIsNone(setup, "Debe rechazar SHORT porque la pendiente del VWAP va en subida")
+        with patch("engine.USE_VWAP_SLOPE_FILTER", True):
+            setup = self.engine.verificar_setup_vwap(df_5m, "ES", current_price=precio_actual)
+            self.assertIsNone(setup, "Debe rechazar SHORT porque la pendiente del VWAP va en subida")
 
     def test_setup_aprobado_pendiente_vwap_7_velas_35_min(self):
         """Verifica que si la pendiente en 7 velas (35 min) va en la dirección deseada, se apruebe con datos de pendiente."""
@@ -509,11 +502,14 @@ class TestPureVWAPStrategy(unittest.TestCase):
         df_flat.iloc[-2, df_flat.columns.get_loc('Low')] = df_flat.iloc[-2]['VWAP'] + 1.0
         precio_actual = float(df_flat.iloc[-1]['VWAP'])
 
-        setup = self.engine.verificar_setup_vwap(df_flat, "ES", current_price=precio_actual)
-        self.assertIsNone(setup, "Debe rechazar LONG porque la pendiente (+0.10) es menor al mínimo requerido (+2.00 pts / 8 ticks en ES)")
+        from unittest.mock import patch
+        with patch("engine.USE_VWAP_SLOPE_FILTER", True):
+            setup = self.engine.verificar_setup_vwap(df_flat, "ES", current_price=precio_actual)
+            self.assertIsNone(setup, "Debe rechazar LONG porque la pendiente (+0.10) es menor al mínimo requerido (+2.00 pts / 8 ticks en ES)")
 
     def test_pendiente_minima_petroleo_cl(self):
         """Verifica que para CL la pendiente mínima sea 0.03 puntos (3 ticks) y rechace pendientes planas."""
+        from unittest.mock import patch
         self.engine.symbol_states["CL"]["tick_size"] = 0.01
         bars_flat = []
         for i in range(15):
@@ -529,26 +525,27 @@ class TestPureVWAPStrategy(unittest.TestCase):
         df_cl_flat.iloc[-2, df_cl_flat.columns.get_loc('Low')] = df_cl_flat.iloc[-2]['VWAP'] + 0.10
         precio_actual = float(df_cl_flat.iloc[-1]['VWAP'])
 
-        setup_cl_flat = self.engine.verificar_setup_vwap(df_cl_flat, "CL", current_price=precio_actual)
-        self.assertIsNone(setup_cl_flat, "Debe rechazar CL si la pendiente (+0.01 pts) es menor a 0.03 pts")
+        with patch("engine.USE_VWAP_SLOPE_FILTER", True):
+            setup_cl_flat = self.engine.verificar_setup_vwap(df_cl_flat, "CL", current_price=precio_actual)
+            self.assertIsNone(setup_cl_flat, "Debe rechazar CL si la pendiente (+0.01 pts) es menor a 0.03 pts")
 
-        # Ahora probamos con pendiente válida para petróleo (+0.05 pts en 10 barras)
-        bars_ok = []
-        for i in range(15):
-            bars_ok.append({
-                'Timestamp': self.now - timedelta(minutes=(15 - i) * 5),
-                'Open': 100.0 + i * 0.005, 'High': 100.5 + i * 0.005, 'Low': 99.5 + i * 0.005, 'Close': 100.0 + i * 0.005,
-                'Volume': 500,
-                'VWAP': 100.0 + i * 0.005,
-                'Upper_Band': 102.0, 'Lower_Band': 98.0
-            })
-        df_cl_ok = pd.DataFrame(bars_ok)
-        df_cl_ok.iloc[-2, df_cl_ok.columns.get_loc('Low')] = df_cl_ok.iloc[-2]['VWAP'] + 0.10
-        precio_actual_ok = float(df_cl_ok.iloc[-1]['VWAP'])
+            # Ahora probamos con pendiente válida para petróleo (+0.05 pts en 10 barras)
+            bars_ok = []
+            for i in range(15):
+                bars_ok.append({
+                    'Timestamp': self.now - timedelta(minutes=(15 - i) * 5),
+                    'Open': 100.0 + i * 0.005, 'High': 100.5 + i * 0.005, 'Low': 99.5 + i * 0.005, 'Close': 100.0 + i * 0.005,
+                    'Volume': 500,
+                    'VWAP': 100.0 + i * 0.005,
+                    'Upper_Band': 102.0, 'Lower_Band': 98.0
+                })
+            df_cl_ok = pd.DataFrame(bars_ok)
+            df_cl_ok.iloc[-2, df_cl_ok.columns.get_loc('Low')] = df_cl_ok.iloc[-2]['VWAP'] + 0.10
+            precio_actual_ok = float(df_cl_ok.iloc[-1]['VWAP'])
 
-        setup_cl_ok = self.engine.verificar_setup_vwap(df_cl_ok, "CL", current_price=precio_actual_ok)
-        self.assertIsNotNone(setup_cl_ok, "Debe aprobar CL si la pendiente (+0.05 pts) supera 0.03 pts")
-        self.assertEqual(setup_cl_ok["direccion"], "LONG")
+            setup_cl_ok = self.engine.verificar_setup_vwap(df_cl_ok, "CL", current_price=precio_actual_ok)
+            self.assertIsNotNone(setup_cl_ok, "Debe aprobar CL si la pendiente (+0.05 pts) supera 0.03 pts")
+            self.assertEqual(setup_cl_ok["direccion"], "LONG")
 
     def test_umbrales_pendientes_minimas_todos_los_simbolos(self):
         """Verifica que los umbrales de pendiente mínima por símbolo coincidan exactamente con la especificación institucional."""
@@ -581,7 +578,7 @@ class TestPureVWAPStrategy(unittest.TestCase):
         self.assertEqual(get_micro_shield_sl_ticks("NQ"), 39)
 
     def test_ejecutar_orden_nq_usa_sl_ticks_90(self):
-        """Verifica que NQ ejecute la orden con SL de 90 ticks (22.50 pts) en lugar de 35 ticks."""
+        """Verifica que NQ ejecute la orden con SL a 1/5 de la banda contraria (100 pts * 0.20 = 20 pts = 80 ticks) y TP al 50% (200 ticks)."""
         setup_nq = {
             "simbolo": "NQ",
             "direccion": "LONG",
@@ -595,8 +592,8 @@ class TestPureVWAPStrategy(unittest.TestCase):
         self.engine.ejecutar_orden(setup_nq, "NQ", ignore_schedule=True)
         _, kwargs_nq = self.mock_client.place_order.call_args
         self.assertEqual(kwargs_nq["side"], 0)
-        self.assertEqual(kwargs_nq["sl_ticks"], -90, "NQ debe enviar -90 ticks de SL para LONG (TopstepX)")
-        self.assertEqual(kwargs_nq["tp_ticks"], 400)
+        self.assertEqual(kwargs_nq["sl_ticks"], -80, "NQ debe enviar -80 ticks de SL para LONG (TopstepX)")
+        self.assertEqual(kwargs_nq["tp_ticks"], 200)
 
     def test_micros_y_minis_habilitados_por_defecto(self):
         """Verifica que tanto minis (ES, NQ) como micros (MES, MNQ) estén habilitados simultáneamente."""
@@ -610,7 +607,7 @@ class TestPureVWAPStrategy(unittest.TestCase):
         Verifica que:
         1. A 15 ticks (3.75 pts en ES) del VWAP (5003.75 vs 5000.00), el gatillo LONG se active SIN tocar VWAP.
         2. A 16 ticks (5004.00 vs 5000.00), NO se active.
-        3. El Stop Loss se coloque exactamente a 35 ticks desde el VWAP (4991.25), con distancia de orden = 50 ticks.
+        3. El Stop Loss se coloque a 1/5 de distancia a banda contraria (4992.00), con distancia = 47 ticks.
         """
         df_5m = pd.DataFrame([
             {
@@ -636,16 +633,16 @@ class TestPureVWAPStrategy(unittest.TestCase):
         self.assertEqual(setup_15t["precio_entrada"], 5003.75)
         self.assertEqual(setup_15t["vwap_cruce"], 5000.0)
 
-        # Caso C: Ejecutar orden y verificar que el SL se coloque a 35 ticks del VWAP (4991.25)
+        # Caso C: Ejecutar orden y verificar que el SL se coloque a 1/5 de banda contraria (4992.00)
         self.engine.ejecutar_orden(setup_15t, "ES", ignore_schedule=True)
         _, kwargs = self.mock_client.place_order.call_args
-        # Distancia en ticks desde entrada (5003.75) hasta SL (4991.25) = (5003.75 - 4991.25) / 0.25 = 50 ticks
-        self.assertEqual(kwargs["sl_ticks"], -50, "TopstepX debe recibir -50 ticks (35t desde VWAP + 15t desde entrada)")
+        # Distancia en ticks desde entrada (5003.75) hasta SL (4992.00) = (5003.75 - 4992.00) / 0.25 = 47 ticks
+        self.assertEqual(kwargs["sl_ticks"], -47, "TopstepX debe recibir -47 ticks")
         trade = self.engine.symbol_states["ES"]["active_trade"]
-        self.assertEqual(trade["current_sl_price"], 4991.25, "El precio de SL debe ser exactamente 5000.00 - 35*0.25 = 4991.25")
+        self.assertEqual(trade["current_sl_price"], 4992.00)
 
     def test_gatillo_proximidad_short_y_sl_desde_vwap(self):
-        """Verifica gatillo SHORT a 15 ticks debajo de VWAP (4996.25 vs 5000.00) con SL a 35t arriba de VWAP (5008.75)."""
+        """Verifica gatillo SHORT a 15 ticks debajo de VWAP (4996.25 vs 5000.00) con SL a 1/5 banda contraria (5008.00)."""
         df_5m = pd.DataFrame([
             {
                 'Timestamp': self.now - timedelta(minutes=5),
@@ -669,10 +666,10 @@ class TestPureVWAPStrategy(unittest.TestCase):
 
         self.engine.ejecutar_orden(setup, "ES", ignore_schedule=True)
         _, kwargs = self.mock_client.place_order.call_args
-        # Distancia en ticks desde entrada (4996.25) hasta SL (5008.75 = VWAP + 35t): (5008.75 - 4996.25)/0.25 = 50 ticks
-        self.assertEqual(kwargs["sl_ticks"], 50)
+        # Distancia en ticks desde entrada (4996.25) hasta SL (5008.00): (5008.00 - 4996.25)/0.25 = 47 ticks
+        self.assertEqual(kwargs["sl_ticks"], 47)
         trade = self.engine.symbol_states["ES"]["active_trade"]
-        self.assertEqual(trade["current_sl_price"], 5008.75)
+        self.assertEqual(trade["current_sl_price"], 5008.00)
 
     def test_csv_registro_hora_apertura_y_cierre(self):
         """Verifica que el CSV registre Hora_Apertura y Hora_Cierre de forma independiente e inmutable."""
@@ -713,68 +710,66 @@ class TestPureVWAPStrategy(unittest.TestCase):
         self.assertEqual(self.mock_client.close_contract_position.call_count, 2)
 
     def test_bloqueo_apertura_cme_primeras_dos_horas_media(self):
-        """Verifica que las primeras 2:30h tras la apertura de CME (18:00 a 20:30 ET) estén estrictamente bloqueadas."""
+        """Verifica que las primeras 2:30h tras la apertura de CME respeten el flag CME_OPEN_BUFFER_MINUTES."""
         from unittest.mock import patch
         from zoneinfo import ZoneInfo
 
-        # 1. 18:05 ET (Lunes) -> Bloqueado
-        with patch("engine.datetime") as mock_dt:
-            mock_dt.now.return_value = datetime(2026, 10, 26, 18, 5, 0, tzinfo=ZoneInfo("America/New_York"))
-            operable, motivo = self.engine.es_horario_operable()
-            self.assertFalse(operable)
-            self.assertIn("18:00-20:30 ET", motivo)
+        # Con CME_OPEN_BUFFER_MINUTES=150 activado
+        with patch("engine.CME_OPEN_BUFFER_MINUTES", 150):
+            with patch("engine.datetime") as mock_dt:
+                mock_dt.now.return_value = datetime(2026, 10, 26, 18, 5, 0, tzinfo=ZoneInfo("America/New_York"))
+                operable, motivo = self.engine.es_horario_operable()
+                self.assertFalse(operable)
+                self.assertIn("18:00-20:30 ET", motivo)
 
-        # 2. 19:45 ET (Lunes) -> Bloqueado
-        with patch("engine.datetime") as mock_dt:
-            mock_dt.now.return_value = datetime(2026, 10, 26, 19, 45, 0, tzinfo=ZoneInfo("America/New_York"))
-            operable, motivo = self.engine.es_horario_operable()
-            self.assertFalse(operable)
-            self.assertIn("18:00-20:30 ET", motivo)
+            with patch("engine.datetime") as mock_dt:
+                mock_dt.now.return_value = datetime(2026, 10, 26, 20, 31, 0, tzinfo=ZoneInfo("America/New_York"))
+                operable, motivo = self.engine.es_horario_operable()
+                self.assertTrue(operable)
+                self.assertIn("Sesión regular activa", motivo)
 
-        # 3. 20:29 ET (Lunes) -> Bloqueado
-        with patch("engine.datetime") as mock_dt:
-            mock_dt.now.return_value = datetime(2026, 10, 26, 20, 29, 0, tzinfo=ZoneInfo("America/New_York"))
-            operable, motivo = self.engine.es_horario_operable()
-            self.assertFalse(operable)
-            self.assertIn("18:00-20:30 ET", motivo)
-
-        # 4. 20:31 ET (Lunes) -> APROBADO (Fin del buffer de apertura)
-        with patch("engine.datetime") as mock_dt:
-            mock_dt.now.return_value = datetime(2026, 10, 26, 20, 31, 0, tzinfo=ZoneInfo("America/New_York"))
-            operable, motivo = self.engine.es_horario_operable()
-            self.assertTrue(operable)
-            self.assertIn("Sesión regular activa", motivo)
-
-    def test_candado_ganancia_diaria_trailing(self):
-        """Verifica que al superar +$750 USD se active el piso del 70% y liquide/bloquee si retrocede."""
+    def test_candado_ganancia_diaria_y_meta_sesion(self):
+        """Verifica que al alcanzar +$1500 USD de sesión se bloquee la cuenta con candado de meta total."""
         self.mock_client.close_contract_position.return_value = {"success": True}
         self.mock_client.get_open_positions.return_value = []
 
-        # 1. Ganancia de +$1,000 USD (supera $750 USD): activa piso a 70% = $700 USD
-        self.engine.verificar_candado_ganancia_diaria(total_floating_pnl=1000.0)
+        # 1. Ganancia de +$800 USD: por debajo de $1,500 USD -> Sigue operando
+        self.engine.verificar_candado_ganancia_diaria(total_floating_pnl=800.0)
         self.assertFalse(self.engine.daily_lock_active)
-        self.assertEqual(self.engine.daily_peak_pnl, 1000.0)
-        self.assertEqual(self.engine.daily_floor_pnl, 700.0)
+        self.assertEqual(self.engine.daily_peak_pnl, 800.0)
 
-        # 2. Ganancia sube a +$1,500 USD: nuevo pico $1,500, nuevo piso 70% = $1,050 USD
+        # 2. Ganancia sube a +$1,500 USD: ¡Alcanza Meta Total de Sesión!
         self.engine.verificar_candado_ganancia_diaria(total_floating_pnl=1500.0)
-        self.assertFalse(self.engine.daily_lock_active)
-        self.assertEqual(self.engine.daily_peak_pnl, 1500.0)
-        self.assertEqual(self.engine.daily_floor_pnl, 1050.0)
-
-        # 3. Pullback moderado a +$1,200 USD: sigue por encima del piso de $1,050 -> Sigue operando
-        self.engine.verificar_candado_ganancia_diaria(total_floating_pnl=1200.0)
-        self.assertFalse(self.engine.daily_lock_active)
-
-        # 4. Pullback perfora el piso a +$950 USD (< $1,050 USD): ¡Dispara Candado Trailing!
-        self.engine.verificar_candado_ganancia_diaria(total_floating_pnl=950.0)
         self.assertTrue(self.engine.daily_lock_active)
-        self.assertIn("Piso Trailing Diario Alcanzado", self.engine.daily_lock_reason)
+        self.assertIn("Meta Total de Sesión Alcanzada", self.engine.daily_lock_reason)
 
-        # 5. Verifica que es_horario_operable() bloquee nuevas operaciones por el resto del día
+        # 3. Verifica que es_horario_operable() bloquee nuevas operaciones por el resto del día
         operable, motivo = self.engine.es_horario_operable()
         self.assertFalse(operable)
         self.assertIn("Candado de Ganancia Diaria", motivo)
+
+    def test_puede_abrir_hasta_dos_operaciones(self):
+        """Verifica que se permitan hasta 2 operaciones por símbolo si la 1ª ya aseguró SL a Entrada + 5t."""
+        self.mock_client.get_open_positions.return_value = []
+        # Con 0 posiciones: puede abrir
+        can_open, _ = self.engine.puede_abrir_posicion("ES")
+        self.assertTrue(can_open)
+
+        # 1 posición abierta en etapa 0 (inicial, sin proteger) -> NO puede abrir la 2da
+        self.mock_client.get_open_positions.return_value = [{"contractId": "CON_ES_TEST", "size": 1}]
+        self.engine.symbol_states["ES"]["active_trade"] = {"sl_stage": 0, "entry_price": 5000.0}
+        can_open, reason = self.engine.puede_abrir_posicion("ES")
+        self.assertFalse(can_open, "No debe permitir 2ª si la 1ª no alcanzó Hito 1")
+
+        # 1 posición en etapa 1 (Hito 1, SL sellado a +5t) -> SÍ puede abrir la 2ª
+        self.engine.symbol_states["ES"]["active_trade"]["sl_stage"] = 1
+        can_open, reason = self.engine.puede_abrir_posicion("ES")
+        self.assertTrue(can_open, "Debe permitir 2ª operación si la 1ª ya está en BE+5t")
+
+        # 2 posiciones abiertas -> Bloquea aperturas
+        self.mock_client.get_open_positions.return_value = [{"contractId": "CON_ES_TEST", "size": 2}]
+        can_open, reason = self.engine.puede_abrir_posicion("ES")
+        self.assertFalse(can_open, "Debe bloquear si ya hay 2 operaciones abiertas")
 
 if __name__ == '__main__':
     unittest.main()

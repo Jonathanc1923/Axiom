@@ -9,12 +9,18 @@ Plataforma web institucional de trading algorítmico y ejecución cuantitativa p
 **Axiom Algorithmic (v2.0)** implementa un modelo cuantitativo institucional de reversión a la media de alta frecuencia basado exclusivamente en el **VWAP de Sesión (Volume-Weighted Average Price)** y bandas de desviación estándar (+1σ / -1σ) sincronizadas con el ciclo horario de los mercados de futuros CME (reinicio diario a las 18:00 ET / New York).
 
 ### Módulos Principales:
-- **Estrategia Pura VWAP Touch (Cero Volumen)**: Disparo instantáneo a mercado al tocar o traspasar la línea de VWAP, con filtro estricto de contexto en 5m (la vela previa debe haber estado 100% en cuerpo y mecha del lado del rebote).
-- **Gestión Dinámica de Riesgo OCO Universal**: Stop Loss inicial fijo de 25 ticks para todos los instrumentos y Take Profit inicial proyectado a la banda lateral correspondiente ($D_{base}$).
-- **Escalera de Trailing Stop de Alta Frecuencia (2 Segundos)**:
-  - **Hito 1 (Avance $\ge 40\%$ de $D_{base}$)**: Mueve SL a Entrada + 1 tick (Break-Even protegido).
-  - **Hito 2 (Avance $\ge 70\%$ de $D_{base}$)**: Asegura SL al 45% de $D_{base}$ y amplía TP al 120% de $D_{base}$.
-  - **Hito 3 (Avance $\ge 120\%$ de $D_{base}$)**: Asegura SL al 108% de $D_{base}$ (90% del nivel 120%) y sube TP al 150% de $D_{base}$ (límite máximo final).
+- **Estrategia VWAP Dynamic Reversion**: Disparo instantáneo a mercado al acercarse o tocar la línea de VWAP, con filtro estricto de contexto de la vela previa en 5m (separación mínima de 1 tick respecto al VWAP). No depende de la pendiente/tendencia.
+- **Piramidación Protegida (Hasta 2 Operaciones por Símbolo)**: Permite abrir una 2ª posición si la 1ª ya aseguró su Stop Loss en Entrada + 5 ticks a favor.
+- **Gestión Dinámica de Riesgo OCO**:
+  - **Stop Loss Inicial**: Exactamente a **1/5 (20%) de la distancia entre el VWAP y la banda contraria**.
+  - **Take Profit Inicial**: Al **50% de la distancia entre la entrada y la siguiente banda objetivo**.
+- **Escalera de Trailing Stop y Sellado de Ganancias (Evaluación cada 2 Segundos)**:
+  - **Hito 1 (Avance $\ge 25\%$ del TP inicial)**: Sella el SL en **Entrada + 5 ticks** a favor (riesgo cero absoluto y ganancia neta garantizada). Amplía el TP $+25\%$ adicional.
+  - **Hitos Subsiguientes (Cada 25% de avance adicional: 50%, 75%, 100%...)**: El SL avanza $+25\%$ y el TP se amplía $+25\%$ continuamente.
+  - **Modo Runner Trailing**: Persigue al precio a 15 ticks detrás del máximo alcanzado tras superar el 100%.
+- **Gestión de Cartera y Metas de Sesión**:
+  - **Canasta Global Flotante ($750 USD)**: Cierre inmediato de todas las posiciones abiertas en bloque al alcanzar +$750 USD flotantes.
+  - **Meta Total de Sesión ($1,500 USD)**: Cierre total y congelamiento de operaciones por el resto del día al alcanzar +$1,500 USD en la sesión completa.
 - **Dashboard Web Institucional**: Gráfico de velas de 5 minutos con **TradingView Lightweight Charts**, superposición de VWAP, bandas superior/inferior y marcadores de ejecución en tiempo real.
 - **Terminal de Telemetría en Vivo (WebSockets)**: Transmite en vivo cada latido de 2 segundos a la consola web y persiste 24 horas continuas de eventos en disco (`logs_history_24h.jsonl`).
 - **Caja Negra CSV**: Registro auditado y trazable de todas las órdenes e hitos en `registro_operaciones.csv` para auditoría y post-análisis cuantitativo.
