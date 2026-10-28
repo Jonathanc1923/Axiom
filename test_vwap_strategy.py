@@ -153,7 +153,7 @@ class TestPureVWAPStrategy(unittest.TestCase):
         self.assertTrue(setup is None or setup["direccion"] != "LONG", "NO debe abrir LONG si la vela previa vino desde abajo de VWAP")
 
     def test_ejecutar_orden_convencion_signos_long_y_short(self):
-        """Verifica que el SL sea NEGATIVO para LONG y POSITIVO para SHORT, con SL a mitad de camino a banda contraria (50%) y TP al 60%."""
+        """Verifica que el SL sea NEGATIVO para LONG y POSITIVO para SHORT, con SL al 45% y TP al 50% fijos."""
         setup_long = {
             "simbolo": "ES",
             "direccion": "LONG",
@@ -167,10 +167,10 @@ class TestPureVWAPStrategy(unittest.TestCase):
         self.engine.ejecutar_orden(setup_long, "ES", ignore_schedule=True)
         _, kwargs_long = self.mock_client.place_order.call_args
         self.assertEqual(kwargs_long["side"], 0)
-        # SL a mitad de camino (50%) de VWAP (5000) a Lower Band (4960) = 40 pts * 0.50 = 20 pts (80 ticks) -> SL = 4980.00 -> dist = 80t
-        self.assertEqual(kwargs_long["sl_ticks"], -80, "TopstepX exige signo negativo para SL en LONG")
-        # TP a 60% de distancia entre VWAP y Upper Band (40 pts * 0.60 = 24 pts = 96 ticks) -> TP = 5024.00
-        self.assertEqual(kwargs_long["tp_ticks"], 96)
+        # SL a 45% de distancia VWAP (5000) a Lower Band (4960) = 40 pts * 0.45 = 18 pts (72 ticks) -> SL = 4982.00 -> dist = 72t
+        self.assertEqual(kwargs_long["sl_ticks"], -72, "TopstepX exige signo negativo para SL en LONG")
+        # TP a 50% de distancia entre VWAP y Upper Band (40 pts * 0.50 = 20 pts = 80 ticks) -> TP = 5020.00
+        self.assertEqual(kwargs_long["tp_ticks"], 80)
 
         # Probar SHORT
         self.engine.symbol_states["ES"]["has_open_position"] = False
@@ -188,9 +188,9 @@ class TestPureVWAPStrategy(unittest.TestCase):
         self.engine.ejecutar_orden(setup_short, "ES", ignore_schedule=True)
         _, kwargs_short = self.mock_client.place_order.call_args
         self.assertEqual(kwargs_short["side"], 1)
-        # SL a 50% de distancia VWAP (5000) a Upper Band (5040) = 20 pts (80 ticks) -> SL = 5020.00 -> dist = 80t
-        self.assertEqual(kwargs_short["sl_ticks"], 80, "TopstepX exige signo positivo para SL en SHORT")
-        self.assertEqual(kwargs_short["tp_ticks"], -96, "TopstepX exige signo negativo para TP en SHORT")
+        # SL a 45% de distancia VWAP (5000) a Upper Band (5040) = 18 pts (72 ticks) -> SL = 5018.00 -> dist = 72t
+        self.assertEqual(kwargs_short["sl_ticks"], 72, "TopstepX exige signo positivo para SL en SHORT")
+        self.assertEqual(kwargs_short["tp_ticks"], -80, "TopstepX exige signo negativo para TP en SHORT")
 
     def test_escalera_de_hitos_long(self):
         """Prueba los hitos dinámicos en LONG cuando USE_DYNAMIC_TRAILING está activado."""
@@ -369,7 +369,7 @@ class TestPureVWAPStrategy(unittest.TestCase):
         self.assertEqual(len(history), 1)
         self.assertIn("CERRADA", history[0]["Estado"])
         self.assertIn("Hito 2", history[0]["Hito_Alcanzado"])
-        self.assertEqual(history[0]["Max_Pct_TP"], "50.0%")
+        self.assertEqual(history[0]["Max_Pct_TP"], "60.0%")
         self.assertEqual(history[0]["Precio_Salida_Real"], "5012.00")
         pnl_net = float(history[0]["PnL_Neto_USD"])
         self.assertGreater(pnl_net, 0)
@@ -593,7 +593,7 @@ class TestPureVWAPStrategy(unittest.TestCase):
         self.assertEqual(get_micro_shield_sl_ticks("NQ"), 39)
 
     def test_ejecutar_orden_nq_usa_sl_ticks_90(self):
-        """Verifica que NQ ejecute la orden con SL a mitad de camino (50% = 200 ticks) y TP al 60% (240 ticks)."""
+        """Verifica que NQ ejecute la orden con SL al 45% (180 ticks) y TP al 50% (200 ticks) fijos."""
         setup_nq = {
             "simbolo": "NQ",
             "direccion": "LONG",
@@ -607,8 +607,8 @@ class TestPureVWAPStrategy(unittest.TestCase):
         self.engine.ejecutar_orden(setup_nq, "NQ", ignore_schedule=True)
         _, kwargs_nq = self.mock_client.place_order.call_args
         self.assertEqual(kwargs_nq["side"], 0)
-        self.assertEqual(kwargs_nq["sl_ticks"], -200, "NQ debe enviar -200 ticks de SL para LONG (TopstepX)")
-        self.assertEqual(kwargs_nq["tp_ticks"], 240)
+        self.assertEqual(kwargs_nq["sl_ticks"], -180, "NQ debe enviar -180 ticks de SL para LONG (TopstepX)")
+        self.assertEqual(kwargs_nq["tp_ticks"], 200)
 
     def test_micros_y_minis_habilitados_por_defecto(self):
         """Verifica que tanto minis (ES, NQ) como micros (MES, MNQ) estén habilitados simultáneamente."""
@@ -622,7 +622,7 @@ class TestPureVWAPStrategy(unittest.TestCase):
         Verifica que:
         1. A 5 ticks (1.25 pts en ES) del VWAP (5001.25 vs 5000.00), el gatillo LONG se active.
         2. A 6 ticks (5001.50 vs 5000.00), NO se active.
-        3. El Stop Loss se coloque a mitad de camino a banda contraria (4980.00), con distancia = 85 ticks.
+        3. El Stop Loss se coloque al 45% de banda contraria (4982.00), con distancia = 77 ticks.
         """
         df_5m = pd.DataFrame([
             {
@@ -648,16 +648,16 @@ class TestPureVWAPStrategy(unittest.TestCase):
         self.assertEqual(setup_5t["precio_entrada"], 5001.25)
         self.assertEqual(setup_5t["vwap_cruce"], 5000.0)
 
-        # Caso C: Ejecutar orden y verificar que el SL se coloque a mitad de camino (4980.00)
+        # Caso C: Ejecutar orden y verificar que el SL se coloque al 45% (4982.00)
         self.engine.ejecutar_orden(setup_5t, "ES", ignore_schedule=True)
         _, kwargs = self.mock_client.place_order.call_args
-        # Distancia en ticks desde entrada (5001.25) hasta SL (4980.00) = (5001.25 - 4980.00) / 0.25 = 85 ticks
-        self.assertEqual(kwargs["sl_ticks"], -85, "TopstepX debe recibir -85 ticks")
+        # Distancia en ticks desde entrada (5001.25) hasta SL (4982.00) = (5001.25 - 4982.00) / 0.25 = 77 ticks
+        self.assertEqual(kwargs["sl_ticks"], -77, "TopstepX debe recibir -77 ticks")
         trade = self.engine.symbol_states["ES"]["active_trade"]
-        self.assertEqual(trade["current_sl_price"], 4980.00)
+        self.assertEqual(trade["current_sl_price"], 4982.00)
 
     def test_gatillo_proximidad_short_y_sl_desde_vwap(self):
-        """Verifica gatillo SHORT a 5 ticks debajo de VWAP (4998.75 vs 5000.00) con SL a mitad de camino a banda contraria (5020.00)."""
+        """Verifica gatillo SHORT a 5 ticks debajo de VWAP (4998.75 vs 5000.00) con SL al 45% a banda contraria (5018.00)."""
         df_5m = pd.DataFrame([
             {
                 'Timestamp': self.now - timedelta(minutes=5),
@@ -681,10 +681,56 @@ class TestPureVWAPStrategy(unittest.TestCase):
 
         self.engine.ejecutar_orden(setup, "ES", ignore_schedule=True)
         _, kwargs = self.mock_client.place_order.call_args
-        # Distancia en ticks desde entrada (4998.75) hasta SL (5020.00): (5020.00 - 4998.75)/0.25 = 85 ticks
-        self.assertEqual(kwargs["sl_ticks"], 85)
+        # Distancia en ticks desde entrada (4998.75) hasta SL (5018.00): (5018.00 - 4998.75)/0.25 = 77 ticks
+        self.assertEqual(kwargs["sl_ticks"], 77)
         trade = self.engine.symbol_states["ES"]["active_trade"]
-        self.assertEqual(trade["current_sl_price"], 5020.00)
+        self.assertEqual(trade["current_sl_price"], 5018.00)
+
+    def test_cierre_automatico_al_alcanzar_sl_o_tp_fijo(self):
+        """Verifica que el que alcanza primero (SL o TP fijo) cierra automáticamente la operación."""
+        self.mock_client.close_contract_position.return_value = {"success": True}
+        self.mock_client.get_open_positions.return_value = [{"contractId": "CON_ES_TEST", "size": 1}]
+
+        # 1. Caso LONG alcanzando Stop Loss (Precio cae a o por debajo de SL 4982.00)
+        self.engine.symbol_states["ES"]["has_open_position"] = True
+        self.engine.symbol_states["ES"]["active_trade"] = {
+            "symbol": "ES",
+            "contract_id": "CON_ES_TEST",
+            "direction": "LONG",
+            "entry_price": 5000.0,
+            "initial_sl_price": 4982.00,
+            "current_sl_price": 4982.00,
+            "initial_tp_price": 5020.00,
+            "current_tp_price": 5020.00,
+            "d_tp_ini": 20.0,
+            "base_tp_pts": 20.0,
+            "sl_stage": 0,
+            "order_id": 999111
+        }
+        self.engine.monitorear_posicion_abierta("ES", current_price=4981.75)
+        self.assertFalse(self.engine.symbol_states["ES"]["has_open_position"])
+        self.assertIsNone(self.engine.symbol_states["ES"]["active_trade"])
+        self.mock_client.close_contract_position.assert_called_with(self.engine.account_id, "CON_ES_TEST")
+
+        # 2. Caso LONG alcanzando Take Profit (Precio sube a o por encima de TP 5020.00)
+        self.engine.symbol_states["ES"]["has_open_position"] = True
+        self.engine.symbol_states["ES"]["active_trade"] = {
+            "symbol": "ES",
+            "contract_id": "CON_ES_TEST",
+            "direction": "LONG",
+            "entry_price": 5000.0,
+            "initial_sl_price": 4982.00,
+            "current_sl_price": 4982.00,
+            "initial_tp_price": 5020.00,
+            "current_tp_price": 5020.00,
+            "d_tp_ini": 20.0,
+            "base_tp_pts": 20.0,
+            "sl_stage": 0,
+            "order_id": 999222
+        }
+        self.engine.monitorear_posicion_abierta("ES", current_price=5020.25)
+        self.assertFalse(self.engine.symbol_states["ES"]["has_open_position"])
+        self.assertIsNone(self.engine.symbol_states["ES"]["active_trade"])
 
     def test_csv_registro_hora_apertura_y_cierre(self):
         """Verifica que el CSV registre Hora_Apertura y Hora_Cierre de forma independiente e inmutable."""

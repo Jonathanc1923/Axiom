@@ -442,7 +442,7 @@ class AxiomEngine:
             if d_opuesta < (5 * tick_size):
                 d_opuesta = 15 * tick_size
 
-            # SL: Mitad de camino (50%) entre la línea VWAP y la banda contraria
+            # SL: 45% de distancia entre la línea VWAP y la banda contraria (Fijo)
             sl_dist = INITIAL_SL_OPPOSITE_BAND_RATIO * d_opuesta
             precio_sl = round_to_tick(vwap_now - sl_dist, tick_size)
 
@@ -451,7 +451,7 @@ class AxiomEngine:
             if d_target_band < (10 * tick_size):
                 d_target_band = 20 * tick_size
 
-            # TP: 60% de distancia entre línea VWAP y la siguiente banda
+            # TP: 50% de distancia entre línea VWAP y la banda objetivo (Fijo)
             tp_dist = INITIAL_TP_TARGET_BAND_RATIO * d_target_band
             precio_tp = round_to_tick(vwap_now + tp_dist, tick_size)
             d_tp_ini = abs(precio_tp - precio_mercado)
@@ -491,7 +491,7 @@ class AxiomEngine:
             if d_opuesta < (5 * tick_size):
                 d_opuesta = 15 * tick_size
 
-            # SL: Mitad de camino (50%) entre la línea VWAP y la banda contraria
+            # SL: 45% de distancia entre la línea VWAP y la banda contraria (Fijo)
             sl_dist = INITIAL_SL_OPPOSITE_BAND_RATIO * d_opuesta
             precio_sl = round_to_tick(vwap_now + sl_dist, tick_size)
 
@@ -500,7 +500,7 @@ class AxiomEngine:
             if d_target_band < (10 * tick_size):
                 d_target_band = 20 * tick_size
 
-            # TP: 60% de distancia entre línea VWAP y la siguiente banda
+            # TP: 50% de distancia entre línea VWAP y la banda objetivo (Fijo)
             tp_dist = INITIAL_TP_TARGET_BAND_RATIO * d_target_band
             precio_tp = round_to_tick(vwap_now - tp_dist, tick_size)
             d_tp_ini = abs(precio_mercado - precio_tp)
@@ -623,10 +623,10 @@ class AxiomEngine:
     # ==========================================
     def ejecutar_orden(self, setup: Dict[str, Any], sym: str, ignore_schedule: bool = False):
         """
-        Ejecuta la orden a mercado en TopstepX con brackets OCO dinámicos:
-        - SL Inicial: 1/5 (20%) de distancia entre la línea VWAP y la banda contraria.
-        - TP Inicial: 50% de distancia hacia la siguiente banda.
-        - Monitoreo en memoria para escalado cada 25% de avance.
+        Ejecuta la orden a mercado en TopstepX con brackets OCO fijos:
+        - SL Inicial: 45% de distancia entre la línea VWAP y la banda contraria (Fijo).
+        - TP Inicial: 50% de distancia entre la línea VWAP y la banda objetivo (Fijo).
+        - El que alcanza primero cierra automáticamente la operación (brackets OCO nativos).
         """
         if setup.get("simbolo") != sym:
             self.log(f"❌ Discrepancia de símbolo setup={setup.get('simbolo')} vs sym={sym}", "ERROR", sym)
@@ -697,8 +697,8 @@ class AxiomEngine:
         trigger_ticks = setup.get("trigger_ticks", get_vwap_trigger_distance_ticks(sym))
         condicion_str = (
             f"VWAP Reversion. Entrada: {precio_entrada:.2f} | "
-            f"VWAP: {vwap_cruce:.2f} | SL (Mitad a Banda): {ticks_sl_order_val}t ({precio_sl:.2f}) | "
-            f"TP (60% a Banda): {ticks_tp}t ({precio_tp:.2f} | D_ini: {d_tp_ini:.2f} pts)"
+            f"VWAP: {vwap_cruce:.2f} | SL (45% a Banda): {ticks_sl_order_val}t ({precio_sl:.2f}) | "
+            f"TP (50% a Banda): {ticks_tp}t ({precio_tp:.2f} | D_ini: {d_tp_ini:.2f} pts)"
         )
         self.log(f"🚨 DISPARANDO {direccion} A MERCADO | {condicion_str}", "ORDER", sym)
         
@@ -853,7 +853,7 @@ class AxiomEngine:
         tick_size = spec.get("tickSize", 0.25)
 
         # Rastrear precio más favorable alcanzado estrictamente DESPUÉS de la entrada (sin wicks del pasado)
-        d_tp_ini = float(trade.get("d_tp_ini", abs(trade["initial_tp_price"] - trade["entry_price"])))
+        d_tp_ini = float(trade.get("d_tp_ini", abs(trade.get("initial_tp_price", trade.get("current_tp_price", precio_entrada)) - precio_entrada)))
         if d_tp_ini <= 0:
             d_tp_ini = 10 * tick_size
 
@@ -973,34 +973,36 @@ class AxiomEngine:
                     self.registrar_evento_be_en_csv(sym, trade, nuevo_sl or sl_actual, max_pct, motivo_hito)
                 else:
                     self.log(f"⚠️ [{sym}] Error al ajustar brackets en TopstepX. Se reintentará automáticamente en el próximo ciclo de 2s...", "ORDER", sym)
-                self.registrar_evento_be_en_csv(sym, trade, nuevo_sl or sl_actual, max_pct, motivo_hito)
-            else:
-                self.log(f"⚠️ [{sym}] Error al ajustar brackets en TopstepX. Se reintentará automáticamente en el próximo ciclo de 2s...", "ORDER", sym)
 
-        # SALVAGUARDA FAIL-SAFE POR SOFTWARE
-        # Si ya se activó al menos el Micro-Escudo o Hito 1 y el precio retrocede traspasando el SL protegido:
-        if trade.get("sl_stage", 0) >= 0.5:
-            sl_protegido = trade["current_sl_price"]
-            sl_alcanzado = False
-            if direccion == "LONG" and precio_actual < sl_protegido:
-                sl_alcanzado = True
-            elif direccion == "SHORT" and precio_actual > sl_protegido:
-                sl_alcanzado = True
-            elif direccion == "SHORT" and precio_actual > sl_protegido:
-                sl_alcanzado = True
-                
-            if sl_alcanzado:
-                self.log(f"🛡️ [{sym}] Precio perforó Stop protegido ({precio_actual:.2f} vs SL {sl_protegido:.2f}). Liquidando posición de inmediato...", "ORDER", sym)
-                try:
-                    self.client.close_contract_position(self.account_id, trade["contract_id"])
-                    self.cancelar_ordenes_abiertas_contrato(trade["contract_id"], sym)
-                except Exception as ce:
-                    self.log(f"⚠️ Error al liquidar posición protegida en {sym}: {ce}", "ERROR", sym)
-                self.registrar_cierre_posicion(sym, trade, precio_salida=precio_actual, motivo_cierre=f"Stop Protegido Perforado ({sl_protegido:.2f})")
-                state["active_trade"] = None
-                state["has_open_position"] = False
-                state["cooldown_until"] = time.time() + 180
-                return
+        # SALVAGUARDA DE CIERRE AUTOMÁTICO (SL / TP Fijo)
+        # El que alcanza primero cierra automáticamente la operación (Fail-Safe por Software)
+        sl_fijo = trade.get("current_sl_price")
+        tp_fijo = trade.get("current_tp_price")
+        motivo_alcance = None
+
+        if direccion == "LONG":
+            if sl_fijo is not None and precio_actual <= sl_fijo:
+                motivo_alcance = f"Stop Loss alcanzado (Fijo {sl_fijo:.2f})"
+            elif tp_fijo is not None and precio_actual >= tp_fijo:
+                motivo_alcance = f"Take Profit alcanzado (Fijo {tp_fijo:.2f})"
+        else: # SHORT
+            if sl_fijo is not None and precio_actual >= sl_fijo:
+                motivo_alcance = f"Stop Loss alcanzado (Fijo {sl_fijo:.2f})"
+            elif tp_fijo is not None and precio_actual <= tp_fijo:
+                motivo_alcance = f"Take Profit alcanzado (Fijo {tp_fijo:.2f})"
+
+        if motivo_alcance:
+            self.log(f"⚡ [{sym}] {motivo_alcance} (Precio actual: {precio_actual:.2f}). Liquidando y asegurando cierre...", "ORDER", sym)
+            try:
+                self.client.close_contract_position(self.account_id, trade["contract_id"])
+            except Exception as ce:
+                self.log(f"⚠️ Aviso al liquidar posición en {sym}: {ce}", "WARNING", sym)
+            self.cancelar_ordenes_abiertas_contrato(trade["contract_id"], sym)
+            self.registrar_cierre_posicion(sym, trade, precio_salida=precio_actual, motivo_cierre=motivo_alcance)
+            state["active_trade"] = None
+            state["has_open_position"] = False
+            state["cooldown_until"] = time.time() + 180
+            return
 
     def ajustar_bracket_en_topstep(self, contract_id: str, nuevo_sl: Optional[float], nuevo_tp: Optional[float], sym: str, current_price: Optional[float] = None) -> bool:
         """
@@ -1383,6 +1385,14 @@ class AxiomEngine:
             net_pnl = round(gross_pnl - comms, 2)
             sign_str = "+" if net_pnl >= 0 else ""
             estado_cierre = f"CERRADA ({sign_str}${net_pnl:.2f} USD)"
+
+            if "Posición concluida en TopstepX" in motivo_cierre:
+                if gross_pnl is not None and gross_pnl > 0:
+                    motivo_cierre = "Take Profit alcanzado en TopstepX (Fijo)"
+                elif gross_pnl is not None and gross_pnl < 0:
+                    motivo_cierre = "Stop Loss alcanzado en TopstepX (Fijo)"
+                elif gross_pnl == 0:
+                    motivo_cierre = "Break-Even alcanzado en TopstepX"
             
             self.log(
                 f"🏁 [{sym}] Operación CERRADA ({direccion}) | Apertura: {hora_apertura} | Cierre: {hora_actual} | In: {precio_entrada:.2f} | Out: {p_salida:.2f} | "

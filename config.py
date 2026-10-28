@@ -36,13 +36,13 @@ CSV_PATH = os.path.join(DATA_DIR, "registro_operaciones.csv")
 # ==========================================
 # Institutional Strategy Configuration: Dynamic Band Reversion & Multi-Position
 # ==========================================
-# SL Inicial: Mitad de camino (50%) entre la línea VWAP y la banda contraria (Ya no dinámico)
-INITIAL_SL_OPPOSITE_BAND_RATIO = float(os.getenv("INITIAL_SL_OPPOSITE_BAND_RATIO", "0.50"))
+# SL Inicial: 45% de distancia entre la línea VWAP y la banda contraria (Fijo, no dinámico)
+INITIAL_SL_OPPOSITE_BAND_RATIO = float(os.getenv("INITIAL_SL_OPPOSITE_BAND_RATIO", "0.45"))
 
-# TP Inicial: 60% de distancia entre línea VWAP y la siguiente banda (Ya no dinámico)
-INITIAL_TP_TARGET_BAND_RATIO = float(os.getenv("INITIAL_TP_TARGET_BAND_RATIO", "0.60"))
+# TP Inicial: 50% de distancia entre línea VWAP y la banda objetivo (Fijo, no dinámico)
+INITIAL_TP_TARGET_BAND_RATIO = float(os.getenv("INITIAL_TP_TARGET_BAND_RATIO", "0.50"))
 
-# Trailing Dinámico: Desactivado por solicitud ("Ya no dinámico", brackets OCO estáticos en TopstepX)
+# Trailing Dinámico: Desactivado por solicitud ("ya sin sl ni tp dinamicos, ahora son fijos")
 USE_DYNAMIC_TRAILING = os.getenv("USE_DYNAMIC_TRAILING", "false").lower() in ("true", "1", "yes")
 
 # Gatillo de protección (mantiene compatibilidad de hitos si se reactiva)
