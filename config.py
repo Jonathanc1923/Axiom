@@ -38,13 +38,13 @@ CSV_PATH = os.path.join(DATA_DIR, "registro_operaciones.csv")
 # ==========================================
 STRATEGY_NAME = "VWAP Wick Rejection (Reloj Suizo)"
 
-# Ventana de comprobación: Del minuto 4 al 5 de la vela de 5m (últimos 60s antes del cierre)
-CHECK_WINDOW_START_MINUTE = int(os.getenv("CHECK_WINDOW_START_MINUTE", "4"))
+# Ventana de comprobación: Desde el minuto 1 en adelante de la vela de 5m
+CHECK_WINDOW_START_MINUTE = int(os.getenv("CHECK_WINDOW_START_MINUTE", "1"))
 
-# Stop Loss: 20% sobre o debajo del VWAP (calculado respecto a la distancia de banda)
-SL_VWAP_RATIO = float(os.getenv("SL_VWAP_RATIO", "0.20"))
+# Stop Loss: 30% de distancia desde el VWAP a la otra banda
+SL_VWAP_RATIO = float(os.getenv("SL_VWAP_RATIO", "0.30"))
 
-# Take Profit: 50% del VWAP hacia la siguiente banda (calculado respecto al VWAP y banda objetivo)
+# Take Profit: 50% del VWAP hacia la siguiente banda
 TP_VWAP_BAND_RATIO = float(os.getenv("TP_VWAP_BAND_RATIO", "0.50"))
 
 # Cooldown por símbolo: Esperar mínimo 9 minutos tras ejecutar una operación
@@ -59,8 +59,8 @@ SESSION_START_HOUR_PERU = int(os.getenv("SESSION_START_HOUR_PERU", "19"))
 SESSION_START_MINUTE_PERU = int(os.getenv("SESSION_START_MINUTE_PERU", "0"))
 CME_OPEN_BUFFER_MINUTES = int(os.getenv("CME_OPEN_BUFFER_MINUTES", "120"))
 
-# Intervalo central de monitoreo y actualización de mercado (2.0 segundos)
-POLL_INTERVAL_SECONDS = float(os.getenv("POLL_INTERVAL_SECONDS", "2.0"))
+# Intervalo central de monitoreo y actualización de mercado (cada 5.0 segundos)
+POLL_INTERVAL_SECONDS = float(os.getenv("POLL_INTERVAL_SECONDS", "5.0"))
 
 # Sin topes de ganancia ni pérdida ni canastas a recoger (Solicitud explícita)
 USE_DAILY_PROFIT_LOCK = False
@@ -82,8 +82,8 @@ LOCK_PROFIT_TICKS = 0
 EXPAND_TP_PCT = 0.0
 STEP_SL_PCT = 0.0
 MIN_PREV_CANDLE_DIFF_TICKS = 0
-USE_VWAP_SLOPE_FILTER = False
-VWAP_SLOPE_LOOKBACK_BARS = 7
+USE_VWAP_SLOPE_FILTER = os.getenv("USE_VWAP_SLOPE_FILTER", "true").lower() in ("true", "1", "yes")
+VWAP_SLOPE_LOOKBACK_BARS = int(os.getenv("VWAP_SLOPE_LOOKBACK_BARS", "7"))
 MIN_VWAP_SLOPE_TICKS = 0
 INITIAL_SL_TICKS = 35
 INITIAL_SL_TICKS_ES = 35
@@ -243,5 +243,5 @@ def get_micro_shield_sl_ticks(symbol: str) -> int:
     return max(shield, 10)
 
 # Símbolos habilitados por defecto en el arranque (Minis y Micros habilitados simultáneamente)
-DEFAULT_ENABLED_SYMBOLS_STR = os.getenv("ENABLED_SYMBOLS", "ES,NQ,MES,MNQ")
+DEFAULT_ENABLED_SYMBOLS_STR = os.getenv("ENABLED_SYMBOLS", "ES,NQ,YM,RTY,CL,GC,MES,MNQ,MYM,M2K,MCL,MGC")
 DEFAULT_ENABLED_SYMBOLS = [s.strip().upper() for s in DEFAULT_ENABLED_SYMBOLS_STR.split(",") if s.strip()]

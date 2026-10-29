@@ -398,23 +398,23 @@ class AxiomEngine:
         if df_5m is None or len(df_5m) < 2:
             return None
 
-        # 1. VERIFICACIÓN DE VENTANA TEMPORAL (Minuto 4 al 5 de la vela de 5m)
+        # 1. VERIFICACIÓN DE VENTANA TEMPORAL (Desde el minuto 1 en adelante de la vela de 5m)
         now_utc = datetime.now(timezone.utc)
         curr_bar = df_5m.iloc[-1]
 
-        # Minuto 4 del ciclo de 5 minutos (:04, :09, :14, :19, :24, :29, :34, :39, :44, :49, :54, :59)
-        is_minute_4 = (now_utc.minute % 5 == CHECK_WINDOW_START_MINUTE)
+        # Minuto 1 al 4 del ciclo de 5 minutos (:01, :02, :03, :04 | :06, :07, :08, :09 | ...)
+        is_operable_minute = (now_utc.minute % 5 >= CHECK_WINDOW_START_MINUTE)
 
         if 'Timestamp' in curr_bar and pd.notna(curr_bar['Timestamp']):
             try:
                 ts_bar = pd.to_datetime(curr_bar['Timestamp'], utc=True)
                 elapsed_sec = (now_utc - ts_bar).total_seconds()
                 if 0 <= elapsed_sec < 360:
-                    is_minute_4 = (240 <= elapsed_sec < 300) or (now_utc.minute % 5 == CHECK_WINDOW_START_MINUTE)
+                    is_operable_minute = (elapsed_sec >= 60.0) or (now_utc.minute % 5 >= CHECK_WINDOW_START_MINUTE)
             except Exception:
                 pass
 
-        if not is_minute_4:
+        if not is_operable_minute:
             return None
 
         # 2. EXTRACCIÓN DE VELAS Y PARÁMETROS
@@ -477,8 +477,26 @@ class AxiomEngine:
         if not setup_type:
             return None
 
+        # 4.5. FILTRO DE TENDENCIA DEL VWAP (Hace 7 velas comparada con la actual)
+        # La pendiente debe estar completamente plana o a favor de la operación desde 1 tick a más
+        slope_desc = "Desactivado"
+        if USE_VWAP_SLOPE_FILTER:
+            lookback_bars = VWAP_SLOPE_LOOKBACK_BARS
+            if len(df_5m) > lookback_bars:
+                past_bar = df_5m.iloc[-(lookback_bars + 1)]
+                past_vwap = float(past_bar['VWAP'])
+                if pd.notna(past_vwap):
+                    slope_ticks = round((curr_vwap - past_vwap) / tick_size)
+                    # Para LONG: completamente plano (slope_ticks == 0) o alcista (slope_ticks >= 1 a favor)
+                    if setup_type == "LONG" and slope_ticks < 0:
+                        return None
+                    # Para SHORT: completamente plano (slope_ticks == 0) o bajista (slope_ticks <= -1 a favor)
+                    if setup_type == "SHORT" and slope_ticks > 0:
+                        return None
+                    slope_desc = "Plana (0t)" if slope_ticks == 0 else f"{slope_ticks:+d}t (A Favor)"
+
         # 5. CÁLCULO DE SL Y TP (SOBRE / DEBAJO DEL VWAP)
-        # SL: 20% sobre o debajo del VWAP
+        # SL: 30% de distancia desde el VWAP a la otra banda
         d_sl_dist = round_to_tick(SL_VWAP_RATIO * std_dev, tick_size)
         if d_sl_dist < 4 * tick_size:
             d_sl_dist = 4 * tick_size
@@ -513,9 +531,10 @@ class AxiomEngine:
 
         condicion_desc = (
             f"Reloj Suizo: Rechazo Mecha VWAP ({setup_type}) | "
+            f"Tendencia VWAP 7 velas ({slope_desc}) | "
             f"Vela t-1 limpia ({'debajo' if setup_type=='SHORT' else 'arriba'}) | "
             f"Vela t mecha {'superior' if setup_type=='SHORT' else 'inferior'} tocó VWAP ({curr_vwap:.2f}) | "
-            f"SL 20% ({precio_sl:.2f}) | TP 50% ({precio_tp:.2f})"
+            f"SL 30% ({precio_sl:.2f}) | TP 50% ({precio_tp:.2f})"
         )
 
         return {
