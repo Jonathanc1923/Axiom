@@ -226,7 +226,7 @@ class AxiomEngine:
         prefix_sym = f"[{target_sym}] " if target_sym != "ALL" else "[SYSTEM] "
         
         # Consola del servidor
-        print(f"[{timestamp_str}] [{level}] {prefix_sym}{message}")
+        print(f"[{timestamp_str}] [{level}] {prefix_sym}{message}", flush=True)
         
         log_entry = {
             "timestamp": timestamp_str,
@@ -468,6 +468,21 @@ class AxiomEngine:
 
         if prev_above_complete and curr_wick_touches_vwap_long and curr_rebounds_above_vwap and curr_open_above:
             setup_type = "LONG"
+
+        # Logging informativo en consola cuando la mecha toca el VWAP en tiempo real
+        now_epoch = time.time()
+        last_touch_log = getattr(self, "_last_touch_log_ts", {}).get(sym, 0.0)
+        if (curr_wick_touches_vwap_short or curr_wick_touches_vwap_long) and (now_epoch - last_touch_log >= 30.0):
+            if not hasattr(self, "_last_touch_log_ts"):
+                self._last_touch_log_ts = {}
+            self._last_touch_log_ts[sym] = now_epoch
+            target_side = "SHORT" if curr_wick_touches_vwap_short else "LONG"
+            req_p = (curr_vwap - (VWAP_TOUCH_RETREAT_TICKS * tick_size)) if target_side == "SHORT" else (curr_vwap + (VWAP_TOUCH_RETREAT_TICKS * tick_size))
+            self.log(
+                f"👀 [DETECTOR] {sym} tocó VWAP ({curr_vwap:.2f}) | Precio: {curr_close:.2f} | "
+                f"Esperando retroceso a {req_p:.2f} ({VWAP_TOUCH_RETREAT_TICKS}t) para gatillar {target_side}...",
+                "DETECTOR", sym
+            )
 
         if not setup_type:
             return None
@@ -2318,8 +2333,8 @@ class AxiomEngine:
                 # ==========================================
                 self.verificar_candado_ganancia_diaria(total_floating_pnl)
 
-                # Reporte periódico en terminal del estado de operaciones abiertas (cada 30s)
-                if (now_ts - getattr(self, "_last_portfolio_log_time", 0.0)) >= 30.0:
+                # Reporte periódico en terminal del estado de análisis y portafolio (cada 15s)
+                if (now_ts - getattr(self, "_last_portfolio_log_time", 0.0)) >= 15.0:
                     self._last_portfolio_log_time = now_ts
                     open_summary = []
                     for s_k, s_st in self.symbol_states.items():
@@ -2329,7 +2344,23 @@ class AxiomEngine:
                             mx_p = act_tr.get("max_pct_avance", 0.0)
                             open_summary.append(f"{s_k} {act_tr['direction']} @ {act_tr['entry_price']:.2f} [{stg_desc} (Max: {mx_p:.1f}%)]")
                     if open_summary:
-                        self.log(f"📊 [CARTERA ABIERTA] {len(open_summary)} posición(es) en curso (Flotante Canasta: ${total_floating_pnl:+.2f} USD / Meta ${BASKET_TP_TARGET_USD:.0f}): {' | '.join(open_summary)}", "SYSTEM")
+                        self.log(f"💼 [PORTAFOLIO] Posiciones Activas ({len(open_summary)}): {' | '.join(open_summary)}", "MONITOR", "ALL")
+                    else:
+                        act_tel = self.symbol_states.get(self.active_symbol, {}).get("telemetry", {})
+                        if act_tel:
+                            p_close = act_tel.get("close", 0.0)
+                            p_vwap = act_tel.get("vwap", 0.0)
+                            p_dist = act_tel.get("distance_vwap", 0.0)
+                            spec_act = SUPPORTED_SYMBOLS.get(self.active_symbol, {})
+                            t_size = spec_act.get("tickSize", 0.25)
+                            dist_ticks = round(p_dist / t_size) if t_size > 0 else 0
+                            self.log(
+                                f"🔍 [ANÁLISIS EN VIVO] {self.active_symbol} @ {p_close:.2f} | VWAP: {p_vwap:.2f} "
+                                f"(Dist: {dist_ticks:+d}t / {p_dist:+.2f}) | "
+                                f"Banda Sup: {act_tel.get('upper_band', 0.0):.2f} | Banda Inf: {act_tel.get('lower_band', 0.0):.2f} | "
+                                f"12 símbolos CME analizados cada 5s (Detector Toque VWAP + Retroceso 2t)",
+                                "SCANNER", self.active_symbol
+                            )
 
             except requests.exceptions.HTTPError as he:
                 if he.response is not None and he.response.status_code == 429:
