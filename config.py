@@ -45,9 +45,10 @@ CHECK_WINDOW_START_MINUTE = int(os.getenv("CHECK_WINDOW_START_MINUTE", "1"))
 # El precio toca el VWAP y debe retroceder mínimo N ticks a favor del rechazo
 VWAP_TOUCH_RETREAT_TICKS = int(os.getenv("VWAP_TOUCH_RETREAT_TICKS", "2"))
 
-# Stop Loss: Fijo a 5 ticks sobre/debajo de la línea VWAP
+# Stop Loss: 50% de la distancia entre la línea VWAP y la línea de la banda contraria
+SL_VWAP_BAND_RATIO = float(os.getenv("SL_VWAP_BAND_RATIO", "0.50"))
+SL_VWAP_RATIO = SL_VWAP_BAND_RATIO
 SL_VWAP_BUFFER_TICKS = int(os.getenv("SL_VWAP_BUFFER_TICKS", "5"))
-SL_VWAP_RATIO = float(os.getenv("SL_VWAP_RATIO", "0.30"))
 
 # Take Profit: 50% de la distancia del VWAP hacia la siguiente banda
 TP_VWAP_BAND_RATIO = float(os.getenv("TP_VWAP_BAND_RATIO", "0.50"))

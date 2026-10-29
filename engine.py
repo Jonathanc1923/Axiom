@@ -43,7 +43,7 @@ from config import (
     HITO_4_TRIGGER_PCT, HITO_4_SL_PCT, HITO_4_TP_EXPAND_PCT, RUNNER_TRAILING_TICKS, RUNNER_STEP_PCT,
     SESSION_START_HOUR_PERU, SESSION_START_MINUTE_PERU,
     CME_OPEN_BUFFER_MINUTES, TRAILING_DAILY_PROFIT_TRIGGER_USD, TRAILING_DAILY_PROFIT_RETAIN_PCT,
-    STRATEGY_NAME, CHECK_WINDOW_START_MINUTE, SL_VWAP_RATIO, TP_VWAP_BAND_RATIO,
+    STRATEGY_NAME, CHECK_WINDOW_START_MINUTE, SL_VWAP_RATIO, SL_VWAP_BAND_RATIO, TP_VWAP_BAND_RATIO,
     VWAP_TOUCH_RETREAT_TICKS, SL_VWAP_BUFFER_TICKS,
     SYMBOL_COOLDOWN_MINUTES, SYMBOL_COOLDOWN_SECONDS, USE_BASKET_TP, USE_DAILY_PROFIT_LOCK
 )
@@ -386,7 +386,7 @@ class AxiomEngine:
         3. Vela actual (t) - Detector Toque + Retroceso:
            - SHORT: Toca o supera VWAP (high >= vwap), y retrocede hacia abajo por al menos VWAP_TOUCH_RETREAT_TICKS ticks.
            - LONG: Toca o baja de VWAP (low <= vwap), y rebota hacia arriba por al menos VWAP_TOUCH_RETREAT_TICKS ticks.
-        4. SL Fijo a 5 ticks sobre/debajo de la línea VWAP (VWAP +/- 5 ticks).
+        4. SL al 50% de la distancia del VWAP hacia la banda contraria (respiro ampliado).
         5. TP al 50% de la distancia del VWAP hacia la siguiente banda.
         6. Filtro de Tendencia de VWAP (7 velas): Pendiente plana (0t) o a favor (>= 1t).
         """
@@ -506,15 +506,19 @@ class AxiomEngine:
                     slope_desc = "Plana (0t)" if slope_ticks == 0 else f"{slope_ticks:+d}t (A Favor)"
 
         # 5. CÁLCULO DE SL Y TP (SOBRE / DEBAJO DEL VWAP)
-        # SL: Fijo a 5 ticks sobre/debajo de la línea VWAP
+        # SL: 50% de la distancia del VWAP hacia la banda contraria (respiro ampliado)
+        d_sl_dist = round_to_tick(SL_VWAP_BAND_RATIO * std_dev, tick_size)
+        if d_sl_dist < 4 * tick_size:
+            d_sl_dist = 4 * tick_size
+
         if setup_type == "SHORT":
-            precio_sl = round_to_tick(curr_vwap + (SL_VWAP_BUFFER_TICKS * tick_size), tick_size)
+            precio_sl = round_to_tick(curr_vwap + d_sl_dist, tick_size)
             # Salvaguarda CME ante deslizamiento rápido
             if precio_sl <= curr_close + (2 * tick_size):
                 precio_sl = round_to_tick(curr_close + (4 * tick_size), tick_size)
             banda_objetivo = curr_lower
         else: # LONG
-            precio_sl = round_to_tick(curr_vwap - (SL_VWAP_BUFFER_TICKS * tick_size), tick_size)
+            precio_sl = round_to_tick(curr_vwap - d_sl_dist, tick_size)
             # Salvaguarda CME ante deslizamiento rápido
             if precio_sl >= curr_close - (2 * tick_size):
                 precio_sl = round_to_tick(curr_close - (4 * tick_size), tick_size)
@@ -543,7 +547,7 @@ class AxiomEngine:
             f"Tendencia VWAP 7 velas ({slope_desc}) | "
             f"Vela t-1 limpia ({'debajo' if setup_type=='SHORT' else 'arriba'}) | "
             f"Toque VWAP ({curr_vwap:.2f}) confirmado | "
-            f"SL Fijo 5t ({precio_sl:.2f}) | TP 50% ({precio_tp:.2f})"
+            f"SL 50% a Banda ({precio_sl:.2f}) | TP 50% a Banda ({precio_tp:.2f})"
         )
 
         return {
@@ -790,7 +794,7 @@ class AxiomEngine:
                 }
                 
                 ticks_sl_vwap = round(abs(precio_sl - vwap_cruce) / tick_size)
-                self.log(f"🚀 [{sym}] Orden EJECUTADA | Apertura: {hora_apertura} | {direccion} @ {precio_entrada:.2f} | Order ID: {order_id} | SL 20%: {ticks_sl_order_val}t ({precio_sl:.2f} / {ticks_sl_vwap}t desde VWAP) | TP 50%: {ticks_tp}t ({precio_tp:.2f}) | Cooldown: {SYMBOL_COOLDOWN_MINUTES} min", "ORDER", sym)
+                self.log(f"🚀 [{sym}] Orden EJECUTADA | Apertura: {hora_apertura} | {direccion} @ {precio_entrada:.2f} | Order ID: {order_id} | SL 50%: {ticks_sl_order_val}t ({precio_sl:.2f} / {ticks_sl_vwap}t desde VWAP) | TP 50%: {ticks_tp}t ({precio_tp:.2f}) | Cooldown: {SYMBOL_COOLDOWN_MINUTES} min", "ORDER", sym)
                 self.registrar_en_csv(
                     simbolo=sym,
                     direccion=direccion,
@@ -2277,7 +2281,7 @@ class AxiomEngine:
                                 dist_t = abs(current_price - setup['vwap_cruce']) / tick_size
                                 self.log(
                                     f"⚡ [{sym}] ¡Gatillo Reloj Suizo activado! ({setup['direccion']}) | Entrada @ {current_price:.2f} | "
-                                    f"VWAP: {setup['vwap_cruce']:.2f} | SL 20%: {setup['precio_sl']:.2f} ({setup['sl_ticks']}t) | "
+                                    f"VWAP: {setup['vwap_cruce']:.2f} | SL 50%: {setup['precio_sl']:.2f} ({setup['sl_ticks']}t) | "
                                     f"TP 50%: {setup['precio_tp']:.2f} ({setup['tp_ticks']}t)",
                                     "ORDER", sym
                                 )
@@ -2358,7 +2362,7 @@ class AxiomEngine:
                                 f"🔍 [ANÁLISIS EN VIVO] {self.active_symbol} @ {p_close:.2f} | VWAP: {p_vwap:.2f} "
                                 f"(Dist: {dist_ticks:+d}t / {p_dist:+.2f}) | "
                                 f"Banda Sup: {act_tel.get('upper_band', 0.0):.2f} | Banda Inf: {act_tel.get('lower_band', 0.0):.2f} | "
-                                f"12 símbolos CME analizados cada 5s (Detector Toque VWAP + Retroceso 2t)",
+                                f"12 símbolos CME analizados cada 5s (Detector Toque VWAP + Retroceso 2t | SL 50% / TP 50% a Banda)",
                                 "SCANNER", self.active_symbol
                             )
 
