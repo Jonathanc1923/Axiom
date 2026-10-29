@@ -44,6 +44,7 @@ from config import (
     SESSION_START_HOUR_PERU, SESSION_START_MINUTE_PERU,
     CME_OPEN_BUFFER_MINUTES, TRAILING_DAILY_PROFIT_TRIGGER_USD, TRAILING_DAILY_PROFIT_RETAIN_PCT,
     STRATEGY_NAME, CHECK_WINDOW_START_MINUTE, SL_VWAP_RATIO, TP_VWAP_BAND_RATIO,
+    VWAP_TOUCH_RETREAT_TICKS, SL_VWAP_BUFFER_TICKS,
     SYMBOL_COOLDOWN_MINUTES, SYMBOL_COOLDOWN_SECONDS, USE_BASKET_TP, USE_DAILY_PROFIT_LOCK
 )
 from topstep_client import TopstepClient
@@ -377,23 +378,17 @@ class AxiomEngine:
     # ==========================================
     def verificar_setup_vwap(self, df_5m: pd.DataFrame, sym: str, current_price: Optional[float] = None) -> Optional[Dict[str, Any]]:
         """
-        NUEVA LEY - RELOJ SUIZO:
-        1. Ventana de tiempo: Del minuto 4 al 5 de la vela de 5m (now_utc.minute % 5 == 4 o 240s <= elapsed < 300s).
-           Se evalúa cada 2 segundos.
+        DETECTOR INSTITUCIONAL TOQUE VWAP + RETROCESO CONFIRMADO (MECHA EN TIEMPO REAL):
+        1. Ventana de tiempo: Desde el minuto 1 en adelante de la vela de 5m (evaluación continua cada 5s).
         2. Vela anterior (t-1):
            - SHORT: Cerró en cuerpo y mecha completo debajo del VWAP (prev_high < prev_vwap).
            - LONG: Cerró en cuerpo y mecha completo arriba del VWAP (prev_low > prev_vwap).
-        3. Vela actual (t):
-           - SHORT: Abre y precio actual con cuerpo debajo de VWAP (curr_open < curr_vwap y curr_close < curr_vwap),
-                    pero toca o pasa el VWAP SOLO CON MECHA (curr_high >= curr_vwap).
-           - LONG: Abre y precio actual con cuerpo arriba de VWAP (curr_open > curr_vwap y curr_close > curr_vwap),
-                   pero toca o pasa el VWAP SOLO CON MECHA (curr_low <= curr_vwap).
-        4. SL al 20% sobre o debajo del VWAP (respecto a la distancia de banda):
-           - SHORT: curr_vwap + 0.20 * std_dev
-           - LONG: curr_vwap - 0.20 * std_dev
-        5. TP al 50% del VWAP hacia la siguiente banda:
-           - SHORT: curr_vwap - 0.50 * std_dev (hacia banda inferior)
-           - LONG: curr_vwap + 0.50 * std_dev (hacia banda superior)
+        3. Vela actual (t) - Detector Toque + Retroceso:
+           - SHORT: Toca o supera VWAP (high >= vwap), y retrocede hacia abajo por al menos VWAP_TOUCH_RETREAT_TICKS ticks.
+           - LONG: Toca o baja de VWAP (low <= vwap), y rebota hacia arriba por al menos VWAP_TOUCH_RETREAT_TICKS ticks.
+        4. SL Fijo a 5 ticks sobre/debajo de la línea VWAP (VWAP +/- 5 ticks).
+        5. TP al 50% de la distancia del VWAP hacia la siguiente banda.
+        6. Filtro de Tendencia de VWAP (7 velas): Pendiente plana (0t) o a favor (>= 1t).
         """
         if df_5m is None or len(df_5m) < 2:
             return None
@@ -446,32 +441,32 @@ class AxiomEngine:
 
         setup_type = None
 
-        # 3. CONDICIÓN SHORT:
+        # 3. CONDICIÓN SHORT (Detector Toque VWAP + Retroceso Confirmado):
         # a) Vela anterior t-1 completa (cuerpo y mechas) estrictamente DEBAJO del VWAP:
         prev_below_complete = (prev_high < prev_vwap) and (prev_open < prev_vwap) and (prev_close < prev_vwap)
-        # b) Vela actual t: El cuerpo viene desde la dirección del rechazo (debajo de VWAP)
-        # En ningún caso el cuerpo puede quedar del otro lado (arriba o sobre el VWAP):
-        body_top_short = max(curr_open, curr_close)
-        curr_body_strictly_below = (body_top_short < curr_vwap)
-        # c) La mecha actual del momento DEBE haber tocado o cruzado el VWAP hacia arriba:
+        # b) Vela actual t tocó o cruzó el VWAP hacia arriba:
         candle_wick_high = max(curr_high, curr_close)
-        curr_wick_touches_or_crosses_vwap_short = (candle_wick_high >= curr_vwap)
+        curr_wick_touches_vwap_short = (candle_wick_high >= curr_vwap)
+        # c) El precio retrocedió hacia abajo sobre/debajo del VWAP por al menos VWAP_TOUCH_RETREAT_TICKS:
+        curr_retreats_below_vwap = (curr_close <= curr_vwap - (VWAP_TOUCH_RETREAT_TICKS * tick_size))
+        # d) El cuerpo abrió debajo del VWAP (viene desde la dirección del rechazo):
+        curr_open_below = (curr_open < curr_vwap)
 
-        if prev_below_complete and curr_body_strictly_below and curr_wick_touches_or_crosses_vwap_short:
+        if prev_below_complete and curr_wick_touches_vwap_short and curr_retreats_below_vwap and curr_open_below:
             setup_type = "SHORT"
 
-        # 4. CONDICIÓN LONG:
+        # 4. CONDICIÓN LONG (Detector Toque VWAP + Rebote Confirmado):
         # a) Vela anterior t-1 completa (cuerpo y mechas) estrictamente ARRIBA del VWAP:
         prev_above_complete = (prev_low > prev_vwap) and (prev_open > prev_vwap) and (prev_close > prev_vwap)
-        # b) Vela actual t: El cuerpo viene desde la dirección del rechazo (arriba de VWAP)
-        # En ningún caso el cuerpo puede quedar del otro lado (abajo o sobre el VWAP):
-        body_bottom_long = min(curr_open, curr_close)
-        curr_body_strictly_above = (body_bottom_long > curr_vwap)
-        # c) La mecha actual del momento DEBE haber tocado o cruzado el VWAP hacia abajo:
+        # b) Vela actual t tocó o cruzó el VWAP hacia abajo:
         candle_wick_low = min(curr_low, curr_close)
-        curr_wick_touches_or_crosses_vwap_long = (candle_wick_low <= curr_vwap)
+        curr_wick_touches_vwap_long = (candle_wick_low <= curr_vwap)
+        # c) El precio rebotó hacia arriba sobre el VWAP por al menos VWAP_TOUCH_RETREAT_TICKS:
+        curr_rebounds_above_vwap = (curr_close >= curr_vwap + (VWAP_TOUCH_RETREAT_TICKS * tick_size))
+        # d) El cuerpo abrió arriba del VWAP (viene desde la dirección del rechazo):
+        curr_open_above = (curr_open > curr_vwap)
 
-        if prev_above_complete and curr_body_strictly_above and curr_wick_touches_or_crosses_vwap_long:
+        if prev_above_complete and curr_wick_touches_vwap_long and curr_rebounds_above_vwap and curr_open_above:
             setup_type = "LONG"
 
         if not setup_type:
@@ -496,45 +491,44 @@ class AxiomEngine:
                     slope_desc = "Plana (0t)" if slope_ticks == 0 else f"{slope_ticks:+d}t (A Favor)"
 
         # 5. CÁLCULO DE SL Y TP (SOBRE / DEBAJO DEL VWAP)
-        # SL: 30% de distancia desde el VWAP a la otra banda
-        d_sl_dist = round_to_tick(SL_VWAP_RATIO * std_dev, tick_size)
-        if d_sl_dist < 4 * tick_size:
-            d_sl_dist = 4 * tick_size
+        # SL: Fijo a 5 ticks sobre/debajo de la línea VWAP
+        if setup_type == "SHORT":
+            precio_sl = round_to_tick(curr_vwap + (SL_VWAP_BUFFER_TICKS * tick_size), tick_size)
+            # Salvaguarda CME ante deslizamiento rápido
+            if precio_sl <= curr_close + (2 * tick_size):
+                precio_sl = round_to_tick(curr_close + (4 * tick_size), tick_size)
+            banda_objetivo = curr_lower
+        else: # LONG
+            precio_sl = round_to_tick(curr_vwap - (SL_VWAP_BUFFER_TICKS * tick_size), tick_size)
+            # Salvaguarda CME ante deslizamiento rápido
+            if precio_sl >= curr_close - (2 * tick_size):
+                precio_sl = round_to_tick(curr_close - (4 * tick_size), tick_size)
+            banda_objetivo = curr_upper
 
-        # TP: 50% del VWAP hacia la siguiente banda
+        # TP: 50% de la distancia del VWAP hacia la siguiente banda
         d_tp_dist = round_to_tick(TP_VWAP_BAND_RATIO * std_dev, tick_size)
         if d_tp_dist < 4 * tick_size:
             d_tp_dist = 4 * tick_size
 
         if setup_type == "SHORT":
-            precio_sl = round_to_tick(curr_vwap + d_sl_dist, tick_size)
             precio_tp = round_to_tick(curr_vwap - d_tp_dist, tick_size)
-            # Salvaguardas CME ante deslizamiento rápido
-            if precio_sl <= curr_close + (2 * tick_size):
-                precio_sl = round_to_tick(curr_close + (4 * tick_size), tick_size)
             if precio_tp >= curr_close - (2 * tick_size):
                 precio_tp = round_to_tick(curr_close - (4 * tick_size), tick_size)
-            banda_objetivo = curr_lower
         else: # LONG
-            precio_sl = round_to_tick(curr_vwap - d_sl_dist, tick_size)
             precio_tp = round_to_tick(curr_vwap + d_tp_dist, tick_size)
-            # Salvaguardas CME ante deslizamiento rápido
-            if precio_sl >= curr_close - (2 * tick_size):
-                precio_sl = round_to_tick(curr_close - (4 * tick_size), tick_size)
             if precio_tp <= curr_close + (2 * tick_size):
                 precio_tp = round_to_tick(curr_close + (4 * tick_size), tick_size)
-            banda_objetivo = curr_upper
 
         sl_ticks = max(4, round(abs(curr_close - precio_sl) / tick_size))
         tp_ticks = max(4, round(abs(curr_close - precio_tp) / tick_size))
         d_base = abs(precio_tp - curr_close)
 
         condicion_desc = (
-            f"Reloj Suizo: Rechazo Mecha VWAP ({setup_type}) | "
+            f"Reloj Suizo: Detector Toque VWAP + Retroceso {VWAP_TOUCH_RETREAT_TICKS}t ({setup_type}) | "
             f"Tendencia VWAP 7 velas ({slope_desc}) | "
             f"Vela t-1 limpia ({'debajo' if setup_type=='SHORT' else 'arriba'}) | "
-            f"Vela t mecha {'superior' if setup_type=='SHORT' else 'inferior'} tocó VWAP ({curr_vwap:.2f}) | "
-            f"SL 30% ({precio_sl:.2f}) | TP 50% ({precio_tp:.2f})"
+            f"Toque VWAP ({curr_vwap:.2f}) confirmado | "
+            f"SL Fijo 5t ({precio_sl:.2f}) | TP 50% ({precio_tp:.2f})"
         )
 
         return {

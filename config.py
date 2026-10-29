@@ -41,10 +41,15 @@ STRATEGY_NAME = "VWAP Wick Rejection (Reloj Suizo)"
 # Ventana de comprobación: Desde el minuto 1 en adelante de la vela de 5m
 CHECK_WINDOW_START_MINUTE = int(os.getenv("CHECK_WINDOW_START_MINUTE", "1"))
 
-# Stop Loss: 30% de distancia desde el VWAP a la otra banda
+# Detector de Toque de VWAP + Retroceso Confirmado (Mecha en Tiempo Real)
+# El precio toca el VWAP y debe retroceder mínimo N ticks a favor del rechazo
+VWAP_TOUCH_RETREAT_TICKS = int(os.getenv("VWAP_TOUCH_RETREAT_TICKS", "2"))
+
+# Stop Loss: Fijo a 5 ticks sobre/debajo de la línea VWAP
+SL_VWAP_BUFFER_TICKS = int(os.getenv("SL_VWAP_BUFFER_TICKS", "5"))
 SL_VWAP_RATIO = float(os.getenv("SL_VWAP_RATIO", "0.30"))
 
-# Take Profit: 50% del VWAP hacia la siguiente banda
+# Take Profit: 50% de la distancia del VWAP hacia la siguiente banda
 TP_VWAP_BAND_RATIO = float(os.getenv("TP_VWAP_BAND_RATIO", "0.50"))
 
 # Cooldown por símbolo: Esperar mínimo 9 minutos tras ejecutar una operación
