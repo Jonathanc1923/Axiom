@@ -39,7 +39,11 @@ services:
       - key: MIN_SLOPE_POINTS_GOLD
         value: "1.0"
       - key: CME_OPEN_BUFFER_MINUTES
-        value: "150"
+        value: "120"
+      - key: SESSION_START_HOUR_PERU
+        value: "19"
+      - key: SESSION_START_MINUTE_PERU
+        value: "0"
       - key: TRAILING_DAILY_PROFIT_TRIGGER_USD
         value: "750.0"
       - key: TRAILING_DAILY_PROFIT_RETAIN_PCT

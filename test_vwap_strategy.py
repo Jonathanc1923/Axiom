@@ -770,21 +770,52 @@ class TestPureVWAPStrategy(unittest.TestCase):
         self.assertIsNone(self.engine.symbol_states["ES"]["active_trade"])
         self.assertEqual(self.mock_client.close_contract_position.call_count, 2)
 
-    def test_bloqueo_apertura_cme_primeras_dos_horas_media(self):
-        """Verifica que las primeras 2:30h tras la apertura de CME respeten el flag CME_OPEN_BUFFER_MINUTES."""
+    def test_bloqueo_apertura_cme_inicio_peru_siete_pm(self):
+        """Verifica que tras la apertura de CME se respete el inicio a las 7:00 PM hora de Perú (19:00 PET)."""
         from unittest.mock import patch
         from zoneinfo import ZoneInfo
 
-        # Con CME_OPEN_BUFFER_MINUTES=150 activado
-        with patch("engine.CME_OPEN_BUFFER_MINUTES", 150):
+        # Con buffer activado (CME_OPEN_BUFFER_MINUTES=120)
+        with patch("engine.CME_OPEN_BUFFER_MINUTES", 120):
+            # 1. En EDT (Horario de verano USA): 18:05 ET es 17:05 hora de Perú -> Bloqueado
             with patch("engine.datetime") as mock_dt:
                 mock_dt.now.return_value = datetime(2026, 10, 26, 18, 5, 0, tzinfo=ZoneInfo("America/New_York"))
                 operable, motivo = self.engine.es_horario_operable()
                 self.assertFalse(operable)
-                self.assertIn("18:00-20:30 ET", motivo)
+                self.assertIn("7:00 PM hora de Perú", motivo)
 
+            # 2. En EDT: 19:45 ET es 18:45 hora de Perú (aún no son las 7:00 PM) -> Bloqueado
             with patch("engine.datetime") as mock_dt:
-                mock_dt.now.return_value = datetime(2026, 10, 26, 20, 31, 0, tzinfo=ZoneInfo("America/New_York"))
+                mock_dt.now.return_value = datetime(2026, 10, 26, 19, 45, 0, tzinfo=ZoneInfo("America/New_York"))
+                operable, motivo = self.engine.es_horario_operable()
+                self.assertFalse(operable)
+                self.assertIn("7:00 PM hora de Perú", motivo)
+
+            # 3. En EDT: 20:01 ET es 19:01 hora de Perú (ya pasaron las 7:00 PM) -> Operable
+            with patch("engine.datetime") as mock_dt:
+                mock_dt.now.return_value = datetime(2026, 10, 26, 20, 1, 0, tzinfo=ZoneInfo("America/New_York"))
+                operable, motivo = self.engine.es_horario_operable()
+                self.assertTrue(operable)
+                self.assertIn("Sesión regular activa", motivo)
+
+            # 4. En EST (Invierno USA): 18:30 ET es 18:30 hora de Perú -> Bloqueado
+            with patch("engine.datetime") as mock_dt:
+                mock_dt.now.return_value = datetime(2026, 12, 1, 18, 30, 0, tzinfo=ZoneInfo("America/New_York"))
+                operable, motivo = self.engine.es_horario_operable()
+                self.assertFalse(operable)
+                self.assertIn("7:00 PM hora de Perú", motivo)
+
+            # 5. En EST (Invierno USA): 19:05 ET es 19:05 hora de Perú -> Operable
+            with patch("engine.datetime") as mock_dt:
+                mock_dt.now.return_value = datetime(2026, 12, 1, 19, 5, 0, tzinfo=ZoneInfo("America/New_York"))
+                operable, motivo = self.engine.es_horario_operable()
+                self.assertTrue(operable)
+                self.assertIn("Sesión regular activa", motivo)
+
+        # 6. Con buffer desactivado (CME_OPEN_BUFFER_MINUTES=0) -> Operable de inmediato a las 18:05 ET
+        with patch("engine.CME_OPEN_BUFFER_MINUTES", 0):
+            with patch("engine.datetime") as mock_dt:
+                mock_dt.now.return_value = datetime(2026, 10, 26, 18, 5, 0, tzinfo=ZoneInfo("America/New_York"))
                 operable, motivo = self.engine.es_horario_operable()
                 self.assertTrue(operable)
                 self.assertIn("Sesión regular activa", motivo)

@@ -41,6 +41,7 @@ from config import (
     HITO_1_TRIGGER_PCT, HITO_2_TRIGGER_PCT, HITO_2_SL_PCT, HITO_2_TP_EXPAND_PCT,
     HITO_3_TRIGGER_PCT, HITO_3_SL_PCT, HITO_3_TP_EXPAND_PCT,
     HITO_4_TRIGGER_PCT, HITO_4_SL_PCT, HITO_4_TP_EXPAND_PCT, RUNNER_TRAILING_TICKS, RUNNER_STEP_PCT,
+    SESSION_START_HOUR_PERU, SESSION_START_MINUTE_PERU,
     CME_OPEN_BUFFER_MINUTES, TRAILING_DAILY_PROFIT_TRIGGER_USD, TRAILING_DAILY_PROFIT_RETAIN_PCT
 )
 from topstep_client import TopstepClient
@@ -538,7 +539,7 @@ class AxiomEngine:
         - Candado de ganancia diaria trailing activado -> Bloqueado hasta nueva sesión.
         - Cierre de fin de semana: Viernes 17:00 ET a Domingo 18:00 ET.
         - Mantenimiento diario CME: 17:00 a 18:00 ET (Lunes a Jueves).
-        - Filtro de Apertura CME: Primeras 2:30h tras apertura (18:00 a 20:30 ET de Domingo a Jueves).
+        - Filtro de Apertura CME: Inicio de sesión a las 7:00 PM hora de Perú (19:00 PET) tras apertura/receso.
         - Sesión regular activa en el resto de horarios.
         """
         if self.daily_lock_active:
@@ -550,10 +551,23 @@ class AxiomEngine:
             utc_now = datetime.now(timezone.utc)
             ny_time = utc_now - timedelta(hours=4)
             
+        try:
+            if getattr(ny_time, "tzinfo", None) is not None:
+                peru_time = ny_time.astimezone(ZoneInfo("America/Lima"))
+            else:
+                peru_time = datetime.now(ZoneInfo("America/Lima"))
+        except Exception:
+            try:
+                peru_time = datetime.now(ZoneInfo("America/Lima"))
+            except Exception:
+                utc_now = datetime.now(timezone.utc)
+                peru_time = utc_now - timedelta(hours=5)
+
         weekday = ny_time.weekday() # 0=Lunes, 4=Viernes, 5=Sábado, 6=Domingo
         hour = ny_time.hour
         minute = ny_time.minute
         time_str = f"{hour:02d}:{minute:02d} ET"
+        peru_time_str = f"{peru_time.hour:02d}:{peru_time.minute:02d} PET"
         
         # Fin de semana
         if weekday == 5:
@@ -567,12 +581,17 @@ class AxiomEngine:
         if hour == 17:
             return False, f"Receso diario de mantenimiento CME (17:00-18:00 ET - {time_str})"
 
-        # Filtro de apertura CME: Bloqueo de las primeras horas (desactivado si CME_OPEN_BUFFER_MINUTES = 0)
+        # Filtro de apertura CME: Inicio programado a las 7:00 PM hora de Perú (19:00 PET)
+        # tras reapertura de las 18:00 ET (desactivado si CME_OPEN_BUFFER_MINUTES = 0)
         if CME_OPEN_BUFFER_MINUTES > 0:
-            if (hour == 18) or (hour == 19) or (hour == 20 and minute < 30):
-                return False, f"Pausa de seguridad: Primeras 2:30h apertura CME (18:00-20:30 ET - {time_str})"
+            if hour >= 18:
+                peru_target_minute = SESSION_START_HOUR_PERU * 60 + SESSION_START_MINUTE_PERU
+                peru_current_minute = peru_time.hour * 60 + peru_time.minute
+                if peru_current_minute < peru_target_minute:
+                    target_time_str = f"{SESSION_START_HOUR_PERU:02d}:{SESSION_START_MINUTE_PERU:02d} PET"
+                    return False, f"Pausa post-apertura CME: Inicio programado a las 7:00 PM hora de Perú ({target_time_str} / Actual: {peru_time_str} - {time_str})"
             
-        return True, f"Sesión regular activa ({time_str})"
+        return True, f"Sesión regular activa ({time_str} / {peru_time_str})"
 
     def get_open_position_size(self, sym: str, cached_positions: Optional[List[Dict[str, Any]]] = None) -> int:
         """Obtiene la cantidad neta de contratos abiertos para el símbolo especificado."""
@@ -2470,6 +2489,7 @@ class AxiomEngine:
                 "net_pnl": sym_stats.get("net_pnl", 0.0)
             }
             
+        is_operable, motivo_horario = self.es_horario_operable()
         return {
             "running": self.running,
             "active_symbol": self.active_symbol,
@@ -2481,6 +2501,10 @@ class AxiomEngine:
             "supported_symbols": list(SUPPORTED_SYMBOLS.keys()),
             "last_sync": self.stats.get("last_sync", "N/A"),
             "next_sync": self.stats.get("next_sync", "N/A"),
+            "schedule": {
+                "operable": is_operable,
+                "reason": motivo_horario
+            },
             "basket_tp": {
                 "target_usd": BASKET_TP_TARGET_USD,
                 "hard_usd": BASKET_TP_HARD_USD,

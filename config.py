@@ -85,8 +85,11 @@ def get_min_slope_points(symbol: str) -> float:
     spec = SUPPORTED_SYMBOLS.get(s, {})
     return float(spec.get("tickSize", 0.25) * MIN_VWAP_SLOPE_TICKS)
 
-# Filtro Horario de Inicio de Sesión CME: 0 minutos (apertura inmediata a las 18:00 ET)
-CME_OPEN_BUFFER_MINUTES = int(os.getenv("CME_OPEN_BUFFER_MINUTES", "0"))
+# Filtro Horario de Inicio de Sesión CME tras pausa diaria:
+# Inicio oficial de operaciones a las 7:00 PM hora de Perú (19:00 America/Lima)
+SESSION_START_HOUR_PERU = int(os.getenv("SESSION_START_HOUR_PERU", "19"))
+SESSION_START_MINUTE_PERU = int(os.getenv("SESSION_START_MINUTE_PERU", "0"))
+CME_OPEN_BUFFER_MINUTES = int(os.getenv("CME_OPEN_BUFFER_MINUTES", "120"))
 
 # Intervalo central de monitoreo y actualización de mercado (2.0 segundos)
 POLL_INTERVAL_SECONDS = float(os.getenv("POLL_INTERVAL_SECONDS", "2.0"))
