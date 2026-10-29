@@ -16,7 +16,7 @@ TOPSTEP_API_KEY = os.getenv("TOPSTEP_API_KEY", "O/Jvyz5VggKPKRLF69YDGJQjXIcxsKux
 TOPSTEP_BASE_URL = os.getenv("TOPSTEP_BASE_URL", "https://api.topstepx.com").rstrip("/")
 
 # Practice / Safety Filter
-ACCOUNT_NAME = os.getenv("ACCOUNT_NAME", "PRAC-V2-460183-28640537").strip()
+ACCOUNT_NAME = os.getenv("ACCOUNT_NAME", "PRAC-V2-460183-27496336").strip()
 ACCOUNT_FILTER = os.getenv("ACCOUNT_FILTER", "PRAC").upper()
 
 # Default Symbol on Startup
@@ -34,59 +34,27 @@ CSV_DIR = DATA_DIR
 CSV_PATH = os.path.join(DATA_DIR, "registro_operaciones.csv")
 
 # ==========================================
-# Institutional Strategy Configuration: Dynamic Band Reversion & Multi-Position
+# Institutional Strategy Configuration: RELOJ SUIZO (Vela Mecha VWAP)
 # ==========================================
-# SL Inicial: 45% de distancia entre la línea VWAP y la banda contraria (Fijo, no dinámico)
-INITIAL_SL_OPPOSITE_BAND_RATIO = float(os.getenv("INITIAL_SL_OPPOSITE_BAND_RATIO", "0.45"))
+STRATEGY_NAME = "VWAP Wick Rejection (Reloj Suizo)"
 
-# TP Inicial: 50% de distancia entre línea VWAP y la banda objetivo (Fijo, no dinámico)
-INITIAL_TP_TARGET_BAND_RATIO = float(os.getenv("INITIAL_TP_TARGET_BAND_RATIO", "0.50"))
+# Ventana de comprobación: Del minuto 4 al 5 de la vela de 5m (últimos 60s antes del cierre)
+CHECK_WINDOW_START_MINUTE = int(os.getenv("CHECK_WINDOW_START_MINUTE", "4"))
 
-# Trailing Dinámico: Desactivado por solicitud ("ya sin sl ni tp dinamicos, ahora son fijos")
-USE_DYNAMIC_TRAILING = os.getenv("USE_DYNAMIC_TRAILING", "false").lower() in ("true", "1", "yes")
+# Stop Loss: 20% sobre o debajo del VWAP (calculado respecto a la distancia de banda)
+SL_VWAP_RATIO = float(os.getenv("SL_VWAP_RATIO", "0.20"))
 
-# Gatillo de protección (mantiene compatibilidad de hitos si se reactiva)
-TRIGGER_TP_ADVANCE_PCT = float(os.getenv("TRIGGER_TP_ADVANCE_PCT", "25.0"))
-LOCK_PROFIT_TICKS = int(os.getenv("LOCK_PROFIT_TICKS", "5"))
-EXPAND_TP_PCT = float(os.getenv("EXPAND_TP_PCT", "25.0"))
-STEP_SL_PCT = float(os.getenv("STEP_SL_PCT", "25.0"))
+# Take Profit: 50% del VWAP hacia la siguiente banda (calculado respecto al VWAP y banda objetivo)
+TP_VWAP_BAND_RATIO = float(os.getenv("TP_VWAP_BAND_RATIO", "0.50"))
 
-# Máximo de operaciones simultáneas permitidas por símbolo (1 operación por activo para gestión estricta)
+# Cooldown por símbolo: Esperar mínimo 9 minutos tras ejecutar una operación
+SYMBOL_COOLDOWN_MINUTES = int(os.getenv("SYMBOL_COOLDOWN_MINUTES", "9"))
+SYMBOL_COOLDOWN_SECONDS = SYMBOL_COOLDOWN_MINUTES * 60
+
+# Máximo de operaciones simultáneas permitidas por símbolo (1 operación estricta)
 MAX_POSITIONS_PER_SYMBOL = int(os.getenv("MAX_POSITIONS_PER_SYMBOL", "1"))
 
-# Diferencia mínima en ticks requerida para la vela anterior (t-1) respecto al VWAP (1 tick mínimo)
-MIN_PREV_CANDLE_DIFF_TICKS = int(os.getenv("MIN_PREV_CANDLE_DIFF_TICKS", "1"))
-
-# Filtro de Tendencia (Pendiente VWAP): Activo con lookback de 7 velas (35m) y mínimo de 1 tick a favor
-USE_VWAP_SLOPE_FILTER = os.getenv("USE_VWAP_SLOPE_FILTER", "true").lower() in ("true", "1", "yes")
-VWAP_SLOPE_LOOKBACK_BARS = int(os.getenv("VWAP_SLOPE_LOOKBACK_BARS", "7"))
-MIN_VWAP_SLOPE_TICKS = int(os.getenv("MIN_VWAP_SLOPE_TICKS", "1"))
-
-# Stop Loss Inicial de respaldo universal y por activo (ticks) si no hay banda calculada
-INITIAL_SL_TICKS = int(os.getenv("INITIAL_SL_TICKS", "35"))
-INITIAL_SL_TICKS_ES = int(os.getenv("INITIAL_SL_TICKS_ES", "35"))
-INITIAL_SL_TICKS_NQ = int(os.getenv("INITIAL_SL_TICKS_NQ", "90"))
-INITIAL_SL_TICKS_YM = int(os.getenv("INITIAL_SL_TICKS_YM", "50"))
-INITIAL_SL_TICKS_RTY = int(os.getenv("INITIAL_SL_TICKS_RTY", "40"))
-INITIAL_SL_TICKS_CL = int(os.getenv("INITIAL_SL_TICKS_CL", "35"))
-INITIAL_SL_TICKS_GC = int(os.getenv("INITIAL_SL_TICKS_GC", "35"))
-
-# Distancia de activación de entrada al VWAP: 5 ticks exactos para todos los símbolos
-VWAP_TRIGGER_DISTANCE_TICKS = int(os.getenv("VWAP_TRIGGER_DISTANCE_TICKS", "5"))
-VWAP_TRIGGER_DISTANCE_TICKS_ES = VWAP_TRIGGER_DISTANCE_TICKS
-
-def get_vwap_trigger_distance_ticks(symbol: str) -> int:
-    """Devuelve la distancia máxima en ticks al VWAP para activar la entrada (5 ticks exactos)."""
-    return VWAP_TRIGGER_DISTANCE_TICKS
-
-# Umbrales de pendiente por símbolo: mínimo 1 tick del activo
-def get_min_slope_points(symbol: str) -> float:
-    s = (symbol or "").upper()
-    spec = SUPPORTED_SYMBOLS.get(s, {})
-    return float(spec.get("tickSize", 0.25) * MIN_VWAP_SLOPE_TICKS)
-
 # Filtro Horario de Inicio de Sesión CME tras pausa diaria:
-# Inicio oficial de operaciones a las 7:00 PM hora de Perú (19:00 America/Lima)
 SESSION_START_HOUR_PERU = int(os.getenv("SESSION_START_HOUR_PERU", "19"))
 SESSION_START_MINUTE_PERU = int(os.getenv("SESSION_START_MINUTE_PERU", "0"))
 CME_OPEN_BUFFER_MINUTES = int(os.getenv("CME_OPEN_BUFFER_MINUTES", "120"))
@@ -94,39 +62,58 @@ CME_OPEN_BUFFER_MINUTES = int(os.getenv("CME_OPEN_BUFFER_MINUTES", "120"))
 # Intervalo central de monitoreo y actualización de mercado (2.0 segundos)
 POLL_INTERVAL_SECONDS = float(os.getenv("POLL_INTERVAL_SECONDS", "2.0"))
 
-# Modo Runner Trailing: Persigue al precio a 15 ticks fijos por detrás del máximo alcanzado
-RUNNER_TRAILING_TICKS = int(os.getenv("RUNNER_TRAILING_TICKS", "15"))
-RUNNER_STEP_PCT = float(os.getenv("RUNNER_STEP_PCT", "25.0"))
+# Sin topes de ganancia ni pérdida ni canastas a recoger (Solicitud explícita)
+USE_DAILY_PROFIT_LOCK = False
+USE_SESSION_PROFIT_TARGET = False
+USE_BASKET_TP = False
+SESSION_PROFIT_TARGET_USD = 999999999.0
+TRAILING_DAILY_PROFIT_TRIGGER_USD = 999999999.0
+TRAILING_DAILY_PROFIT_RETAIN_PCT = 0.0
+BASKET_TP_TARGET_USD = 999999999.0
+BASKET_TP_HARD_USD = 999999999.0
+BASKET_COOLDOWN_SECONDS = 0
 
-# Compatibilidad con definiciones previas de hitos
-HITO_MICRO_TRIGGER_PCT = 20.0
-HITO_MICRO_SL_TICKS = 15
-HITO_1_TRIGGER_PCT = 25.0
-HITO_2_TRIGGER_PCT = 50.0
-HITO_2_SL_PCT = 0.25
-HITO_2_TP_EXPAND_PCT = 1.25
-HITO_3_TRIGGER_PCT = 75.0
-HITO_3_SL_PCT = 0.50
-HITO_3_TP_EXPAND_PCT = 1.50
-HITO_4_TRIGGER_PCT = 100.0
-HITO_4_SL_PCT = 0.75
-HITO_4_TP_EXPAND_PCT = 1.75
+# Placeholders de compatibilidad para módulos legacy
+INITIAL_SL_OPPOSITE_BAND_RATIO = 0.0
+INITIAL_TP_TARGET_BAND_RATIO = 0.0
+USE_DYNAMIC_TRAILING = False
+TRIGGER_TP_ADVANCE_PCT = 0.0
+LOCK_PROFIT_TICKS = 0
+EXPAND_TP_PCT = 0.0
+STEP_SL_PCT = 0.0
+MIN_PREV_CANDLE_DIFF_TICKS = 0
+USE_VWAP_SLOPE_FILTER = False
+VWAP_SLOPE_LOOKBACK_BARS = 7
+MIN_VWAP_SLOPE_TICKS = 0
+INITIAL_SL_TICKS = 35
+INITIAL_SL_TICKS_ES = 35
+INITIAL_SL_TICKS_NQ = 90
+INITIAL_SL_TICKS_YM = 50
+INITIAL_SL_TICKS_RTY = 40
+INITIAL_SL_TICKS_CL = 35
+INITIAL_SL_TICKS_GC = 35
+VWAP_TRIGGER_DISTANCE_TICKS = 0
+VWAP_TRIGGER_DISTANCE_TICKS_ES = 0
+RUNNER_TRAILING_TICKS = 0
+RUNNER_STEP_PCT = 0.0
+HITO_MICRO_TRIGGER_PCT = 0.0
+HITO_MICRO_SL_TICKS = 0
+HITO_1_TRIGGER_PCT = 0.0
+HITO_2_TRIGGER_PCT = 0.0
+HITO_2_SL_PCT = 0.0
+HITO_2_TP_EXPAND_PCT = 0.0
+HITO_3_TRIGGER_PCT = 0.0
+HITO_3_SL_PCT = 0.0
+HITO_3_TP_EXPAND_PCT = 0.0
+HITO_4_TRIGGER_PCT = 0.0
+HITO_4_SL_PCT = 0.0
+HITO_4_TP_EXPAND_PCT = 0.0
 
-# ==========================================
-# Meta de Ganancia Total de la Sesión (Session Complete Profit Stop)
-# ==========================================
-# Parar operaciones si se llega a tener este profit en la sesión completa ($1,500 USD)
-SESSION_PROFIT_TARGET_USD = float(os.getenv("SESSION_PROFIT_TARGET_USD", "1500.0"))
-TRAILING_DAILY_PROFIT_TRIGGER_USD = float(os.getenv("TRAILING_DAILY_PROFIT_TRIGGER_USD", "1500.0"))
-TRAILING_DAILY_PROFIT_RETAIN_PCT = float(os.getenv("TRAILING_DAILY_PROFIT_RETAIN_PCT", "0.70"))
+def get_vwap_trigger_distance_ticks(symbol: str) -> int:
+    return 0
 
-# ==========================================
-# Canasta de Ganancia Global (Portfolio Basket Take-Profit)
-# ==========================================
-# Recolectar todo cuando vayan ganando $750 USD en total de símbolos a la vez
-BASKET_TP_TARGET_USD = float(os.getenv("BASKET_TP_TARGET_USD", "750.0"))
-BASKET_TP_HARD_USD = float(os.getenv("BASKET_TP_HARD_USD", "800.0"))
-BASKET_COOLDOWN_SECONDS = int(os.getenv("BASKET_COOLDOWN_SECONDS", "300")) # 5 minutos de pausa tras cerrar la canasta
+def get_min_slope_points(symbol: str) -> float:
+    return 0.0
 
 # ==========================================
 # Supported Institutional CME Futures Specifications

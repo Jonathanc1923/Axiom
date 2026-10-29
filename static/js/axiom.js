@@ -70,6 +70,20 @@ document.addEventListener('DOMContentLoaded', () => {
     const btnDownloadCsv = document.getElementById('btn-download-csv');
     const matrixTableBody = document.getElementById('matrix-table-body');
 
+    // Ranking por Símbolo UI Elements (Nueva Ley)
+    let latestRankingData = null;
+    const rankTotalNet = document.getElementById('rank-total-net');
+    const rankTotalGrossSub = document.getElementById('rank-total-gross-sub');
+    const rankTotalWinrate = document.getElementById('rank-total-winrate');
+    const rankTotalTradesSub = document.getElementById('rank-total-trades-sub');
+    const rankTotalPf = document.getElementById('rank-total-pf');
+    const rankLeaderSymbol = document.getElementById('rank-leader-symbol');
+    const rankLeaderPnl = document.getElementById('rank-leader-pnl');
+    const rankingTableBody = document.getElementById('ranking-table-body');
+    const rankingTableFoot = document.getElementById('ranking-table-foot');
+    const selectRankingDetailFilter = document.getElementById('select-ranking-detail-filter');
+    const rankingOperationsDetailBody = document.getElementById('ranking-operations-detail-body');
+
     // ==========================================
     // 1. INITIALIZE TRADINGVIEW LIGHTWEIGHT CHART
     // ==========================================
@@ -311,10 +325,14 @@ document.addEventListener('DOMContentLoaded', () => {
                         renderFleetStrip(msg.symbols_matrix);
                         updateMatrixUI(msg.symbols_matrix);
                     }
+                    if (msg.ranking) {
+                        renderRankingSection(msg.ranking);
+                    }
                 } else if (msg.type === 'log') {
                     appendTerminalLine(msg.data);
                     if (msg.data.category === 'ORDER' || msg.data.category === 'SYSTEM') {
                         loadOperations();
+                        loadRankingData();
                     }
                 }
             } catch (err) {
@@ -681,6 +699,7 @@ document.addEventListener('DOMContentLoaded', () => {
             rawOperations = data.csv_records || [];
             if (data.stats) updateMetricsUI(data.stats, isRunning);
             renderOperationsTable();
+            loadRankingData();
         } catch (e) {
             console.error('Error loading operations:', e);
         }
@@ -818,6 +837,194 @@ document.addEventListener('DOMContentLoaded', () => {
             operationsTableBody.appendChild(tr);
         });
     }
+
+    // ==========================================
+    // 8.1 RANKING CUANTITATIVO Y TOTALES POR SÍMBOLO (NUEVA SECCIÓN)
+    // ==========================================
+    async function loadRankingData() {
+        try {
+            const res = await fetch('/api/ranking');
+            if (!res.ok) return;
+            const data = await res.json();
+            renderRankingSection(data);
+        } catch (e) {
+            console.error('Error al cargar ranking de operaciones:', e);
+        }
+    }
+
+    function renderRankingSection(data) {
+        if (!data) return;
+        latestRankingData = data;
+        const gt = data.grand_total || {};
+        const ranking = data.ranking || [];
+
+        // Ribbon de Totales Globales
+        if (rankTotalNet) {
+            const netVal = gt.net_pnl || 0;
+            rankTotalNet.textContent = `${netVal >= 0 ? '+' : ''}$${netVal.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+            rankTotalNet.style.color = netVal >= 0 ? '#10B981' : '#EF4444';
+        }
+        if (rankTotalGrossSub) {
+            rankTotalGrossSub.textContent = `Bruto: $${(gt.gross_pnl || 0).toLocaleString('en-US', { minimumFractionDigits: 2 })} | Fees: -$${(gt.commissions || 0).toLocaleString('en-US', { minimumFractionDigits: 2 })}`;
+        }
+        if (rankTotalWinrate) {
+            rankTotalWinrate.textContent = `${(gt.win_rate || 0).toFixed(1)}%`;
+        }
+        if (rankTotalTradesSub) {
+            rankTotalTradesSub.textContent = `${gt.total_trades || 0} Operaciones (${gt.winning_trades || 0}W / ${gt.losing_trades || 0}L / ${gt.breakeven_trades || 0}BE)`;
+        }
+        if (rankTotalPf) {
+            rankTotalPf.textContent = (gt.profit_factor || 0).toFixed(2);
+        }
+        if (rankLeaderSymbol) {
+            const leader = ranking.find(r => r.total_trades > 0) || ranking[0];
+            if (leader && leader.total_trades > 0) {
+                rankLeaderSymbol.textContent = leader.symbol;
+                if (rankLeaderPnl) {
+                    const pnlVal = leader.net_pnl || 0;
+                    rankLeaderPnl.textContent = `${pnlVal >= 0 ? '+' : ''}$${pnlVal.toFixed(2)} USD (${leader.win_rate.toFixed(1)}% WR)`;
+                    rankLeaderPnl.style.color = pnlVal >= 0 ? '#10B981' : '#EF4444';
+                }
+            } else {
+                rankLeaderSymbol.textContent = '--';
+                if (rankLeaderPnl) rankLeaderPnl.textContent = 'En espera de operaciones';
+            }
+        }
+
+        // Tabla Ranking por Símbolo (Totales Agrupados)
+        if (rankingTableBody) {
+            rankingTableBody.innerHTML = '';
+            ranking.forEach(item => {
+                const tr = document.createElement('tr');
+                const net = item.net_pnl || 0;
+                const gross = item.gross_pnl || 0;
+                const comms = item.commissions || 0;
+                const wr = item.win_rate || 0;
+                const rankNum = item.rank || 1;
+
+                let medal = `#${rankNum}`;
+                if (rankNum === 1 && item.total_trades > 0) medal = '🥇 1';
+                else if (rankNum === 2 && item.total_trades > 0) medal = '🥈 2';
+                else if (rankNum === 3 && item.total_trades > 0) medal = '🥉 3';
+
+                tr.innerHTML = `
+                    <td style="font-weight:700; color:${rankNum <= 3 && item.total_trades > 0 ? '#FACC15' : '#94A3B8'}; text-align:center;">${medal}</td>
+                    <td><span class="badge-sym" style="cursor:pointer;" onclick="switchSymbol('${item.symbol}')">${item.symbol}</span></td>
+                    <td style="font-size:12px; color:#F8FAFC;">${escapeHtml(item.name || item.symbol)}</td>
+                    <td style="text-align:center; font-family:var(--font-mono); font-weight:700;">${item.total_trades}</td>
+                    <td style="text-align:center; font-family:var(--font-mono); font-size:12px;">
+                        <span style="color:#10B981;">${item.winning_trades}</span> / <span style="color:#EF4444;">${item.losing_trades}</span> / <span style="color:#94A3B8;">${item.breakeven_trades}</span>
+                    </td>
+                    <td style="text-align:center;">
+                        <span style="font-weight:700; font-family:var(--font-mono); color:${wr >= 50 ? '#10B981' : '#EF4444'};">${wr.toFixed(1)}%</span>
+                    </td>
+                    <td style="text-align:right; font-family:var(--font-mono); color:${gross >= 0 ? '#10B981' : '#EF4444'};">${gross >= 0 ? '+' : ''}$${gross.toFixed(2)}</td>
+                    <td style="text-align:right; font-family:var(--font-mono); color:#94A3B8;">-$${comms.toFixed(2)}</td>
+                    <td style="text-align:right; font-family:var(--font-mono); font-weight:700; font-size:13px; color:${net >= 0 ? '#10B981' : '#EF4444'};">${net >= 0 ? '+' : ''}$${net.toFixed(2)}</td>
+                    <td style="text-align:center; font-family:var(--font-mono); font-weight:600; color:#38BDF8;">${item.profit_factor.toFixed(2)}</td>
+                    <td style="text-align:right; font-family:var(--font-mono); color:#10B981;">${item.best_trade > 0 ? '+' : ''}$${item.best_trade.toFixed(2)}</td>
+                    <td style="text-align:right; font-family:var(--font-mono); color:#EF4444;">${item.worst_trade !== 0 ? '' : ''}$${item.worst_trade.toFixed(2)}</td>
+                    <td style="text-align:center;">
+                        <button class="btn-small" style="font-size:10px; padding:3px 8px;" onclick="filterRankingDetail('${item.symbol}')">Ver Detalle</button>
+                    </td>
+                `;
+                rankingTableBody.appendChild(tr);
+            });
+        }
+
+        // Fila de Totales en Pie de Tabla
+        if (rankingTableFoot) {
+            const netG = gt.net_pnl || 0;
+            const grossG = gt.gross_pnl || 0;
+            const commsG = gt.commissions || 0;
+            const wrG = gt.win_rate || 0;
+
+            rankingTableFoot.innerHTML = `
+                <tr>
+                    <td colspan="3" style="text-align:left; font-weight:700; color:#FACC15; padding:10px;">TOTAL GENERAL CONSOLIDADO</td>
+                    <td style="text-align:center; font-family:var(--font-mono); font-weight:700;">${gt.total_trades || 0}</td>
+                    <td style="text-align:center; font-family:var(--font-mono); font-size:12px;">
+                        <span style="color:#10B981;">${gt.winning_trades || 0}</span> / <span style="color:#EF4444;">${gt.losing_trades || 0}</span> / <span style="color:#94A3B8;">${gt.breakeven_trades || 0}</span>
+                    </td>
+                    <td style="text-align:center; font-weight:700; font-family:var(--font-mono); color:${wrG >= 50 ? '#10B981' : '#EF4444'};">${wrG.toFixed(1)}%</td>
+                    <td style="text-align:right; font-family:var(--font-mono); color:${grossG >= 0 ? '#10B981' : '#EF4444'};">${grossG >= 0 ? '+' : ''}$${grossG.toFixed(2)}</td>
+                    <td style="text-align:right; font-family:var(--font-mono); color:#94A3B8;">-$${commsG.toFixed(2)}</td>
+                    <td style="text-align:right; font-family:var(--font-mono); font-weight:700; font-size:14px; color:${netG >= 0 ? '#10B981' : '#EF4444'};">${netG >= 0 ? '+' : ''}$${netG.toFixed(2)}</td>
+                    <td style="text-align:center; font-family:var(--font-mono); font-weight:700; color:#38BDF8;">${(gt.profit_factor || 0).toFixed(2)}</td>
+                    <td colspan="3" style="text-align:center; color:#64748B; font-size:11px;">Consolidado Auditoría TopstepX</td>
+                </tr>
+            `;
+        }
+
+        renderRankingOperationsDetail();
+    }
+
+    function renderRankingOperationsDetail() {
+        if (!rankingOperationsDetailBody || !latestRankingData) return;
+        rankingOperationsDetailBody.innerHTML = '';
+
+        const filterSym = selectRankingDetailFilter ? selectRankingDetailFilter.value : 'ALL';
+        const allTrades = latestRankingData.all_trades || [];
+
+        const filtered = allTrades.filter(t => {
+            if (filterSym === 'ALL') return true;
+            return (t.simbolo || '').toUpperCase() === filterSym;
+        });
+
+        if (filtered.length === 0) {
+            rankingOperationsDetailBody.innerHTML = `<tr><td colspan="17" style="text-align:center; color:#64748B; padding:24px;">No hay operaciones registradas para el filtro seleccionado (${filterSym}).</td></tr>`;
+            return;
+        }
+
+        filtered.forEach(t => {
+            const tr = document.createElement('tr');
+            const isLong = (t.direccion || '').toUpperCase() === 'LONG';
+            const net = parseFloat(t.pnl_neto || 0);
+            const gross = parseFloat(t.pnl_bruto || 0);
+            const comms = parseFloat(t.comisiones || 0);
+            const estado = (t.estado || '').toUpperCase();
+            const isClosed = estado.includes('CERRADA');
+            const isLive = estado.includes('EN CURSO') || estado.includes('ABIERTA');
+
+            let badgeClass = 'badge-rejected';
+            if (isClosed) badgeClass = net >= 0 ? 'badge-executed' : 'badge-short';
+            else if (isLive) badgeClass = 'badge-long';
+
+            const pIn = parseFloat(t.precio_entrada || 0);
+            const pInStr = pIn > 0 ? pIn.toLocaleString('en-US', { minimumFractionDigits: 2 }) : '--.--';
+            const pOut = parseFloat(t.precio_salida || 0);
+            const pOutStr = !isNaN(pOut) && pOut > 0 ? pOut.toLocaleString('en-US', { minimumFractionDigits: 2 }) : (t.precio_salida || '--.--');
+
+            tr.innerHTML = `
+                <td>${escapeHtml(t.fecha || '')}</td>
+                <td style="font-family:var(--font-mono); font-weight:600; color:#38BDF8;">${escapeHtml(t.hora_apertura || '--:--:--')}</td>
+                <td style="font-family:var(--font-mono); font-weight:600; color:${isClosed ? '#94A3B8' : '#10B981'};">${isLive ? '<span style="color:#10B981; font-weight:700;">EN CURSO</span>' : escapeHtml(t.hora_cierre || '--:--:--')}</td>
+                <td><span class="badge-sym" style="cursor:pointer;" onclick="switchSymbol('${t.simbolo}')">${t.simbolo}</span></td>
+                <td><span class="badge ${isLong ? 'badge-long' : 'badge-short'}">${t.direccion || ''}</span></td>
+                <td><span class="badge ${badgeClass}">${escapeHtml(t.estado || '')}</span></td>
+                <td style="font-family:var(--font-mono); font-weight:600;">${pInStr}</td>
+                <td style="font-family:var(--font-mono);">${pOutStr}</td>
+                <td style="font-family:var(--font-mono); color:#38BDF8;">${escapeHtml(String(t.vwap_entrada || '--'))}</td>
+                <td style="font-family:var(--font-mono); color:#10B981;">${escapeHtml(String(t.tp_inicial || '--'))}</td>
+                <td style="font-family:var(--font-mono); font-weight:700; color:#10B981;">🎯 ${escapeHtml(String(t.tp_max_alcanzado || '--'))}</td>
+                <td style="font-family:var(--font-mono); color:#EF4444;">${escapeHtml(String(t.sl_inicial || '--'))}</td>
+                <td style="font-family:var(--font-mono); font-weight:700; color:#EF4444;">🛑 ${escapeHtml(String(t.sl_max_alcanzado || '--'))}</td>
+                <td style="font-family:var(--font-mono); color:${gross >= 0 ? '#10B981' : '#EF4444'};">${gross >= 0 ? '+' : ''}$${gross.toFixed(2)}</td>
+                <td style="font-family:var(--font-mono); color:#94A3B8;">${comms > 0 ? `-$${comms.toFixed(2)}` : '$0.00'}</td>
+                <td style="font-family:var(--font-mono); font-weight:700; color:${net >= 0 ? '#10B981' : '#EF4444'};">${net >= 0 ? '+' : ''}$${net.toFixed(2)}</td>
+                <td style="max-width:240px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:11px;" title="${escapeHtml(t.condicion || '')}">${escapeHtml(t.condicion || '')}</td>
+            `;
+            rankingOperationsDetailBody.appendChild(tr);
+        });
+    }
+
+    window.filterRankingDetail = function(sym) {
+        if (selectRankingDetailFilter) {
+            selectRankingDetailFilter.value = sym;
+            renderRankingOperationsDetail();
+            selectRankingDetailFilter.scrollIntoView({ behavior: 'smooth' });
+        }
+    };
 
     // ==========================================
     // 9. MULTI-SYMBOL CONTROLS & REST ACTIONS
@@ -964,6 +1171,11 @@ document.addEventListener('DOMContentLoaded', () => {
         selectOpFilter.addEventListener('change', renderOperationsTable);
     }
 
+    // Ranking detail filter
+    if (selectRankingDetailFilter) {
+        selectRankingDetailFilter.addEventListener('change', renderRankingOperationsDetail);
+    }
+
     // Dedicated terminal symbol filter buttons
     if (terminalSymBar) {
         terminalSymBar.querySelectorAll('.term-sym-btn').forEach(btn => {
@@ -1007,10 +1219,12 @@ document.addEventListener('DOMContentLoaded', () => {
     fetchChartData();
     connectWebSocket();
     loadOperations();
+    loadRankingData();
     
     // Refresh operations and chart every 45s
     setInterval(() => {
         fetchChartData();
         loadOperations();
+        loadRankingData();
     }, 45000);
 });

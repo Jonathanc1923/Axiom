@@ -212,6 +212,11 @@ def get_operations():
         "stats": engine.stats
     }
 
+@app.get("/api/ranking")
+def get_ranking():
+    """Retorna el ranking consolidado y estadísticas por símbolo con su historial detallado."""
+    return engine.get_symbols_ranking_and_stats()
+
 @app.get("/api/operations/download")
 def download_csv():
     if os.path.isfile(CSV_PATH):
@@ -260,12 +265,16 @@ async def websocket_endpoint(websocket: WebSocket):
                 telemetry_data = engine.latest_telemetry
                 stats_data = engine.stats
                 matrix_data = engine.get_status().get("symbols_matrix", {})
+            
+            # Ranking consolidado por símbolo
+            ranking_data = engine.get_symbols_ranking_and_stats()
                 
             await websocket.send_text(json.dumps({
                 "type": "telemetry",
                 "telemetry": telemetry_data,
                 "stats": stats_data,
                 "symbols_matrix": matrix_data,
+                "ranking": ranking_data,
                 "running": engine.running
             }))
     except WebSocketDisconnect:

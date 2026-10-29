@@ -42,7 +42,9 @@ from config import (
     HITO_3_TRIGGER_PCT, HITO_3_SL_PCT, HITO_3_TP_EXPAND_PCT,
     HITO_4_TRIGGER_PCT, HITO_4_SL_PCT, HITO_4_TP_EXPAND_PCT, RUNNER_TRAILING_TICKS, RUNNER_STEP_PCT,
     SESSION_START_HOUR_PERU, SESSION_START_MINUTE_PERU,
-    CME_OPEN_BUFFER_MINUTES, TRAILING_DAILY_PROFIT_TRIGGER_USD, TRAILING_DAILY_PROFIT_RETAIN_PCT
+    CME_OPEN_BUFFER_MINUTES, TRAILING_DAILY_PROFIT_TRIGGER_USD, TRAILING_DAILY_PROFIT_RETAIN_PCT,
+    STRATEGY_NAME, CHECK_WINDOW_START_MINUTE, SL_VWAP_RATIO, TP_VWAP_BAND_RATIO,
+    SYMBOL_COOLDOWN_MINUTES, SYMBOL_COOLDOWN_SECONDS, USE_BASKET_TP, USE_DAILY_PROFIT_LOCK
 )
 from topstep_client import TopstepClient
 
@@ -371,176 +373,182 @@ class AxiomEngine:
         return df_sesion.reset_index(drop=True)
 
     # ==========================================
-    # STRATEGY ENGINE: PURE VWAP TOUCH & CONTEXT
+    # STRATEGY ENGINE: RELOJ SUIZO (RECHAZO DE MECHA EN VWAP)
     # ==========================================
     def verificar_setup_vwap(self, df_5m: pd.DataFrame, sym: str, current_price: Optional[float] = None) -> Optional[Dict[str, Any]]:
         """
-        Estrategia de Reversión VWAP Dinámica:
-        1. Contexto vela anterior (5m): Vela previa separada al menos 1 tick del VWAP.
-           - Para LONG: Low_prev > VWAP_prev + (MIN_PREV_CANDLE_DIFF_TICKS * tick_size)
-           - Para SHORT: High_prev < VWAP_prev - (MIN_PREV_CANDLE_DIFF_TICKS * tick_size)
-        2. Gatillo de proximidad al VWAP:
-           - Para LONG: precio_mercado <= VWAP + trigger_dist
-           - Para SHORT: precio_mercado >= VWAP - trigger_dist
-        3. SL y TP Dinámicos calculados por bandas:
-           - SL Inicial: 1/5 (20%) de la distancia entre VWAP y la BANDA CONTRARIA:
-             * LONG: SL = VWAP - 0.20 * (VWAP - Lower_Band)
-             * SHORT: SL = VWAP + 0.20 * (Upper_Band - VWAP)
-           - TP Inicial: 50% de la distancia entre precio de entrada y la BANDA SIGUIENTE:
-             * LONG: TP = precio_entrada + 0.50 * (Upper_Band - precio_entrada)
-             * SHORT: TP = precio_entrada - 0.50 * (precio_entrada - Lower_Band)
+        NUEVA LEY - RELOJ SUIZO:
+        1. Ventana de tiempo: Del minuto 4 al 5 de la vela de 5m (now_utc.minute % 5 == 4 o 240s <= elapsed < 300s).
+           Se evalúa cada 2 segundos.
+        2. Vela anterior (t-1):
+           - SHORT: Cerró en cuerpo y mecha completo debajo del VWAP (prev_high < prev_vwap).
+           - LONG: Cerró en cuerpo y mecha completo arriba del VWAP (prev_low > prev_vwap).
+        3. Vela actual (t):
+           - SHORT: Abre y precio actual con cuerpo debajo de VWAP (curr_open < curr_vwap y curr_close < curr_vwap),
+                    pero toca o pasa el VWAP SOLO CON MECHA (curr_high >= curr_vwap).
+           - LONG: Abre y precio actual con cuerpo arriba de VWAP (curr_open > curr_vwap y curr_close > curr_vwap),
+                   pero toca o pasa el VWAP SOLO CON MECHA (curr_low <= curr_vwap).
+        4. SL al 20% sobre o debajo del VWAP (respecto a la distancia de banda):
+           - SHORT: curr_vwap + 0.20 * std_dev
+           - LONG: curr_vwap - 0.20 * std_dev
+        5. TP al 50% del VWAP hacia la siguiente banda:
+           - SHORT: curr_vwap - 0.50 * std_dev (hacia banda inferior)
+           - LONG: curr_vwap + 0.50 * std_dev (hacia banda superior)
         """
         if df_5m is None or len(df_5m) < 2:
             return None
 
+        # 1. VERIFICACIÓN DE VENTANA TEMPORAL (Minuto 4 al 5 de la vela de 5m)
+        now_utc = datetime.now(timezone.utc)
+        curr_bar = df_5m.iloc[-1]
+
+        # Minuto 4 del ciclo de 5 minutos (:04, :09, :14, :19, :24, :29, :34, :39, :44, :49, :54, :59)
+        is_minute_4 = (now_utc.minute % 5 == CHECK_WINDOW_START_MINUTE)
+
+        if 'Timestamp' in curr_bar and pd.notna(curr_bar['Timestamp']):
+            try:
+                ts_bar = pd.to_datetime(curr_bar['Timestamp'], utc=True)
+                elapsed_sec = (now_utc - ts_bar).total_seconds()
+                if 0 <= elapsed_sec < 360:
+                    is_minute_4 = (240 <= elapsed_sec < 300) or (now_utc.minute % 5 == CHECK_WINDOW_START_MINUTE)
+            except Exception:
+                pass
+
+        if not is_minute_4:
+            return None
+
+        # 2. EXTRACCIÓN DE VELAS Y PARÁMETROS
+        prev_candle = df_5m.iloc[-2]
+
+        prev_open = float(prev_candle['Open'])
+        prev_high = float(prev_candle['High'])
+        prev_low = float(prev_candle['Low'])
+        prev_close = float(prev_candle['Close'])
+        prev_vwap = float(prev_candle['VWAP'])
+
+        curr_open = float(curr_bar['Open'])
+        curr_high = float(curr_bar['High'])
+        curr_low = float(curr_bar['Low'])
+        curr_close = float(current_price if current_price is not None else curr_bar['Close'])
+        curr_vwap = float(curr_bar['VWAP'])
+        curr_upper = float(curr_bar['Upper_Band'])
+        curr_lower = float(curr_bar['Lower_Band'])
+
+        if pd.isna(curr_vwap) or pd.isna(curr_upper) or pd.isna(curr_lower):
+            return None
+
+        std_dev = (curr_upper - curr_lower) / 2.0
+        if std_dev <= 0:
+            return None
+
         spec = SUPPORTED_SYMBOLS.get(sym, {"tickSize": 0.25})
-        tick_size = spec.get("tickSize", 0.25)
+        tick_size = float(spec.get("tickSize", 0.25))
 
-        vela_5m_actual = df_5m.iloc[-1]
-        vela_5m_prev = df_5m.iloc[-2]
+        setup_type = None
 
-        vwap_now = float(vela_5m_actual['VWAP'])
-        upper_band_now = float(vela_5m_actual['Upper_Band'])
-        lower_band_now = float(vela_5m_actual['Lower_Band'])
+        # 3. CONDICIÓN SHORT:
+        # a) Vela anterior t-1 completa (cuerpo y mechas) estrictamente DEBAJO del VWAP:
+        prev_below_complete = (prev_high < prev_vwap) and (prev_open < prev_vwap) and (prev_close < prev_vwap)
+        # b) Vela actual t: El cuerpo viene desde la dirección del rechazo (debajo de VWAP)
+        # En ningún caso el cuerpo puede quedar del otro lado (arriba o sobre el VWAP):
+        body_top_short = max(curr_open, curr_close)
+        curr_body_strictly_below = (body_top_short < curr_vwap)
+        # c) La mecha actual del momento DEBE haber tocado o cruzado el VWAP hacia arriba:
+        candle_wick_high = max(curr_high, curr_close)
+        curr_wick_touches_or_crosses_vwap_short = (candle_wick_high >= curr_vwap)
 
-        vwap_prev = float(vela_5m_prev.get('VWAP', vwap_now))
-        prev_low = float(vela_5m_prev['Low'])
-        prev_high = float(vela_5m_prev['High'])
+        if prev_below_complete and curr_body_strictly_below and curr_wick_touches_or_crosses_vwap_short:
+            setup_type = "SHORT"
 
-        precio_mercado = float(current_price) if current_price is not None else float(vela_5m_actual['Close'])
+        # 4. CONDICIÓN LONG:
+        # a) Vela anterior t-1 completa (cuerpo y mechas) estrictamente ARRIBA del VWAP:
+        prev_above_complete = (prev_low > prev_vwap) and (prev_open > prev_vwap) and (prev_close > prev_vwap)
+        # b) Vela actual t: El cuerpo viene desde la dirección del rechazo (arriba de VWAP)
+        # En ningún caso el cuerpo puede quedar del otro lado (abajo o sobre el VWAP):
+        body_bottom_long = min(curr_open, curr_close)
+        curr_body_strictly_above = (body_bottom_long > curr_vwap)
+        # c) La mecha actual del momento DEBE haber tocado o cruzado el VWAP hacia abajo:
+        candle_wick_low = min(curr_low, curr_close)
+        curr_wick_touches_or_crosses_vwap_long = (candle_wick_low <= curr_vwap)
 
-        # 1. Regla de la vela anterior (5m): separación mínima de 1 tick respecto al VWAP
-        min_diff = MIN_PREV_CANDLE_DIFF_TICKS * tick_size
-        contexto_long = prev_low > (vwap_prev + min_diff)
-        contexto_short = prev_high < (vwap_prev - min_diff)
+        if prev_above_complete and curr_body_strictly_above and curr_wick_touches_or_crosses_vwap_long:
+            setup_type = "LONG"
 
-        # 2. Pendiente (Opcional, desactivada por defecto según nuevas reglas)
-        lookback_bars = VWAP_SLOPE_LOOKBACK_BARS
-        idx_ref = max(0, len(df_5m) - 1 - lookback_bars)
-        vwap_ref = float(df_5m.iloc[idx_ref]['VWAP'])
-        bars_eval = (len(df_5m) - 1) - idx_ref
-        slope_vwap = vwap_now - vwap_ref
+        if not setup_type:
+            return None
 
-        if USE_VWAP_SLOPE_FILTER:
-            min_slope_val = 1 * tick_size
-            mins_eval = bars_eval * 5
-        else:
-            min_slope_val = 0.0
+        # 5. CÁLCULO DE SL Y TP (SOBRE / DEBAJO DEL VWAP)
+        # SL: 20% sobre o debajo del VWAP
+        d_sl_dist = round_to_tick(SL_VWAP_RATIO * std_dev, tick_size)
+        if d_sl_dist < 4 * tick_size:
+            d_sl_dist = 4 * tick_size
 
-        trigger_ticks = get_vwap_trigger_distance_ticks(sym)
-        trigger_dist = trigger_ticks * tick_size
+        # TP: 50% del VWAP hacia la siguiente banda
+        d_tp_dist = round_to_tick(TP_VWAP_BAND_RATIO * std_dev, tick_size)
+        if d_tp_dist < 4 * tick_size:
+            d_tp_dist = 4 * tick_size
 
-        # EVALUAR SETUP LONG (Compras)
-        if contexto_long and precio_mercado <= (vwap_now + trigger_dist):
-            if USE_VWAP_SLOPE_FILTER and slope_vwap < min_slope_val:
-                self.log(
-                    f"🚫 [{sym}] Setup LONG descartado por Pendiente VWAP insuficiente: "
-                    f"Pendiente VWAP ({slope_vwap:+.2f}) < Mínimo requerido ({min_slope_val:+.2f} pts / 1t) en {mins_eval}m",
-                    "SETUP", sym
-                )
-                return None
+        if setup_type == "SHORT":
+            precio_sl = round_to_tick(curr_vwap + d_sl_dist, tick_size)
+            precio_tp = round_to_tick(curr_vwap - d_tp_dist, tick_size)
+            # Salvaguardas CME ante deslizamiento rápido
+            if precio_sl <= curr_close + (2 * tick_size):
+                precio_sl = round_to_tick(curr_close + (4 * tick_size), tick_size)
+            if precio_tp >= curr_close - (2 * tick_size):
+                precio_tp = round_to_tick(curr_close - (4 * tick_size), tick_size)
+            banda_objetivo = curr_lower
+        else: # LONG
+            precio_sl = round_to_tick(curr_vwap - d_sl_dist, tick_size)
+            precio_tp = round_to_tick(curr_vwap + d_tp_dist, tick_size)
+            # Salvaguardas CME ante deslizamiento rápido
+            if precio_sl >= curr_close - (2 * tick_size):
+                precio_sl = round_to_tick(curr_close - (4 * tick_size), tick_size)
+            if precio_tp <= curr_close + (2 * tick_size):
+                precio_tp = round_to_tick(curr_close + (4 * tick_size), tick_size)
+            banda_objetivo = curr_upper
 
-            # Banda contraria protectora = lower_band_now
-            d_opuesta = abs(vwap_now - lower_band_now)
-            if d_opuesta < (5 * tick_size):
-                d_opuesta = 15 * tick_size
+        sl_ticks = max(4, round(abs(curr_close - precio_sl) / tick_size))
+        tp_ticks = max(4, round(abs(curr_close - precio_tp) / tick_size))
+        d_base = abs(precio_tp - curr_close)
 
-            # SL: 45% de distancia entre la línea VWAP y la banda contraria (Fijo)
-            sl_dist = INITIAL_SL_OPPOSITE_BAND_RATIO * d_opuesta
-            precio_sl = round_to_tick(vwap_now - sl_dist, tick_size)
+        condicion_desc = (
+            f"Reloj Suizo: Rechazo Mecha VWAP ({setup_type}) | "
+            f"Vela t-1 limpia ({'debajo' if setup_type=='SHORT' else 'arriba'}) | "
+            f"Vela t mecha {'superior' if setup_type=='SHORT' else 'inferior'} tocó VWAP ({curr_vwap:.2f}) | "
+            f"SL 20% ({precio_sl:.2f}) | TP 50% ({precio_tp:.2f})"
+        )
 
-            # Banda siguiente (objetivo) = upper_band_now
-            d_target_band = abs(upper_band_now - vwap_now)
-            if d_target_band < (10 * tick_size):
-                d_target_band = 20 * tick_size
-
-            # TP: 50% de distancia entre línea VWAP y la banda objetivo (Fijo)
-            tp_dist = INITIAL_TP_TARGET_BAND_RATIO * d_target_band
-            precio_tp = round_to_tick(vwap_now + tp_dist, tick_size)
-            d_tp_ini = abs(precio_tp - precio_mercado)
-
-            return {
-                "simbolo": sym,
-                "direccion": "LONG",
-                "precio_entrada": precio_mercado,
-                "vwap_cruce": vwap_now,
-                "trigger_ticks": trigger_ticks,
-                "upper_band": upper_band_now,
-                "lower_band": lower_band_now,
-                "target_band": upper_band_now,
-                "d_base": d_target_band,
-                "d_opuesta": d_opuesta,
-                "d_tp_ini": d_tp_ini,
-                "precio_sl": precio_sl,
-                "precio_tp": precio_tp,
-                "vwap_slope": slope_vwap,
-                "vwap_ref": vwap_ref,
-                "slope_bars": bars_eval,
-                "timestamp_vela": vela_5m_actual['Timestamp']
-            }
-
-        # EVALUAR SETUP SHORT (Ventas)
-        if contexto_short and precio_mercado >= (vwap_now - trigger_dist):
-            if USE_VWAP_SLOPE_FILTER and slope_vwap > -min_slope_val:
-                self.log(
-                    f"🚫 [{sym}] Setup SHORT descartado por Pendiente VWAP insuficiente: "
-                    f"Pendiente VWAP ({slope_vwap:+.2f}) > Mínimo requerido ({-min_slope_val:+.2f} pts / -1t) en {mins_eval}m",
-                    "SETUP", sym
-                )
-                return None
-
-            # Banda contraria protectora = upper_band_now
-            d_opuesta = abs(upper_band_now - vwap_now)
-            if d_opuesta < (5 * tick_size):
-                d_opuesta = 15 * tick_size
-
-            # SL: 45% de distancia entre la línea VWAP y la banda contraria (Fijo)
-            sl_dist = INITIAL_SL_OPPOSITE_BAND_RATIO * d_opuesta
-            precio_sl = round_to_tick(vwap_now + sl_dist, tick_size)
-
-            # Banda siguiente (objetivo) = lower_band_now
-            d_target_band = abs(vwap_now - lower_band_now)
-            if d_target_band < (10 * tick_size):
-                d_target_band = 20 * tick_size
-
-            # TP: 50% de distancia entre línea VWAP y la banda objetivo (Fijo)
-            tp_dist = INITIAL_TP_TARGET_BAND_RATIO * d_target_band
-            precio_tp = round_to_tick(vwap_now - tp_dist, tick_size)
-            d_tp_ini = abs(precio_mercado - precio_tp)
-
-            return {
-                "simbolo": sym,
-                "direccion": "SHORT",
-                "precio_entrada": precio_mercado,
-                "vwap_cruce": vwap_now,
-                "trigger_ticks": trigger_ticks,
-                "upper_band": upper_band_now,
-                "lower_band": lower_band_now,
-                "target_band": lower_band_now,
-                "d_base": d_target_band,
-                "d_opuesta": d_opuesta,
-                "d_tp_ini": d_tp_ini,
-                "precio_sl": precio_sl,
-                "precio_tp": precio_tp,
-                "vwap_slope": slope_vwap,
-                "vwap_ref": vwap_ref,
-                "slope_bars": bars_eval,
-                "timestamp_vela": vela_5m_actual['Timestamp']
-            }
-
-        return None
+        return {
+            "simbolo": sym,
+            "direccion": setup_type,
+            "precio_entrada": curr_close,
+            "precio_sl": precio_sl,
+            "precio_tp": precio_tp,
+            "sl_ticks": sl_ticks,
+            "tp_ticks": tp_ticks,
+            "vwap_cruce": curr_vwap,
+            "banda_objetivo": banda_objetivo,
+            "upper_band": curr_upper,
+            "lower_band": curr_lower,
+            "std_dev": std_dev,
+            "d_base": d_base,
+            "condicion_tecnica": condicion_desc,
+            "entry_window": f"Minuto 4 a 5 ({now_utc.strftime('%H:%M:%S')} UTC)"
+        }
 
     # ==========================================
     # RISK FILTERS & SCHEDULE
     # ==========================================
     def es_horario_operable(self) -> tuple[bool, str]:
         """
-        Evalúa si el mercado CME está activo y es operable:
-        - Candado de ganancia diaria trailing activado -> Bloqueado hasta nueva sesión.
-        - Cierre de fin de semana: Viernes 17:00 ET a Domingo 18:00 ET.
-        - Mantenimiento diario CME: 17:00 a 18:00 ET (Lunes a Jueves).
-        - Filtro de Apertura CME: Inicio de sesión a las 7:00 PM hora de Perú (19:00 PET) tras apertura/receso.
-        - Sesión regular activa en el resto de horarios.
+        Evalúa si el mercado CME está activo y es operable según las reglas institucionales:
+        1. Cierre de fin de semana: Viernes 17:00 ET a Domingo 18:00 ET (Cerrado).
+        2. Pausa diaria de descanso CME: Lunes a Jueves 17:00 a 18:00 ET (Cerrado).
+        3. Filtro de 2 horas post-pausa / post-apertura:
+           - Lunes a Jueves de 18:00 a 20:00 ET (primeras 2 horas luego del descanso del día -> Pausado).
+           - Domingos de 18:00 a 20:00 ET (primeras 2 horas luego de la apertura del domingo -> Pausado).
+           - Inicio oficial de operaciones a las 20:00 ET (8:00 PM ET).
+        4. Sesión regular activa en el resto de horarios (hasta el cierre diario de las 17:00 ET).
         """
         if self.daily_lock_active:
             return False, f"Candado de Ganancia Diaria activado: {self.daily_lock_reason}"
@@ -569,27 +577,23 @@ class AxiomEngine:
         time_str = f"{hour:02d}:{minute:02d} ET"
         peru_time_str = f"{peru_time.hour:02d}:{peru_time.minute:02d} PET"
         
-        # Fin de semana
-        if weekday == 5:
+        # 1. Fin de semana
+        if weekday == 5: # Sábado completo
             return False, f"Mercado CME cerrado por fin de semana (Sábado - {time_str})"
-        if weekday == 6 and hour < 18:
-            return False, f"Mercado CME cerrado por fin de semana (Domingo pre-apertura - {time_str})"
-        if weekday == 4 and hour >= 17:
-            return False, f"Mercado CME cerrado por fin de semana (Viernes post-cierre - {time_str})"
+        if weekday == 6 and hour < 18: # Domingo antes de la apertura oficial de las 18:00 ET
+            return False, f"Mercado CME cerrado por fin de semana (Domingo pre-apertura 18:00 ET - {time_str})"
+        if weekday == 4 and hour >= 17: # Viernes después del cierre de las 17:00 ET
+            return False, f"Mercado CME cerrado por fin de semana (Viernes post-cierre 17:00 ET - {time_str})"
             
-        # Mantenimiento diario CME (17:00 a 18:00 ET)
-        if hour == 17:
-            return False, f"Receso diario de mantenimiento CME (17:00-18:00 ET - {time_str})"
+        # 2. Pausa diaria de descanso CME (Lunes a Jueves 17:00 a 18:00 ET)
+        if weekday in (0, 1, 2, 3) and hour == 17:
+            return False, f"Pausa diaria de descanso CME (17:00 a 18:00 ET - {time_str})"
 
-        # Filtro de apertura CME: Inicio programado a las 7:00 PM hora de Perú (19:00 PET)
-        # tras reapertura de las 18:00 ET (desactivado si CME_OPEN_BUFFER_MINUTES = 0)
-        if CME_OPEN_BUFFER_MINUTES > 0:
-            if hour >= 18:
-                peru_target_minute = SESSION_START_HOUR_PERU * 60 + SESSION_START_MINUTE_PERU
-                peru_current_minute = peru_time.hour * 60 + peru_time.minute
-                if peru_current_minute < peru_target_minute:
-                    target_time_str = f"{SESSION_START_HOUR_PERU:02d}:{SESSION_START_MINUTE_PERU:02d} PET"
-                    return False, f"Pausa post-apertura CME: Inicio programado a las 7:00 PM hora de Perú ({target_time_str} / Actual: {peru_time_str} - {time_str})"
+        # 3. Filtro de 2 horas post-pausa de descanso (Lunes a Jueves 18:00 a 20:00 ET)
+        #    y filtro de 2 horas post-apertura de domingos (Domingos 18:00 a 20:00 ET)
+        if (weekday in (0, 1, 2, 3) or weekday == 6) and (18 <= hour < 20):
+            origen = "Apertura de Domingo" if weekday == 6 else "Pausa de descanso del día"
+            return False, f"Espera obligatoria de 2 horas post-{origen}: Inicio operativo a las 20:00 ET (Actual: {time_str} / {peru_time_str})"
             
         return True, f"Sesión regular activa ({time_str} / {peru_time_str})"
 
@@ -622,22 +626,27 @@ class AxiomEngine:
 
     def puede_abrir_posicion(self, sym: str, cached_positions: Optional[List[Dict[str, Any]]] = None) -> tuple[bool, str]:
         """
-        Evalúa si se puede abrir una nueva operación en el símbolo (hasta MAX_POSITIONS_PER_SYMBOL = 2):
-        - 0 operaciones: Se permite abrir la 1ª.
-        - 1 operación: Se permite abrir la 2ª SOLO si la 1ª ya aseguró SL a Entrada + 5 ticks (Hito >= 1).
-        - 2 operaciones: Límite alcanzado, no se permiten más aperturas.
+        Evalúa si se puede abrir una nueva operación en el símbolo:
+        - 1 sola posición permitida por símbolo.
+        - Se debe respetar obligatoriamente el enfriamiento mínimo de 9 minutos (540s) tras ejecutar una operación.
         """
         cur_size = self.get_open_position_size(sym, cached_positions)
-        if cur_size >= MAX_POSITIONS_PER_SYMBOL:
-            return False, f"Límite máximo de {MAX_POSITIONS_PER_SYMBOL} operaciones alcanzado en {sym}"
+        if cur_size >= 1:
+            return False, f"Posición ya abierta en {sym}"
 
-        if cur_size == 1:
-            trade = self.symbol_states.get(sym, {}).get("active_trade")
-            if trade and trade.get("sl_stage", 0) >= 1:
-                return True, f"1ª operación en {sym} ya asegurada (+5t). Permitida 2ª operación piramidal."
-            return False, f"1ª operación en {sym} aún no alcanza el 25% de TP para asegurar SL a +5t."
+        state = self.symbol_states.get(sym, {})
+        if state.get("active_trade"):
+            return False, f"Operación en seguimiento activo en {sym}"
 
-        return True, "Apertura permitida (sin posiciones activas)."
+        now_ts = time.time()
+        cd_until = float(state.get("cooldown_until", 0.0))
+        if now_ts < cd_until:
+            rem = int(cd_until - now_ts)
+            mins = rem // 60
+            secs = rem % 60
+            return False, f"Enfriamiento obligatorio de 9 min activo ({mins:02d}:{secs:02d} restantes)"
+
+        return True, "Apertura permitida (sin posiciones y fuera de cooldown)."
 
     # ==========================================
     # ORDER EXECUTION ENGINE
@@ -672,35 +681,15 @@ class AxiomEngine:
         vwap_cruce = round_to_tick(float(setup.get("vwap_cruce", precio_entrada)), tick_size)
         d_base = float(setup.get("d_base", 15 * tick_size))
         
-        # SL y TP Dinámicos calculados en setup
+        # SL y TP definidos por el setup (limpio para recibir la nueva ley)
         precio_sl = setup.get("precio_sl")
         precio_tp = setup.get("precio_tp")
         
-        # Fallbacks de seguridad si no vinieran en setup
-        if precio_sl is None:
-            if direccion == "LONG":
-                d_op = setup.get("d_opuesta") or abs(vwap_cruce - float(setup.get("lower_band", vwap_cruce - 15 * tick_size)))
-                sl_dist = INITIAL_SL_OPPOSITE_BAND_RATIO * d_op
-                precio_sl = round_to_tick(vwap_cruce - sl_dist, tick_size)
-            else:
-                d_op = setup.get("d_opuesta") or abs(float(setup.get("upper_band", vwap_cruce + 15 * tick_size)) - vwap_cruce)
-                sl_dist = INITIAL_SL_OPPOSITE_BAND_RATIO * d_op
-                precio_sl = round_to_tick(vwap_cruce + sl_dist, tick_size)
-
-        if precio_tp is None:
-            if direccion == "LONG":
-                d_tgt = abs(float(setup.get("upper_band", setup.get("target_band", vwap_cruce + d_base))) - vwap_cruce)
-                tp_dist = INITIAL_TP_TARGET_BAND_RATIO * d_tgt
-                precio_tp = round_to_tick(vwap_cruce + tp_dist, tick_size)
-            else:
-                d_tgt = abs(vwap_cruce - float(setup.get("lower_band", setup.get("target_band", vwap_cruce - d_base))))
-                tp_dist = INITIAL_TP_TARGET_BAND_RATIO * d_tgt
-                precio_tp = round_to_tick(vwap_cruce - tp_dist, tick_size)
+        if precio_sl is None or precio_tp is None:
+            self.log(f"⚠️ [{sym}] Orden suspendida: SL y TP no definidos en setup (en espera de nueva ley).", "SETUP", sym)
+            return
 
         d_tp_ini = abs(precio_tp - precio_entrada)
-        if d_tp_ini < (5 * tick_size):
-            d_tp_ini = 10 * tick_size
-            precio_tp = round_to_tick(precio_entrada + d_tp_ini if direccion == "LONG" else precio_entrada - d_tp_ini, tick_size)
 
         if direccion == "LONG":
             side = 0
@@ -749,6 +738,7 @@ class AxiomEngine:
                     "direction": direccion,
                     "entry_price": precio_entrada,
                     "vwap_cruce": vwap_cruce,
+                    "banda_objetivo": setup.get("banda_objetivo"),
                     "current_price": precio_entrada,
                     "highest_price": precio_entrada,
                     "lowest_price": precio_entrada,
@@ -763,6 +753,8 @@ class AxiomEngine:
                     "order_id": order_id,
                     "sl_stage": 0,
                     "max_pct_avance": 0.0,
+                    "tp_max_alcanzado_str": "0.00 pts (0.0%)",
+                    "sl_max_alcanzado_str": "0.00 pts",
                     "entry_timestamp": time.time(),
                     "entry_time_str": hora_apertura,
                     "entry_date_str": fecha_apertura,
@@ -770,7 +762,7 @@ class AxiomEngine:
                 }
                 
                 ticks_sl_vwap = round(abs(precio_sl - vwap_cruce) / tick_size)
-                self.log(f"🚀 [{sym}] Orden EJECUTADA | Apertura: {hora_apertura} | {direccion} @ {precio_entrada:.2f} | Order ID: {order_id} | SL: {ticks_sl_order_val}t ({precio_sl:.2f} / {ticks_sl_vwap}t desde VWAP) | TP: {ticks_tp}t", "ORDER", sym)
+                self.log(f"🚀 [{sym}] Orden EJECUTADA | Apertura: {hora_apertura} | {direccion} @ {precio_entrada:.2f} | Order ID: {order_id} | SL 20%: {ticks_sl_order_val}t ({precio_sl:.2f} / {ticks_sl_vwap}t desde VWAP) | TP 50%: {ticks_tp}t ({precio_tp:.2f}) | Cooldown: {SYMBOL_COOLDOWN_MINUTES} min", "ORDER", sym)
                 self.registrar_en_csv(
                     simbolo=sym,
                     direccion=direccion,
@@ -781,10 +773,15 @@ class AxiomEngine:
                     exito=True,
                     mensaje_servidor="Orden colocada con éxito en TopstepX",
                     error_code="0",
-                    order_id=order_id
+                    order_id=order_id,
+                    vwap=vwap_cruce,
+                    sl_price=precio_sl,
+                    tp_price=precio_tp,
+                    banda=setup.get("banda_objetivo")
                 )
                 self.symbol_states[sym]["stats"]["executed"] += 1
-                self.symbol_states[sym]["cooldown_until"] = time.time() + 180
+                # Enfriamiento obligatorio de 9 minutos tras abrir operación en este símbolo
+                self.symbol_states[sym]["cooldown_until"] = time.time() + SYMBOL_COOLDOWN_SECONDS
             else:
                 error_msg = res.get('errorMessage') or res.get('message') or res.get('error') or 'Rechazo de API'
                 error_code = str(res.get('errorCode') or res.get('code') or 'REJECTED')
@@ -800,7 +797,11 @@ class AxiomEngine:
                     exito=False,
                     mensaje_servidor=error_msg,
                     error_code=error_code,
-                    order_id="N/A"
+                    order_id="N/A",
+                    vwap=vwap_cruce,
+                    sl_price=precio_sl,
+                    tp_price=precio_tp,
+                    banda=setup.get("banda_objetivo")
                 )
                 self.symbol_states[sym]["stats"]["rejected"] += 1
                 
@@ -850,7 +851,7 @@ class AxiomEngine:
             self.registrar_cierre_posicion(sym, trade, motivo_cierre="Posición concluida en TopstepX")
             state["active_trade"] = None
             state["has_open_position"] = False
-            state["cooldown_until"] = time.time() + 180
+            state["cooldown_until"] = max(float(state.get("cooldown_until", 0.0)), time.time() + 60.0)
             return
 
         precio_actual = current_price
@@ -880,16 +881,28 @@ class AxiomEngine:
 
         if direccion == "LONG":
             highest_since_entry = max(trade.get("highest_price", precio_entrada), precio_actual)
+            lowest_since_entry = min(trade.get("lowest_price", precio_entrada), precio_actual)
             trade["highest_price"] = highest_since_entry
-            precio_favorable = highest_since_entry
-            ganancia_pts = precio_favorable - precio_entrada
-            pct_avance = (ganancia_pts / d_tp_ini) * 100.0
+            trade["lowest_price"] = lowest_since_entry
+            
+            ganancia_pts = highest_since_entry - precio_entrada
+            drawdown_pts = precio_entrada - lowest_since_entry
+            pct_avance = (ganancia_pts / d_tp_ini) * 100.0 if d_tp_ini > 0 else 0.0
+            
+            trade["tp_max_alcanzado_str"] = f"+{ganancia_pts:.2f} pts ({pct_avance:.1f}%)"
+            trade["sl_max_alcanzado_str"] = f"-{drawdown_pts:.2f} pts"
         else: # SHORT
             lowest_since_entry = min(trade.get("lowest_price", precio_entrada), precio_actual)
+            highest_since_entry = max(trade.get("highest_price", precio_entrada), precio_actual)
             trade["lowest_price"] = lowest_since_entry
-            precio_favorable = lowest_since_entry
-            ganancia_pts = precio_entrada - precio_favorable
-            pct_avance = (ganancia_pts / d_tp_ini) * 100.0
+            trade["highest_price"] = highest_since_entry
+            
+            ganancia_pts = precio_entrada - lowest_since_entry
+            drawdown_pts = highest_since_entry - precio_entrada
+            pct_avance = (ganancia_pts / d_tp_ini) * 100.0 if d_tp_ini > 0 else 0.0
+            
+            trade["tp_max_alcanzado_str"] = f"+{ganancia_pts:.2f} pts ({pct_avance:.1f}%)"
+            trade["sl_max_alcanzado_str"] = f"-{drawdown_pts:.2f} pts"
 
         max_pct = max(trade.get("max_pct_avance", 0.0), pct_avance)
         trade["max_pct_avance"] = max_pct
@@ -906,94 +919,8 @@ class AxiomEngine:
         contract_id = trade["contract_id"]
         order_id = str(trade.get("order_id", "N/A"))
 
-        # EVALUACIÓN DE ESCALERA DE HITOS DINÁMICOS (Opcional, desactivado por solicitud "Ya no dinámico")
-        if USE_DYNAMIC_TRAILING:
-            target_stage = sl_stage
-            if max_pct >= 25.0:
-                target_stage = max(target_stage, 1 + int((max_pct - 25.0) // 25.0))
-
-            nuevo_sl = None
-            nuevo_tp = None
-            motivo_hito = ""
-
-            if target_stage > sl_stage:
-                if target_stage == 1:
-                    # Hito 1 (Avance 25% de TP): Sella el SL a Entrada + 5 ticks a favor
-                    ideal_sl = round_to_tick(precio_entrada + (LOCK_PROFIT_TICKS * tick_size), tick_size) if direccion == "LONG" else round_to_tick(precio_entrada - (LOCK_PROFIT_TICKS * tick_size), tick_size)
-                    nuevo_tp = round_to_tick(trade["initial_tp_price"] + (d_tp_ini * 0.25), tick_size) if direccion == "LONG" else round_to_tick(trade["initial_tp_price"] - (d_tp_ini * 0.25), tick_size)
-                    motivo_base = f"HITO 1 (25% TP) | Sellar SL a Entrada + {LOCK_PROFIT_TICKS} ticks ({ideal_sl:.2f})"
-                else:
-                    # Hitos subsiguientes (Hito 2=50%, Hito 3=75%, Hito 4=100%...):
-                    k = int(target_stage)
-                    trig_pct = 25.0 + ((k - 1) * 25.0)
-                    sl_advance = (k - 1) * 0.25 * d_tp_ini
-                    tp_advance = k * 0.25 * d_tp_ini
-                    ideal_sl = round_to_tick(precio_entrada + sl_advance, tick_size) if direccion == "LONG" else round_to_tick(precio_entrada - sl_advance, tick_size)
-                    nuevo_tp = round_to_tick(trade["initial_tp_price"] + tp_advance, tick_size) if direccion == "LONG" else round_to_tick(trade["initial_tp_price"] - tp_advance, tick_size)
-                    motivo_base = f"HITO {k} ({trig_pct:.0f}% TP) | SL avanza +25% ({ideal_sl:.2f})"
-
-                # CLAMP DE SEGURIDAD CME / TOPSTEPX PARA ÓRDENES STOP:
-                if direccion == "LONG":
-                    safe_max_sl = round_to_tick(precio_actual - tick_size, tick_size)
-                    nuevo_sl = min(ideal_sl, safe_max_sl)
-                    if nuevo_sl <= (sl_actual + 0.01 * tick_size):
-                        nuevo_sl = None
-                    else:
-                        motivo_hito = f"{motivo_base} [SL Seguro: {nuevo_sl:.2f}] | TP Ampliado +25% ({nuevo_tp:.2f})"
-                else: # SHORT
-                    safe_min_sl = round_to_tick(precio_actual + tick_size, tick_size)
-                    nuevo_sl = max(ideal_sl, safe_min_sl)
-                    if nuevo_sl >= (sl_actual - 0.01 * tick_size):
-                        nuevo_sl = None
-                    else:
-                        motivo_hito = f"{motivo_base} [SL Seguro: {nuevo_sl:.2f}] | TP Ampliado +25% ({nuevo_tp:.2f})"
-
-            # MODO RUNNER TRAILING DINÁMICO: Persigue al precio a 15 ticks fijos tras superar el 100% del TP inicial
-            if target_stage >= 4 or max_pct >= 100.0:
-                if direccion == "LONG":
-                    trailing_runner_sl = round_to_tick(highest_since_entry - (RUNNER_TRAILING_TICKS * tick_size), tick_size)
-                    safe_max_sl = round_to_tick(precio_actual - tick_size, tick_size)
-                    trailing_runner_sl = min(trailing_runner_sl, safe_max_sl)
-                    if nuevo_sl is None:
-                        if trailing_runner_sl > (sl_actual + 0.01 * tick_size):
-                            nuevo_sl = trailing_runner_sl
-                            motivo_hito = f"RUNNER TRAILING ({RUNNER_TRAILING_TICKS}t tras pico {highest_since_entry:.2f}) | SL a {nuevo_sl:.2f}"
-                    else:
-                        nuevo_sl = max(nuevo_sl, trailing_runner_sl)
-                else: # SHORT
-                    trailing_runner_sl = round_to_tick(lowest_since_entry + (RUNNER_TRAILING_TICKS * tick_size), tick_size)
-                    safe_min_sl = round_to_tick(precio_actual + tick_size, tick_size)
-                    trailing_runner_sl = max(trailing_runner_sl, safe_min_sl)
-                    if nuevo_sl is None:
-                        if trailing_runner_sl < (sl_actual - 0.01 * tick_size):
-                            nuevo_sl = trailing_runner_sl
-                            motivo_hito = f"RUNNER TRAILING ({RUNNER_TRAILING_TICKS}t tras pico {lowest_since_entry:.2f}) | SL a {nuevo_sl:.2f}"
-                    else:
-                        nuevo_sl = min(nuevo_sl, trailing_runner_sl)
-
-            necesita_ajuste = False
-            if target_stage > sl_stage:
-                necesita_ajuste = True
-            elif nuevo_sl is not None:
-                if direccion == "LONG" and nuevo_sl > (sl_actual + 0.01 * tick_size):
-                    necesita_ajuste = True
-                elif direccion == "SHORT" and nuevo_sl < (sl_actual - 0.01 * tick_size):
-                    necesita_ajuste = True
-
-            if necesita_ajuste and (nuevo_sl is not None or nuevo_tp is not None):
-                # Ajustar órdenes de forma atómica en TopstepX con una sola consulta
-                mod_ok = self.ajustar_bracket_en_topstep(contract_id, nuevo_sl, nuevo_tp, sym, current_price=precio_actual)
-                if mod_ok:
-                    trade["sl_stage"] = max(trade.get("sl_stage", 0), target_stage)
-                    if nuevo_sl is not None:
-                        trade["current_sl_price"] = nuevo_sl
-                    if nuevo_tp is not None:
-                        trade["current_tp_price"] = nuevo_tp
-
-                    self.log(f"🏆 [{sym}] ¡{motivo_hito}! Recorrido máximo: {max_pct:.1f}%", "ORDER", sym)
-                    self.registrar_evento_be_en_csv(sym, trade, nuevo_sl or sl_actual, max_pct, motivo_hito)
-                else:
-                    self.log(f"⚠️ [{sym}] Error al ajustar brackets en TopstepX. Se reintentará automáticamente en el próximo ciclo de 2s...", "ORDER", sym)
+        # [LIMPIO] Reglas previas de trailing dinámico / hitos eliminadas.
+        # En espera de las nuevas reglas de gestión de posición que definirá el usuario.
 
         # SALVAGUARDA DE CIERRE AUTOMÁTICO (SL / TP Fijo)
         # El que alcanza primero cierra automáticamente la operación (Fail-Safe por Software)
@@ -1022,7 +949,7 @@ class AxiomEngine:
             self.registrar_cierre_posicion(sym, trade, precio_salida=precio_actual, motivo_cierre=motivo_alcance)
             state["active_trade"] = None
             state["has_open_position"] = False
-            state["cooldown_until"] = time.time() + 180
+            state["cooldown_until"] = max(float(state.get("cooldown_until", 0.0)), time.time() + 60.0)
             return
 
     def ajustar_bracket_en_topstep(self, contract_id: str, nuevo_sl: Optional[float], nuevo_tp: Optional[float], sym: str, current_price: Optional[float] = None) -> bool:
@@ -1281,7 +1208,9 @@ class AxiomEngine:
             os.makedirs(os.path.dirname(os.path.abspath(self.csv_path)), exist_ok=True)
             fieldnames = [
                 'Fecha', 'Hora_Apertura', 'Hora_Cierre', 'Hora', 'Simbolo', 'Estado', 'Direccion', 'Precio_Mercado',
-                'Precio_Entrada_Real', 'Precio_Salida_Real', 'SL_Ticks', 'TP_Ticks',
+                'Precio_Entrada_Real', 'Precio_Salida_Real', 'VWAP_Entrada', 'Banda_Objetivo',
+                'SL_Inicial', 'SL_Max_Alcanzado', 'TP_Inicial', 'TP_Max_Alcanzado',
+                'SL_Ticks', 'TP_Ticks',
                 'Hito_Alcanzado', 'Max_Pct_TP',
                 'PnL_Bruto_USD', 'Comisiones_USD', 'PnL_Neto_USD', 'Order_ID',
                 'Exit_Order_ID', 'Motivo_Rechazo', 'Codigo_Error', 'Condicion_Tecnica', 'Ultima_Actualizacion'
@@ -1440,6 +1369,12 @@ class AxiomEngine:
                 'Precio_Mercado': f"{p_salida:.2f}",
                 'Precio_Entrada_Real': f"{precio_entrada:.2f}",
                 'Precio_Salida_Real': f"{p_salida:.2f}",
+                'VWAP_Entrada': f"{float(trade.get('vwap_cruce', 0.0)):.2f}" if trade.get('vwap_cruce') else "N/A",
+                'Banda_Objetivo': f"{float(trade.get('banda_objetivo', 0.0)):.2f}" if trade.get('banda_objetivo') else "N/A",
+                'SL_Inicial': f"{float(trade.get('initial_sl_price', 0.0)):.2f}" if trade.get('initial_sl_price') else "N/A",
+                'SL_Max_Alcanzado': trade.get('sl_max_alcanzado_str') or trade.get('SL_Max_Alcanzado') or "0.00 pts",
+                'TP_Inicial': f"{float(trade.get('initial_tp_price', 0.0)):.2f}" if trade.get('initial_tp_price') else "N/A",
+                'TP_Max_Alcanzado': trade.get('tp_max_alcanzado_str') or trade.get('TP_Max_Alcanzado') or f"{max_pct:.1f}%",
                 'SL_Ticks': str(trade.get("initial_sl_ticks", 25)),
                 'TP_Ticks': str(trade.get("tp_ticks", "Dinámico")),
                 'Hito_Alcanzado': hito_desc,
@@ -1495,7 +1430,7 @@ class AxiomEngine:
         except Exception as e:
             self.log(f"❌ Error al escribir hito en CSV: {e}", "ERROR", sym)
 
-    def registrar_en_csv(self, simbolo, direccion, precio, ticks_sl, ticks_tp, condicion, exito, mensaje_servidor, error_code, order_id):
+    def registrar_en_csv(self, simbolo, direccion, precio, ticks_sl, ticks_tp, condicion, exito, mensaje_servidor, error_code, order_id, vwap=None, sl_price=None, tp_price=None, banda=None):
         """Guarda la orden emitida en el archivo CSV institucional."""
         try:
             fecha_actual = datetime.now().strftime('%Y-%m-%d')
@@ -1525,6 +1460,12 @@ class AxiomEngine:
                 'Precio_Mercado': f"{precio:.2f}",
                 'Precio_Entrada_Real': f"{precio:.2f}" if exito else "N/A",
                 'Precio_Salida_Real': "PENDIENTE" if exito else "N/A",
+                'VWAP_Entrada': f"{float(vwap):.2f}" if vwap else "N/A",
+                'Banda_Objetivo': f"{float(banda):.2f}" if banda else "N/A",
+                'SL_Inicial': f"{float(sl_price):.2f}" if sl_price else "N/A",
+                'SL_Max_Alcanzado': "0.00 pts",
+                'TP_Inicial': f"{float(tp_price):.2f}" if tp_price else "N/A",
+                'TP_Max_Alcanzado': "0.00 pts (0.0%)",
                 'SL_Ticks': str(ticks_sl),
                 'TP_Ticks': str(ticks_tp),
                 'Hito_Alcanzado': hito_alcanzado,
@@ -1653,7 +1594,9 @@ class AxiomEngine:
             
             fieldnames = [
                 'Fecha', 'Hora_Apertura', 'Hora_Cierre', 'Hora', 'Simbolo', 'Estado', 'Direccion', 'Precio_Mercado',
-                'Precio_Entrada_Real', 'Precio_Salida_Real', 'SL_Ticks', 'TP_Ticks',
+                'Precio_Entrada_Real', 'Precio_Salida_Real', 'VWAP_Entrada', 'Banda_Objetivo',
+                'SL_Inicial', 'SL_Max_Alcanzado', 'TP_Inicial', 'TP_Max_Alcanzado',
+                'SL_Ticks', 'TP_Ticks',
                 'Hito_Alcanzado', 'Max_Pct_TP',
                 'PnL_Bruto_USD', 'Comisiones_USD', 'PnL_Neto_USD', 'Order_ID',
                 'Exit_Order_ID', 'Motivo_Rechazo', 'Codigo_Error', 'Condicion_Tecnica', 'Ultima_Actualizacion'
@@ -1912,6 +1855,229 @@ class AxiomEngine:
             self.log(f"⚠️ Error al leer operaciones de CSV: {e}", "ERROR")
         return records
 
+    def get_symbols_ranking_and_stats(self) -> Dict[str, Any]:
+        """
+        Calcula el ranking cuantitativo consolidado de operaciones agrupadas por símbolo:
+        - Ordenado de mayor a menor según PnL Neto (Ranking de rendimiento por activo).
+        - Totales por símbolo: Operaciones, Ganadoras, Perdedoras, Win Rate %, PnL Bruto, Comisiones, PnL Neto, Profit Factor.
+        - Detalle de cada operación con su TP máximo alcanzado, SL máximo alcanzado, hora de apertura, hora de cierre, precios de entrada y salida.
+        - Gran Total Consolidado de la cuenta.
+        """
+        records = self.load_operations_history()
+        
+        # Inicializar estructura con todos los símbolos CME soportados
+        by_symbol: Dict[str, Dict[str, Any]] = {}
+        for sym_key, spec in SUPPORTED_SYMBOLS.items():
+            by_symbol[sym_key] = {
+                "symbol": sym_key,
+                "name": spec.get("name", sym_key),
+                "total_trades": 0,
+                "winning_trades": 0,
+                "losing_trades": 0,
+                "breakeven_trades": 0,
+                "win_rate": 0.0,
+                "gross_pnl": 0.0,
+                "commissions": 0.0,
+                "net_pnl": 0.0,
+                "profit_factor": 0.0,
+                "best_trade": 0.0,
+                "worst_trade": 0.0,
+                "trades": []
+            }
+
+        # Procesar registros históricos del CSV
+        for r in records:
+            sym = str(r.get("Simbolo") or "ES").upper()
+            if sym not in by_symbol:
+                by_symbol[sym] = {
+                    "symbol": sym,
+                    "name": SUPPORTED_SYMBOLS.get(sym, {}).get("name", sym),
+                    "total_trades": 0,
+                    "winning_trades": 0,
+                    "losing_trades": 0,
+                    "breakeven_trades": 0,
+                    "win_rate": 0.0,
+                    "gross_pnl": 0.0,
+                    "commissions": 0.0,
+                    "net_pnl": 0.0,
+                    "profit_factor": 0.0,
+                    "best_trade": 0.0,
+                    "worst_trade": 0.0,
+                    "trades": []
+                }
+            
+            estado = str(r.get("Estado") or "").upper()
+            if "RECHAZADA" in estado:
+                continue
+
+            try:
+                gross = float(r.get("PnL_Bruto_USD") or 0.0)
+            except Exception:
+                gross = 0.0
+            try:
+                comms = float(r.get("Comisiones_USD") or 0.0)
+            except Exception:
+                comms = 0.0
+            try:
+                net = float(r.get("PnL_Neto_USD") or 0.0)
+            except Exception:
+                net = round(gross - comms, 2)
+
+            is_closed = "CERRADA" in estado
+            is_open = "EN CURSO" in estado or "ABIERTA" in estado
+
+            hora_apertura = r.get("Hora_Apertura") or r.get("Hora") or "--:--:--"
+            hora_cierre = r.get("Hora_Cierre") or ("EN CURSO" if is_open else "--:--:--")
+
+            p_in = r.get("Precio_Entrada_Real") or r.get("Precio_Mercado") or "--"
+            p_out = r.get("Precio_Salida_Real") or ("PENDIENTE" if is_open else "--")
+
+            tp_max = r.get("TP_Max_Alcanzado") or r.get("Max_Pct_TP") or "0.0%"
+            sl_max = r.get("SL_Max_Alcanzado") or "0.00 pts"
+
+            trade_entry = {
+                "fecha": r.get("Fecha") or "--",
+                "hora_apertura": hora_apertura,
+                "hora_cierre": hora_cierre,
+                "simbolo": sym,
+                "direccion": r.get("Direccion") or "--",
+                "estado": r.get("Estado") or "--",
+                "precio_entrada": p_in,
+                "precio_salida": p_out,
+                "vwap_entrada": r.get("VWAP_Entrada") or "--",
+                "sl_inicial": r.get("SL_Inicial") or "--",
+                "sl_max_alcanzado": sl_max,
+                "tp_inicial": r.get("TP_Inicial") or "--",
+                "tp_max_alcanzado": tp_max,
+                "pnl_bruto": gross,
+                "comisiones": comms,
+                "pnl_neto": net,
+                "order_id": r.get("Order_ID") or "--",
+                "condicion": r.get("Condicion_Tecnica") or "--"
+            }
+
+            s_data = by_symbol[sym]
+            s_data["trades"].append(trade_entry)
+
+            if is_closed:
+                s_data["total_trades"] += 1
+                s_data["gross_pnl"] = round(s_data["gross_pnl"] + gross, 2)
+                s_data["commissions"] = round(s_data["commissions"] + comms, 2)
+                s_data["net_pnl"] = round(s_data["net_pnl"] + net, 2)
+
+                if net > 0:
+                    s_data["winning_trades"] += 1
+                elif net < 0:
+                    s_data["losing_trades"] += 1
+                else:
+                    s_data["breakeven_trades"] += 1
+
+                if s_data["total_trades"] == 1:
+                    s_data["best_trade"] = net
+                    s_data["worst_trade"] = net
+                else:
+                    s_data["best_trade"] = max(s_data["best_trade"], net)
+                    s_data["worst_trade"] = min(s_data["worst_trade"], net)
+
+        # Incluir trades activos en memoria si no están todavía en el CSV
+        for sym_k, st in self.symbol_states.items():
+            act = st.get("active_trade")
+            if act:
+                act_oid = str(act.get("order_id", "LIVE"))
+                s_obj = by_symbol.get(sym_k)
+                if s_obj and not any(t.get("order_id") == act_oid for t in s_obj["trades"]):
+                    p_ent = act.get("entry_price", 0.0)
+                    s_obj["trades"].insert(0, {
+                        "fecha": act.get("entry_date_str") or datetime.now().strftime("%Y-%m-%d"),
+                        "hora_apertura": act.get("entry_time_str") or datetime.now().strftime("%H:%M:%S"),
+                        "hora_cierre": "EN CURSO",
+                        "simbolo": sym_k,
+                        "direccion": act.get("direction", "LONG"),
+                        "estado": "EN CURSO (OCO)",
+                        "precio_entrada": f"{p_ent:.2f}",
+                        "precio_salida": "PENDIENTE",
+                        "vwap_entrada": f"{float(act.get('vwap_cruce', 0.0)):.2f}" if act.get("vwap_cruce") else "--",
+                        "sl_inicial": f"{float(act.get('initial_sl_price', 0.0)):.2f}" if act.get("initial_sl_price") else "--",
+                        "sl_max_alcanzado": act.get("sl_max_alcanzado_str", "0.00 pts"),
+                        "tp_inicial": f"{float(act.get('initial_tp_price', 0.0)):.2f}" if act.get("initial_tp_price") else "--",
+                        "tp_max_alcanzado": act.get("tp_max_alcanzado_str", "0.00 pts (0.0%)"),
+                        "pnl_bruto": 0.0,
+                        "comisiones": 0.0,
+                        "pnl_neto": 0.0,
+                        "order_id": act_oid,
+                        "condicion": "Operación activa en curso"
+                    })
+
+        ranked_list = []
+        grand_total = {
+            "total_trades": 0,
+            "winning_trades": 0,
+            "losing_trades": 0,
+            "breakeven_trades": 0,
+            "win_rate": 0.0,
+            "gross_pnl": 0.0,
+            "commissions": 0.0,
+            "net_pnl": 0.0,
+            "profit_factor": 0.0
+        }
+
+        total_gross_wins = 0.0
+        total_gross_losses = 0.0
+
+        for sym_k, data in by_symbol.items():
+            tot = data["total_trades"]
+            wins = data["winning_trades"]
+            data["win_rate"] = round((wins / tot * 100.0), 1) if tot > 0 else 0.0
+
+            gross_wins = sum(t["pnl_bruto"] for t in data["trades"] if t["pnl_bruto"] > 0)
+            gross_losses = abs(sum(t["pnl_bruto"] for t in data["trades"] if t["pnl_bruto"] < 0))
+            if gross_losses > 0:
+                data["profit_factor"] = round(gross_wins / gross_losses, 2)
+            elif gross_wins > 0:
+                data["profit_factor"] = 99.9
+            else:
+                data["profit_factor"] = 0.0
+
+            grand_total["total_trades"] += tot
+            grand_total["winning_trades"] += wins
+            grand_total["losing_trades"] += data["losing_trades"]
+            grand_total["breakeven_trades"] += data["breakeven_trades"]
+            grand_total["gross_pnl"] = round(grand_total["gross_pnl"] + data["gross_pnl"], 2)
+            grand_total["commissions"] = round(grand_total["commissions"] + data["commissions"], 2)
+            grand_total["net_pnl"] = round(grand_total["net_pnl"] + data["net_pnl"], 2)
+
+            total_gross_wins += gross_wins
+            total_gross_losses += gross_losses
+
+            ranked_list.append(data)
+
+        # Ordenar: primero los símbolos con operaciones por PnL Neto descendente
+        ranked_list.sort(key=lambda x: (x["total_trades"] > 0, x["net_pnl"], x["win_rate"]), reverse=True)
+
+        for idx, item in enumerate(ranked_list, start=1):
+            item["rank"] = idx
+
+        g_tot = grand_total["total_trades"]
+        grand_total["win_rate"] = round((grand_total["winning_trades"] / g_tot * 100.0), 1) if g_tot > 0 else 0.0
+        if total_gross_losses > 0:
+            grand_total["profit_factor"] = round(total_gross_wins / total_gross_losses, 2)
+        elif total_gross_wins > 0:
+            grand_total["profit_factor"] = 99.9
+        else:
+            grand_total["profit_factor"] = 0.0
+
+        all_ops = []
+        for r_item in ranked_list:
+            all_ops.extend(r_item["trades"])
+        all_ops.sort(key=lambda x: (x.get("fecha", ""), x.get("hora_apertura", "")), reverse=True)
+
+        return {
+            "ranking": ranked_list,
+            "grand_total": grand_total,
+            "all_trades": all_ops,
+            "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }
+
     # ==========================================
     # CENTRALIZED 2-SECOND UNIFIED ENGINE LOOP
     # ==========================================
@@ -2082,14 +2248,15 @@ class AxiomEngine:
                                 trg_t = setup.get('trigger_ticks', 15)
                                 dist_t = abs(current_price - setup['vwap_cruce']) / tick_size
                                 self.log(
-                                    f"⚡ [{sym}] ¡Gatillo de Proximidad VWAP activado! ({open_reason}). Precio: {current_price:.2f} a {dist_t:.1f}t de VWAP ({setup['vwap_cruce']:.2f} | límite ≤{trg_t}t). "
-                                    f"Abriendo {setup['direccion']}...",
+                                    f"⚡ [{sym}] ¡Gatillo Reloj Suizo activado! ({setup['direccion']}) | Entrada @ {current_price:.2f} | "
+                                    f"VWAP: {setup['vwap_cruce']:.2f} | SL 20%: {setup['precio_sl']:.2f} ({setup['sl_ticks']}t) | "
+                                    f"TP 50%: {setup['precio_tp']:.2f} ({setup['tp_ticks']}t)",
                                     "ORDER", sym
                                 )
                                 self.ejecutar_orden(setup, sym)
 
                 # ==========================================
-                # 3. VERIFICACIÓN ATÓMICA DE CANASTA DE BENEFICIOS GLOBAL (CADA 2 SEGUNDOS EN MEMORIA)
+                # 3. VERIFICACIÓN DE CANASTA DE BENEFICIOS GLOBAL (DESACTIVADA POR REGLAS DE USUARIO)
                 # ==========================================
                 total_floating_pnl = 0.0
                 active_open_count = 0
@@ -2109,8 +2276,8 @@ class AxiomEngine:
                             active_open_count += 1
                             basket_details.append(f"{s_sym}: {pos_unrealized:+.2f}")
 
-                # Gatillo de seguridad: Si la canasta alcanza o supera el objetivo ($850 - $900 USD)
-                if active_open_count > 0 and total_floating_pnl >= BASKET_TP_TARGET_USD:
+                # Gatillo de seguridad (Solo si USE_BASKET_TP está habilitado):
+                if USE_BASKET_TP and active_open_count > 0 and total_floating_pnl >= BASKET_TP_TARGET_USD:
                     self.log(
                         f"🏆🏆🏆 [BASKET TAKE-PROFIT] ¡CANASTA GLOBAL DE BENEFICIOS ALCANZADA! "
                         f"PnL Flotante Total: +${total_floating_pnl:.2f} USD (Meta: ${BASKET_TP_TARGET_USD:.2f} USD | "
@@ -2319,15 +2486,11 @@ class AxiomEngine:
 
     def verificar_candado_ganancia_diaria(self, total_floating_pnl: float):
         """
-        Candado de Ganancia Diaria Trailing (Trailing Daily Profit Lock):
-        - Determina el día operativo CME actual (resetea a las 18:00 ET).
-        - Suma el PnL neto realizado hoy (desde el registro CSV) + PnL flotante actual.
-        - Registra el pico máximo de ganancia diaria alcanzado (daily_peak_pnl).
-        - Si el pico supera TRAILING_DAILY_PROFIT_TRIGGER_USD (+$750.0 USD):
-          Se activa un piso flotante que retiene obligatoriamente el TRAILING_DAILY_PROFIT_RETAIN_PCT (70%) de dicho pico.
-        - Si el beneficio total retrocede perforando ese piso:
-          Ejecuta cierre inmediato de emergencia de toda la cartera y bloquea la apertura de nuevas operaciones por el resto del día.
+        Candado de Ganancia Diaria Trailing (Trailing Daily Profit Lock).
+        Desactivado por regla explícita del usuario (sin topes de ganancia ni pérdida).
         """
+        if not USE_DAILY_PROFIT_LOCK:
+            return
         try:
             ny_time = datetime.now(ZoneInfo("America/New_York"))
         except Exception:

@@ -224,15 +224,27 @@
                         </tr>
                         <tr>
                             <td>Patrón de Entrada</td>
-                            <td style="color:#3B82F6;">Reversión VWAP (5 Ticks)</td>
+                            <td style="color:#3B82F6;">Reloj Suizo (Mecha VWAP)</td>
                         </tr>
                         <tr>
-                            <td>Stop Loss Fijo</td>
-                            <td>45% a Banda Contraria</td>
+                            <td>Ventana de Verificación</td>
+                            <td style="color:#FACC15;">Minuto 4 al 5 (Cada 2s)</td>
                         </tr>
                         <tr>
-                            <td>Take Profit Fijo</td>
-                            <td>50% a Banda Objetivo</td>
+                            <td>Stop Loss Inicial</td>
+                            <td>20% sobre/bajo VWAP</td>
+                        </tr>
+                        <tr>
+                            <td>Take Profit Inicial</td>
+                            <td>50% hacia Siguiente Banda</td>
+                        </tr>
+                        <tr>
+                            <td>Enfriamiento (Cooldown)</td>
+                            <td>9 Minutos por Símbolo</td>
+                        </tr>
+                        <tr>
+                            <td>Topes de Ganancia/Pérdida</td>
+                            <td style="color:#10B981;">Sin Topes (Ilimitado)</td>
                         </tr>
                         <tr>
                             <td>Tipo de Orden</td>
@@ -249,9 +261,13 @@
              ========================================== -->
         <section class="bottom-deck">
             <div class="deck-tabs">
-                <button class="deck-tab active" data-tab="tab-operations">
+                <button class="deck-tab active" data-tab="tab-ranking">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="8" r="7"/><polyline points="8.21 13.89 7 23 12 20 17 23 15.79 13.88"/></svg>
+                    🏆 Ranking de Operaciones por Símbolo
+                </button>
+                <button class="deck-tab" data-tab="tab-operations">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
-                    Desglose General de Operaciones (Todos los Símbolos)
+                    Desglose General de Operaciones
                 </button>
                 <button class="deck-tab" data-tab="tab-terminal">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
@@ -271,8 +287,130 @@
                 </div>
             </div>
 
+            <!-- Pane 0: Institutional Ranking & Symbol Totals (Nueva Sección) -->
+            <div id="tab-ranking" class="tab-pane active">
+                <!-- Ribbon Cards: Grand Totals -->
+                <div class="ranking-ribbon" style="display:grid; grid-template-columns:repeat(auto-fit, minmax(180px, 1fr)); gap:12px; margin-bottom:16px;">
+                    <div class="metric-card" style="background:#0D1626; border:1px solid #1E293B; padding:12px; border-radius:8px;">
+                        <span class="metric-title" style="font-size:11px; color:#94A3B8;">PnL Neto Consolidado</span>
+                        <span id="rank-total-net" class="metric-value bull" style="font-size:20px; font-weight:700;">+$0.00</span>
+                        <span class="metric-sub" id="rank-total-gross-sub" style="font-size:10px; color:#64748B;">Bruto: $0.00 | Fees: $0.00</span>
+                    </div>
+                    <div class="metric-card" style="background:#0D1626; border:1px solid #1E293B; padding:12px; border-radius:8px;">
+                        <span class="metric-title" style="font-size:11px; color:#94A3B8;">Win Rate Global</span>
+                        <span id="rank-total-winrate" class="metric-value cyan" style="font-size:20px; font-weight:700;">0.0%</span>
+                        <span class="metric-sub" id="rank-total-trades-sub" style="font-size:10px; color:#64748B;">0 Operaciones (0W / 0L / 0BE)</span>
+                    </div>
+                    <div class="metric-card" style="background:#0D1626; border:1px solid #1E293B; padding:12px; border-radius:8px;">
+                        <span class="metric-title" style="font-size:11px; color:#94A3B8;">Profit Factor Cartera</span>
+                        <span id="rank-total-pf" class="metric-value bull" style="font-size:20px; font-weight:700;">0.00</span>
+                        <span class="metric-sub" style="font-size:10px; color:#64748B;">Ratio Ganancia/Pérdida</span>
+                    </div>
+                    <div class="metric-card" style="background:#0D1626; border:1px solid #1E293B; padding:12px; border-radius:8px;">
+                        <span class="metric-title" style="font-size:11px; color:#94A3B8;">Símbolo #1 Líder</span>
+                        <span id="rank-leader-symbol" class="metric-value" style="font-size:20px; font-weight:700; color:#FACC15;">--</span>
+                        <span class="metric-sub" id="rank-leader-pnl" style="font-size:10px; color:#64748B;">Mejor Rendimiento Neto</span>
+                    </div>
+                    <div class="metric-card" style="background:#0D1626; border:1px solid #1E293B; padding:12px; border-radius:8px;">
+                        <span class="metric-title" style="font-size:11px; color:#94A3B8;">Estrategia Activa</span>
+                        <span class="metric-value" style="font-size:16px; font-weight:700; color:#38BDF8;">Reloj Suizo</span>
+                        <span class="metric-sub" style="font-size:10px; color:#10B981;">Min 4-5 | SL 20% | TP 50%</span>
+                    </div>
+                </div>
+
+                <!-- Section 1: Ranking Table of Symbols -->
+                <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:10px;">
+                    <h3 style="font-size:13px; font-weight:700; color:#F8FAFC; display:flex; align-items:center; gap:8px;">
+                        <span>🏆</span> RANKING CUANTITATIVO POR SÍMBOLO (TOTALES CONSOLIDADOS)
+                    </h3>
+                    <span style="font-size:11px; color:#64748B;">Ordenado por Rendimiento Neto Real</span>
+                </div>
+
+                <div class="table-responsive" style="margin-bottom:24px;">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th style="width:60px;">Rank</th>
+                                <th>Símbolo</th>
+                                <th>Nombre Contrato</th>
+                                <th style="text-align:center;">Trades</th>
+                                <th style="text-align:center;">W / L / BE</th>
+                                <th style="text-align:center;">Win Rate</th>
+                                <th style="text-align:right;">PnL Bruto</th>
+                                <th style="text-align:right;">Comisiones</th>
+                                <th style="text-align:right;">PnL Neto Real</th>
+                                <th style="text-align:center;">Profit Factor</th>
+                                <th style="text-align:right;">Mejor Trade</th>
+                                <th style="text-align:right;">Peor Trade</th>
+                                <th style="text-align:center;">Acción</th>
+                            </tr>
+                        </thead>
+                        <tbody id="ranking-table-body">
+                            <!-- Populated via JS -->
+                        </tbody>
+                        <tfoot id="ranking-table-foot" style="background:#0A101C; font-weight:700; border-top:2px solid #1E293B;">
+                            <!-- Populated via JS -->
+                        </tfoot>
+                    </table>
+                </div>
+
+                <!-- Section 2: Detailed Breakdown of Operations -->
+                <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:10px; flex-wrap:wrap; gap:10px;">
+                    <h3 style="font-size:13px; font-weight:700; color:#F8FAFC; display:flex; align-items:center; gap:8px;">
+                        <span>📋</span> DESGLOSE DETALLADO DE OPERACIONES (PRECIOS, TP MÁXIMO Y SL MÁXIMO)
+                    </h3>
+                    <div style="display:flex; align-items:center; gap:10px;">
+                        <label style="font-size:11px; color:#94A3B8; font-weight:600;">Filtrar Símbolo en Detalle:</label>
+                        <select id="select-ranking-detail-filter" class="select-institutional" style="font-size:11px; padding:4px 8px;">
+                            <option value="ALL">Todos los Símbolos</option>
+                            <option value="ES">ES (E-mini S&P 500)</option>
+                            <option value="MES">MES (Micro S&P 500)</option>
+                            <option value="NQ">NQ (E-mini Nasdaq-100)</option>
+                            <option value="MNQ">MNQ (Micro Nasdaq-100)</option>
+                            <option value="YM">YM (E-mini Dow Jones)</option>
+                            <option value="MYM">MYM (Micro Dow Jones)</option>
+                            <option value="RTY">RTY (E-mini Russell 2000)</option>
+                            <option value="M2K">M2K (Micro Russell 2000)</option>
+                            <option value="GC">GC (Oro Futures)</option>
+                            <option value="MGC">MGC (Micro Oro Futures)</option>
+                            <option value="CL">CL (Petróleo Crudo)</option>
+                            <option value="MCL">MCL (Micro Petróleo)</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="table-responsive">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Fecha</th>
+                                <th>Apertura</th>
+                                <th>Cierre</th>
+                                <th>Símbolo</th>
+                                <th>Dirección</th>
+                                <th>Estado</th>
+                                <th>Entrada Real</th>
+                                <th>Salida Real</th>
+                                <th>VWAP Entrada</th>
+                                <th>TP Inicial</th>
+                                <th style="color:#10B981;">TP Máx Alcanzado</th>
+                                <th>SL Inicial</th>
+                                <th style="color:#EF4444;">SL Máx Alcanzado</th>
+                                <th>PnL Bruto</th>
+                                <th>Comisiones</th>
+                                <th>PnL Neto (USD)</th>
+                                <th>Condición Técnica</th>
+                            </tr>
+                        </thead>
+                        <tbody id="ranking-operations-detail-body">
+                            <!-- Populated via JS -->
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
             <!-- Pane 1: Operations CSV Black Box -->
-            <div id="tab-operations" class="tab-pane active">
+            <div id="tab-operations" class="tab-pane">
                 <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:12px; gap:16px; flex-wrap:wrap;">
                     <div style="display:flex; align-items:center; gap:10px;">
                         <label style="font-size:12px; color:#94A3B8; font-weight:600;">Filtrar Símbolo:</label>
