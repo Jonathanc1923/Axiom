@@ -46,7 +46,8 @@ from config import (
     STRATEGY_NAME, CHECK_WINDOW_START_MINUTE, SL_VWAP_RATIO, SL_VWAP_BAND_RATIO, TP_VWAP_BAND_RATIO,
     VWAP_TOUCH_RETREAT_TICKS, SL_VWAP_BUFFER_TICKS,
     SYMBOL_COOLDOWN_MINUTES, SYMBOL_COOLDOWN_SECONDS, USE_BASKET_TP, USE_DAILY_PROFIT_LOCK,
-    DYNAMIC_BE_PROFIT_PCT, DYNAMIC_BE_PROFIT_TICKS
+    DYNAMIC_BE_PROFIT_PCT, DYNAMIC_BE_PROFIT_TICKS,
+    TOPSTEP_SYNC_INTERVAL_SECONDS
 )
 from topstep_client import TopstepClient
 
@@ -68,6 +69,15 @@ def safe_parse_iso_timestamp(ts_str: str) -> datetime:
             return datetime.strptime(clean_s, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
         except Exception:
             return datetime.now(timezone.utc)
+
+def safe_float(val: Any, default: float = 0.0) -> float:
+    """Convierte de forma segura strings o números a float sin fallar en 'N/A' o None."""
+    if val is None or val == "" or str(val).strip().upper() == "N/A":
+        return default
+    try:
+        return float(val)
+    except (ValueError, TypeError):
+        return default
 
 def round_to_tick(val: float, tick_size: float) -> float:
     """Redondea un precio al múltiplo exacto de tick_size eliminando artefactos de punto flotante."""
@@ -128,9 +138,9 @@ class AxiomEngine:
         # Cargar historial previo de logs
         self.load_persisted_logs()
         
-        # Sincronización horaria con TopstepX
+        # Sincronización oficial en tiempo real con TopstepX
         self.last_sync_time: float = 0
-        self.sync_interval_seconds: int = 3600
+        self.sync_interval_seconds: float = TOPSTEP_SYNC_INTERVAL_SECONDS
 
         # Consolidado de métricas
         self.stats: Dict[str, Any] = {
@@ -1514,6 +1524,8 @@ class AxiomEngine:
             winning = 0
             losing = 0
             gross_pnl = 0.0
+            gross_wins = 0.0
+            gross_losses = 0.0
             fees = 0.0
             net_pnl = 0.0
             
@@ -1536,22 +1548,34 @@ class AxiomEngine:
                         
                     if "CERRADA" in estado:
                         try:
-                            net = float(row.get("PnL_Neto_USD", 0.0))
-                            gross = float(row.get("PnL_Bruto_USD", 0.0))
-                            comms = float(row.get("Comisiones_USD", 0.0))
+                            net = safe_float(row.get("PnL_Neto_USD"), 0.0)
+                            gross = safe_float(row.get("PnL_Bruto_USD"), 0.0)
+                            comms = safe_float(row.get("Comisiones_USD"), 0.0)
                             gross_pnl += gross
                             fees += comms
                             net_pnl += net
-                            if net >= 0:
+                            if gross > 0:
                                 winning += 1
-                            else:
+                                gross_wins += gross
+                            elif gross < 0:
                                 losing += 1
+                                gross_losses += abs(gross)
+                            else:
+                                if net >= 0:
+                                    winning += 1
+                                else:
+                                    losing += 1
                         except (ValueError, TypeError):
                             pass
                             
             closed_total = winning + losing
             win_rate = round((winning / closed_total * 100.0), 1) if closed_total > 0 else 0.0
-            profit_factor = round(abs(gross_pnl / fees), 2) if fees > 0 else 0.0
+            if gross_losses > 0:
+                profit_factor = round(gross_wins / gross_losses, 2)
+            elif gross_wins > 0:
+                profit_factor = 99.9
+            else:
+                profit_factor = 0.0
             
             with self.lock:
                 self.stats["total_trades"] = total
@@ -1636,6 +1660,8 @@ class AxiomEngine:
             except Exception:
                 pass
 
+            closed_fills = [t for t in raw_trades if t.get("profitAndLoss") is not None]
+
             if os.path.isfile(self.csv_path) and os.path.getsize(self.csv_path) > 0:
                 rows = []
                 with open(self.csv_path, mode='r', encoding='utf-8') as file:
@@ -1653,8 +1679,14 @@ class AxiomEngine:
                         rows.append(r)
                         
                 cambios = False
+                matched_exit_order_ids = set()
+
                 for r in rows:
                     estado_actual = (r.get("Estado") or "").upper()
+                    exit_oid_existing = str(r.get("Exit_Order_ID") or "").strip()
+                    if exit_oid_existing and exit_oid_existing not in ("N/A", "SYNC_CLOSE", ""):
+                        matched_exit_order_ids.add(exit_oid_existing)
+
                     if "EN CURSO" in estado_actual or "SL PROTEGIDO" in estado_actual or "ABIERTA" in estado_actual:
                         sym = (r.get("Simbolo") or "ES").upper()
                         if sym not in open_symbols:
@@ -1662,17 +1694,20 @@ class AxiomEngine:
                             gross_pnl = None
                             comms = None
                             exit_oid = "SYNC_CLOSE"
-                            
                             exit_time_str = datetime.now().strftime('%H:%M:%S')
-                            for fill in reversed(raw_trades):
+
+                            for fill in reversed(closed_fills):
+                                f_oid = str(fill.get("orderId", ""))
+                                if f_oid in matched_exit_order_ids:
+                                    continue
                                 f_sym = self.resolve_symbol_from_contract(fill.get("contractId", ""))
-                                if f_sym == sym and fill.get("profitAndLoss") is not None:
+                                if f_sym == sym:
                                     p_salida = float(fill.get("price", 0.0))
                                     gross_pnl = float(fill.get("profitAndLoss", 0.0))
-                                    f_fees = float(fill.get("fees") or 0.0)
-                                    f_comms = float(fill.get("commissions") or 0.0)
-                                    comms = round(f_fees + f_comms, 2)
-                                    exit_oid = str(fill.get("orderId", "SYNC_CLOSE"))
+                                    f_fees = float(fill.get("fees") or 0.0) + float(fill.get("commissions") or 0.0)
+                                    comms = round(f_fees * 2.0, 2)
+                                    exit_oid = f_oid
+                                    matched_exit_order_ids.add(f_oid)
                                     fill_ts = fill.get("creationTimestamp", "")
                                     if fill_ts and "T" in fill_ts:
                                         try:
@@ -1681,7 +1716,7 @@ class AxiomEngine:
                                             pass
                                     break
                                     
-                            p_entrada = float(r.get("Precio_Entrada_Real") or r.get("Precio_Mercado") or 0.0)
+                            p_entrada = safe_float(r.get("Precio_Entrada_Real"), safe_float(r.get("Precio_Mercado"), 0.0))
                             if p_salida is None or p_salida == 0.0:
                                 p_salida = p_entrada
                                 
@@ -1692,41 +1727,17 @@ class AxiomEngine:
                                 gross_pnl = round(diff_pts * pt_val, 2)
                                 
                             if comms is None:
-                                comms = 1.22 if sym.startswith("M") else 3.78
+                                comms = 1.92 if sym.startswith("M") else 4.32
                                 
                             net_pnl = round(gross_pnl - comms, 2)
                             sign = "+" if net_pnl >= 0 else ""
                             
-                            # Actualizar Hito / Tipo Cierre alcanzado
-                            if USE_DYNAMIC_TRAILING:
-                                curr_hito = r.get("Hito_Alcanzado") or "Inicial"
-                                if curr_hito in ("Inicial", "N/A", "") and diff_pts > 0:
-                                    spec = SUPPORTED_SYMBOLS.get(sym, {"tickSize": 0.25})
-                                    tick_size = spec.get("tickSize", 0.25)
-                                    try:
-                                        tp_ticks = float(r.get("TP_Ticks", 0) or 0)
-                                    except Exception:
-                                        tp_ticks = 0
-                                    d_base = (tp_ticks * tick_size) if tp_ticks > 0 else (15 * tick_size)
-                                    if d_base > 0:
-                                        pct = (diff_pts / d_base) * 100.0
-                                        stg = 0
-                                        if pct >= HITO_MICRO_TRIGGER_PCT: stg = 0.5
-                                        if pct >= HITO_1_TRIGGER_PCT: stg = 1
-                                        if pct >= HITO_2_TRIGGER_PCT: stg = 2
-                                        if pct >= HITO_3_TRIGGER_PCT: stg = 3
-                                        if pct >= HITO_4_TRIGGER_PCT:
-                                            stg = 4 + int((pct - HITO_4_TRIGGER_PCT) // RUNNER_STEP_PCT)
-                                        if stg > 0:
-                                            r["Hito_Alcanzado"] = self.format_milestone(stg)
-                                            r["Max_Pct_TP"] = f"{pct:.1f}%"
+                            if gross_pnl > 0:
+                                r["Hito_Alcanzado"] = "Take Profit (Fijo)"
+                            elif gross_pnl < 0:
+                                r["Hito_Alcanzado"] = "Stop Loss (Fijo)"
                             else:
-                                if gross_pnl > 0:
-                                    r["Hito_Alcanzado"] = "Take Profit (Fijo)"
-                                elif gross_pnl < 0:
-                                    r["Hito_Alcanzado"] = "Stop Loss (Fijo)"
-                                else:
-                                    r["Hito_Alcanzado"] = "Break-Even (Fijo)"
+                                r["Hito_Alcanzado"] = "Break-Even (Fijo)"
                             
                             r["Estado"] = f"CERRADA ({sign}${net_pnl:.2f} USD)"
                             r["Precio_Salida_Real"] = f"{p_salida:.2f}"
@@ -1739,7 +1750,59 @@ class AxiomEngine:
                                 r["Hora_Apertura"] = r.get("Hora", "N/A")
                             r["Ultima_Actualizacion"] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                             cambios = True
-                            
+
+                # Auditoría inversa: Asegurar que todo fill de cierre oficial de Topstep esté presente en el CSV
+                for fill in closed_fills:
+                    f_oid = str(fill.get("orderId", "")).strip()
+                    if f_oid and f_oid not in matched_exit_order_ids:
+                        f_sym = self.resolve_symbol_from_contract(fill.get("contractId", ""))
+                        f_gross = float(fill.get("profitAndLoss", 0.0))
+                        f_fee_single = float(fill.get("fees") or 0.0) + float(fill.get("commissions") or 0.0)
+                        f_comms = round(f_fee_single * 2.0, 2)
+                        f_net = round(f_gross - f_comms, 2)
+                        f_price = float(fill.get("price", 0.0))
+                        f_side = int(fill.get("side", 0))
+                        f_dir = "SHORT" if f_side == 0 else "LONG"
+                        ts_str = fill.get("creationTimestamp", "")
+                        f_date = ts_str.split("T")[0] if "T" in ts_str else datetime.now().strftime('%Y-%m-%d')
+                        f_time = ts_str.split("T")[1].split(".")[0] if "T" in ts_str else datetime.now().strftime('%H:%M:%S')
+                        sign = "+" if f_net >= 0 else ""
+                        
+                        new_row = {
+                            'Fecha': f_date,
+                            'Hora_Apertura': f_time,
+                            'Hora_Cierre': f_time,
+                            'Hora': f_time,
+                            'Simbolo': f_sym,
+                            'Estado': f"CERRADA ({sign}${f_net:.2f} USD)",
+                            'Direccion': f_dir,
+                            'Precio_Mercado': f"{f_price:.2f}",
+                            'Precio_Entrada_Real': f"{f_price:.2f}",
+                            'Precio_Salida_Real': f"{f_price:.2f}",
+                            'VWAP_Entrada': "N/A",
+                            'Banda_Objetivo': "N/A",
+                            'SL_Inicial': "N/A",
+                            'SL_Max_Alcanzado': "0.00 pts",
+                            'TP_Inicial': "N/A",
+                            'TP_Max_Alcanzado': "0.00 pts (0.0%)",
+                            'SL_Ticks': "0",
+                            'TP_Ticks': "0",
+                            'Hito_Alcanzado': "Take Profit (Fijo)" if f_gross > 0 else ("Stop Loss (Fijo)" if f_gross < 0 else "Break-Even"),
+                            'Max_Pct_TP': "100.0%" if f_gross > 0 else "0.0%",
+                            'PnL_Bruto_USD': f"{f_gross:.2f}",
+                            'Comisiones_USD': f"{f_comms:.2f}",
+                            'PnL_Neto_USD': f"{f_net:.2f}",
+                            'Order_ID': f_oid,
+                            'Exit_Order_ID': f_oid,
+                            'Motivo_Rechazo': "N/A",
+                            'Codigo_Error': "0",
+                            'Condicion_Tecnica': "TopstepX Operación Sincronizada",
+                            'Ultima_Actualizacion': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                        }
+                        rows.append(new_row)
+                        matched_exit_order_ids.add(f_oid)
+                        cambios = True
+
                 if cambios:
                     with open(self.csv_path, mode='w', newline='', encoding='utf-8') as file:
                         writer = csv.DictWriter(file, fieldnames=fieldnames, delimiter=';')
@@ -1754,38 +1817,72 @@ class AxiomEngine:
             if raw_trades:
                 topstep_winning = 0
                 topstep_losing = 0
+                topstep_breakeven = 0
                 topstep_gross = 0.0
                 topstep_fees = 0.0
+                gross_wins = 0.0
+                gross_losses = 0.0
                 by_sym_stats = {}
 
                 for t in raw_trades:
                     cid = t.get("contractId", "")
                     t_sym = self.resolve_symbol_from_contract(cid) or "OTHER"
                     if t_sym not in by_sym_stats:
-                        by_sym_stats[t_sym] = {"total": 0, "gross": 0.0, "fees": 0.0, "net_pnl": 0.0}
-
-                    pnl = t.get("profitAndLoss")
-                    if pnl is not None:
-                        val = float(pnl)
-                        topstep_gross += val
-                        by_sym_stats[t_sym]["gross"] += val
-                        by_sym_stats[t_sym]["total"] += 1
-                        if val >= 0:
-                            topstep_winning += 1
-                        else:
-                            topstep_losing += 1
-
+                        by_sym_stats[t_sym] = {
+                            "total": 0, "gross": 0.0, "fees": 0.0, "net_pnl": 0.0,
+                            "winning": 0, "losing": 0, "breakeven": 0,
+                            "gross_wins": 0.0, "gross_losses": 0.0,
+                            "win_rate": 0.0, "profit_factor": 0.0
+                        }
                     f_fee = float(t.get("fees") or 0.0) + float(t.get("commissions") or 0.0)
                     topstep_fees += f_fee
                     by_sym_stats[t_sym]["fees"] += f_fee
 
-                for s_data in by_sym_stats.values():
+                for t in raw_trades:
+                    pnl = t.get("profitAndLoss")
+                    if pnl is not None:
+                        val = float(pnl)
+                        topstep_gross += val
+                        cid = t.get("contractId", "")
+                        t_sym = self.resolve_symbol_from_contract(cid) or "OTHER"
+                        by_sym_stats[t_sym]["gross"] += val
+                        by_sym_stats[t_sym]["total"] += 1
+                        if val > 0:
+                            topstep_winning += 1
+                            gross_wins += val
+                            by_sym_stats[t_sym]["winning"] += 1
+                            by_sym_stats[t_sym]["gross_wins"] += val
+                        elif val < 0:
+                            topstep_losing += 1
+                            gross_losses += abs(val)
+                            by_sym_stats[t_sym]["losing"] += 1
+                            by_sym_stats[t_sym]["gross_losses"] += abs(val)
+                        else:
+                            topstep_breakeven += 1
+                            by_sym_stats[t_sym]["breakeven"] += 1
+
+                for s_sym, s_data in by_sym_stats.items():
+                    s_data["fees"] = round(s_data["fees"], 2)
+                    s_data["gross"] = round(s_data["gross"], 2)
                     s_data["net_pnl"] = round(s_data["gross"] - s_data["fees"], 2)
+                    s_tot = s_data["total"]
+                    s_data["win_rate"] = round((s_data["winning"] / s_tot * 100.0), 1) if s_tot > 0 else 0.0
+                    if s_data["gross_losses"] > 0:
+                        s_data["profit_factor"] = round(s_data["gross_wins"] / s_data["gross_losses"], 2)
+                    elif s_data["gross_wins"] > 0:
+                        s_data["profit_factor"] = 99.9
+                    else:
+                        s_data["profit_factor"] = 0.0
 
                 topstep_net = round(topstep_gross - topstep_fees, 2)
-                topstep_closed = topstep_winning + topstep_losing
+                topstep_closed = topstep_winning + topstep_losing + topstep_breakeven
                 topstep_win_rate = round((topstep_winning / topstep_closed * 100.0), 1) if topstep_closed > 0 else 0.0
-                topstep_profit_factor = round(abs(topstep_gross / topstep_fees), 2) if topstep_fees > 0 else 0.0
+                if gross_losses > 0:
+                    topstep_profit_factor = round(gross_wins / gross_losses, 2)
+                elif gross_wins > 0:
+                    topstep_profit_factor = 99.9
+                else:
+                    topstep_profit_factor = 0.0
 
                 with self.lock:
                     self.stats["sync_api_authoritative"] = True
@@ -1794,6 +1891,8 @@ class AxiomEngine:
                     self.stats["net_pnl_usd"] = topstep_net
                     self.stats["winning_trades"] = topstep_winning
                     self.stats["losing_trades"] = topstep_losing
+                    self.stats["total_trades"] = topstep_closed
+                    self.stats["executed_trades"] = topstep_closed
                     self.stats["win_rate"] = topstep_win_rate
                     self.stats["profit_factor"] = topstep_profit_factor
                     self.stats["by_symbol"] = by_sym_stats
@@ -2535,7 +2634,7 @@ class AxiomEngine:
                     estado = (r.get("Estado") or "").upper()
                     if "CERRADA" in estado:
                         try:
-                            realized_today += float(r.get("PnL_Neto_USD", 0.0) or 0.0)
+                            realized_today += safe_float(r.get("PnL_Neto_USD"), 0.0)
                         except Exception:
                             pass
         except Exception:

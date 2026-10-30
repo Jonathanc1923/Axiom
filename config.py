@@ -41,6 +41,9 @@ STRATEGY_NAME = "VWAP Wick Rejection (SL VWAP | TP 40% | Dinámico BE+2t @ 50%)"
 # Intervalo central de monitoreo y actualización de mercado (cada 1.0 segundo estricto)
 POLL_INTERVAL_SECONDS = float(os.getenv("POLL_INTERVAL_SECONDS", "1.0"))
 
+# Sincronización oficial autoritativa con TopstepX API en tiempo real (segundos)
+TOPSTEP_SYNC_INTERVAL_SECONDS = float(os.getenv("TOPSTEP_SYNC_INTERVAL_SECONDS", "5.0"))
+
 # Take Profit Inicial: 40% de distancia entre el VWAP y la siguiente banda
 TP_VWAP_BAND_RATIO = float(os.getenv("TP_VWAP_BAND_RATIO", "0.40"))
 
