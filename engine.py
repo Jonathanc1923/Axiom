@@ -390,8 +390,8 @@ class AxiomEngine:
         3. Vela t (actual recién iniciada): No inició pasando el VWAP.
            - SHORT: open < vwap.
            - LONG: open > vwap.
-        4. Stop Loss Inicial: Exacto en la línea VWAP.
-        5. Take Profit Inicial: 40% de distancia entre el VWAP y la siguiente banda.
+        4. Stop Loss Inicial: 25% de distancia del VWAP hacia la banda contraria (+músculo de aguante).
+        5. Take Profit Inicial: 60% de distancia entre el VWAP y la siguiente banda.
         """
         if df_5m is None or len(df_5m) < 3:
             return None
@@ -477,7 +477,7 @@ class AxiomEngine:
             banda_objetivo = curr_upper
 
         # -------------------------------------------------------------
-        # TAKE PROFIT INICIAL: 40% DE DISTANCIA VWAP A BANDA
+        # TAKE PROFIT INICIAL: 60% DE DISTANCIA VWAP A BANDA
         # -------------------------------------------------------------
         d_tp = round_to_tick(TP_VWAP_BAND_RATIO * std_dev, tick_size)
         if d_tp < 2 * tick_size:
@@ -932,7 +932,7 @@ class AxiomEngine:
                         trade=trade,
                         nuevo_sl=nuevo_sl,
                         pct_avance=pct_avance,
-                        motivo=f"Dinamismo {DYNAMIC_BE_PROFIT_PCT}% TP -> Entrada + {DYNAMIC_BE_PROFIT_TICKS}t asegurado"
+                        motivo=f"Dinamismo {DYNAMIC_BE_PROFIT_PCT}% TP -> {ref_name} {'+' if direccion=='LONG' else '-'} {DYNAMIC_BE_PROFIT_TICKS}t asegurado"
                     )
 
         # SALVAGUARDA DE CIERRE AUTOMÁTICO (SL / TP Fijo)
@@ -2432,7 +2432,7 @@ class AxiomEngine:
                                 f"🔍 [ANÁLISIS EN VIVO] {self.active_symbol} @ {p_close:.2f} | VWAP: {p_vwap:.2f} "
                                 f"(Dist: {dist_ticks:+d}t / {p_dist:+.2f}) | "
                                 f"Banda Sup: {act_tel.get('upper_band', 0.0):.2f} | Banda Inf: {act_tel.get('lower_band', 0.0):.2f} | "
-                                f"12 símbolos CME analizados cada 5s (Detector Toque VWAP + Retroceso 2t | SL 50% / TP 50% a Banda)",
+                                f"12 símbolos CME analizados cada {int(POLL_INTERVAL_SECONDS)}s (Rechazo Mecha VWAP 5m | SL {int(SL_VWAP_BAND_RATIO * 100)}% Banda | TP {int(TP_VWAP_BAND_RATIO * 100)}% Banda | Dinámico BE {DYNAMIC_BE_REFERENCE}+2t @ {int(DYNAMIC_BE_PROFIT_PCT)}% TP)",
                                 "SCANNER", self.active_symbol
                             )
 
