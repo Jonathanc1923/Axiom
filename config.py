@@ -34,52 +34,49 @@ CSV_DIR = DATA_DIR
 CSV_PATH = os.path.join(DATA_DIR, "registro_operaciones.csv")
 
 # ==========================================
-# Institutional Strategy Configuration: RELOJ SUIZO (Vela Mecha VWAP)
+# Configuración de Estrategia: RECHAZO DE MECHA EN VWAP (SL VWAP / TP 40% BANDA / BE+2T)
 # ==========================================
-STRATEGY_NAME = "VWAP Wick Rejection (Reloj Suizo)"
+STRATEGY_NAME = "VWAP Wick Rejection (SL VWAP | TP 40% | Dinámico BE+2t @ 50%)"
 
-# Ventana de comprobación: Desde el minuto 1 en adelante de la vela de 5m
-CHECK_WINDOW_START_MINUTE = int(os.getenv("CHECK_WINDOW_START_MINUTE", "1"))
+# Intervalo central de monitoreo y actualización de mercado (cada 1.0 segundo estricto)
+POLL_INTERVAL_SECONDS = float(os.getenv("POLL_INTERVAL_SECONDS", "1.0"))
 
-# Detector de Toque de VWAP + Retroceso Confirmado (Mecha en Tiempo Real)
-# El precio toca el VWAP y debe retroceder mínimo N ticks a favor del rechazo
-VWAP_TOUCH_RETREAT_TICKS = int(os.getenv("VWAP_TOUCH_RETREAT_TICKS", "2"))
+# Take Profit Inicial: 40% de distancia entre el VWAP y la siguiente banda
+TP_VWAP_BAND_RATIO = float(os.getenv("TP_VWAP_BAND_RATIO", "0.40"))
 
-# Stop Loss: 50% de la distancia entre la línea VWAP y la línea de la banda contraria
-SL_VWAP_BAND_RATIO = float(os.getenv("SL_VWAP_BAND_RATIO", "0.50"))
-SL_VWAP_RATIO = SL_VWAP_BAND_RATIO
-SL_VWAP_BUFFER_TICKS = int(os.getenv("SL_VWAP_BUFFER_TICKS", "5"))
+# Dinamismo de SL: Al avanzar a favor >= 50% del TP, asegurar Entrada + 2 ticks
+DYNAMIC_BE_PROFIT_PCT = float(os.getenv("DYNAMIC_BE_PROFIT_PCT", "50.0"))
+DYNAMIC_BE_PROFIT_TICKS = int(os.getenv("DYNAMIC_BE_PROFIT_TICKS", "2"))
 
-# Take Profit: 50% de la distancia del VWAP hacia la siguiente banda
-TP_VWAP_BAND_RATIO = float(os.getenv("TP_VWAP_BAND_RATIO", "0.50"))
+# Compatibilidad con módulos y variables previas
+CHECK_WINDOW_START_MINUTE = 0
+VWAP_TOUCH_RETREAT_TICKS = 0
+SL_VWAP_BAND_RATIO = 0.0
+SL_VWAP_RATIO = 0.0
+SL_VWAP_BUFFER_TICKS = 0
+SYMBOL_COOLDOWN_MINUTES = 0
+SYMBOL_COOLDOWN_SECONDS = 0
 
-# Cooldown por símbolo: Esperar mínimo 9 minutos tras ejecutar una operación
-SYMBOL_COOLDOWN_MINUTES = int(os.getenv("SYMBOL_COOLDOWN_MINUTES", "9"))
-SYMBOL_COOLDOWN_SECONDS = SYMBOL_COOLDOWN_MINUTES * 60
-
-# Máximo de operaciones simultáneas permitidas por símbolo (1 operación estricta)
+# Máximo de operaciones simultáneas permitidas por símbolo
 MAX_POSITIONS_PER_SYMBOL = int(os.getenv("MAX_POSITIONS_PER_SYMBOL", "1"))
 
-# Filtro Horario de Inicio de Sesión CME tras pausa diaria:
-SESSION_START_HOUR_PERU = int(os.getenv("SESSION_START_HOUR_PERU", "19"))
-SESSION_START_MINUTE_PERU = int(os.getenv("SESSION_START_MINUTE_PERU", "0"))
-CME_OPEN_BUFFER_MINUTES = int(os.getenv("CME_OPEN_BUFFER_MINUTES", "120"))
+# Horarios: Calendario oficial CME (Apertura Domingo 18:00 ET hasta Viernes 17:00 ET; Pausa diaria 17:00 a 18:00 ET)
+SESSION_START_HOUR_PERU = 18
+SESSION_START_MINUTE_PERU = 0
+CME_OPEN_BUFFER_MINUTES = 0
 
-# Intervalo central de monitoreo y actualización de mercado (cada 5.0 segundos)
-POLL_INTERVAL_SECONDS = float(os.getenv("POLL_INTERVAL_SECONDS", "5.0"))
-
-# Sin topes de ganancia ni pérdida ni canastas a recoger (Solicitud explícita)
+# Candados de sesión y canasta desactivados
 USE_DAILY_PROFIT_LOCK = False
 USE_SESSION_PROFIT_TARGET = False
 USE_BASKET_TP = False
-SESSION_PROFIT_TARGET_USD = 999999999.0
-TRAILING_DAILY_PROFIT_TRIGGER_USD = 999999999.0
+SESSION_PROFIT_TARGET_USD = 0.0
+TRAILING_DAILY_PROFIT_TRIGGER_USD = 0.0
 TRAILING_DAILY_PROFIT_RETAIN_PCT = 0.0
-BASKET_TP_TARGET_USD = 999999999.0
-BASKET_TP_HARD_USD = 999999999.0
+BASKET_TP_TARGET_USD = 0.0
+BASKET_TP_HARD_USD = 0.0
 BASKET_COOLDOWN_SECONDS = 0
 
-# Placeholders de compatibilidad para módulos legacy
+# Trailing y filtros previos eliminados
 INITIAL_SL_OPPOSITE_BAND_RATIO = 0.0
 INITIAL_TP_TARGET_BAND_RATIO = 0.0
 USE_DYNAMIC_TRAILING = False
@@ -88,8 +85,8 @@ LOCK_PROFIT_TICKS = 0
 EXPAND_TP_PCT = 0.0
 STEP_SL_PCT = 0.0
 MIN_PREV_CANDLE_DIFF_TICKS = 0
-USE_VWAP_SLOPE_FILTER = os.getenv("USE_VWAP_SLOPE_FILTER", "true").lower() in ("true", "1", "yes")
-VWAP_SLOPE_LOOKBACK_BARS = int(os.getenv("VWAP_SLOPE_LOOKBACK_BARS", "7"))
+USE_VWAP_SLOPE_FILTER = False
+VWAP_SLOPE_LOOKBACK_BARS = 0
 MIN_VWAP_SLOPE_TICKS = 0
 INITIAL_SL_TICKS = 35
 INITIAL_SL_TICKS_ES = 35

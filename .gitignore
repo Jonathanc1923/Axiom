@@ -56,3 +56,4 @@ registro_operaciones.csv.bak
 registro_operaciones_previo_*.csv
 registro_operaciones_cuenta_*.csv
 .current_account_id
+scratch/

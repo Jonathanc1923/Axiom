@@ -45,7 +45,8 @@ from config import (
     CME_OPEN_BUFFER_MINUTES, TRAILING_DAILY_PROFIT_TRIGGER_USD, TRAILING_DAILY_PROFIT_RETAIN_PCT,
     STRATEGY_NAME, CHECK_WINDOW_START_MINUTE, SL_VWAP_RATIO, SL_VWAP_BAND_RATIO, TP_VWAP_BAND_RATIO,
     VWAP_TOUCH_RETREAT_TICKS, SL_VWAP_BUFFER_TICKS,
-    SYMBOL_COOLDOWN_MINUTES, SYMBOL_COOLDOWN_SECONDS, USE_BASKET_TP, USE_DAILY_PROFIT_LOCK
+    SYMBOL_COOLDOWN_MINUTES, SYMBOL_COOLDOWN_SECONDS, USE_BASKET_TP, USE_DAILY_PROFIT_LOCK,
+    DYNAMIC_BE_PROFIT_PCT, DYNAMIC_BE_PROFIT_TICKS
 )
 from topstep_client import TopstepClient
 
@@ -163,19 +164,10 @@ class AxiomEngine:
 
     @staticmethod
     def format_milestone(stage: float) -> str:
-        """Formatea el hito alcanzado según el avance de TP y blindaje de SL (+5t en Hito 1, +25% en Hito 2+)."""
-        if not USE_DYNAMIC_TRAILING:
-            return "Fijo (OCO)"
-        if stage >= 2:
-            trig_k = 25.0 + ((stage - 1) * 25.0)
-            sl_k = (stage - 1) * 25.0
-            tp_k = stage * 25.0
-            return f"Hito {int(stage)} ({trig_k:.0f}% TP | SL+{sl_k:.0f}% / TP+{tp_k:.0f}%)"
-        elif stage == 1:
-            return f"Hito 1 (25% TP | SL +{LOCK_PROFIT_TICKS}t)"
-        elif stage == 0.5:
-            return f"Micro-Escudo ({HITO_MICRO_TRIGGER_PCT:.0f}% SL{HITO_MICRO_SL_TICKS}t)"
-        return "Inicial"
+        """Formatea el estado del dinamismo de SL."""
+        if stage >= 1.0:
+            return "BE+2t (Protegido)"
+        return "Inicial (SL VWAP)"
 
     # ==========================================
     # LOGGING & 24-HOUR TERMINAL EVENT BROADCASTER
@@ -374,56 +366,46 @@ class AxiomEngine:
         return df_sesion.reset_index(drop=True)
 
     # ==========================================
-    # STRATEGY ENGINE: RELOJ SUIZO (RECHAZO DE MECHA EN VWAP)
+    # STRATEGY ENGINE: RECHAZO DE MECHA EN VWAP + DINAMISMO BE+2T
     # ==========================================
     def verificar_setup_vwap(self, df_5m: pd.DataFrame, sym: str, current_price: Optional[float] = None) -> Optional[Dict[str, Any]]:
         """
-        DETECTOR INSTITUCIONAL TOQUE VWAP + RETROCESO CONFIRMADO (MECHA EN TIEMPO REAL):
-        1. Ventana de tiempo: Desde el minuto 1 en adelante de la vela de 5m (evaluación continua cada 5s).
-        2. Vela anterior (t-1):
-           - SHORT: Cerró en cuerpo y mecha completo debajo del VWAP (prev_high < prev_vwap).
-           - LONG: Cerró en cuerpo y mecha completo arriba del VWAP (prev_low > prev_vwap).
-        3. Vela actual (t) - Detector Toque + Retroceso:
-           - SHORT: Toca o supera VWAP (high >= vwap), y retrocede hacia abajo por al menos VWAP_TOUCH_RETREAT_TICKS ticks.
-           - LONG: Toca o baja de VWAP (low <= vwap), y rebota hacia arriba por al menos VWAP_TOUCH_RETREAT_TICKS ticks.
-        4. SL al 50% de la distancia del VWAP hacia la banda contraria (respiro ampliado).
-        5. TP al 50% de la distancia del VWAP hacia la siguiente banda.
-        6. Filtro de Tendencia de VWAP (7 velas): Pendiente plana (0t) o a favor (>= 1t).
+        NUEVA ESTRATEGIA INSTITUCIONAL (RECHAZO DE MECHA EN VWAP):
+        1. Vela t-2 (anterior previa): Completamente del lado del VWAP donde predecimos rechazo.
+           - SHORT: Toda la vela t-2 por completo debajo del VWAP (high < vwap).
+           - LONG: Toda la vela t-2 por completo arriba del VWAP (low > vwap).
+        2. Vela t-1 (vela que finaliza): Finaliza con mecha tocando o pasando el VWAP (solo mecha, no cuerpo).
+           - SHORT: high >= vwap, max(open, close) < vwap.
+           - LONG: low <= vwap, min(open, close) > vwap.
+        3. Vela t (actual recién iniciada): No inició pasando el VWAP.
+           - SHORT: open < vwap.
+           - LONG: open > vwap.
+        4. Stop Loss Inicial: Exacto en la línea VWAP.
+        5. Take Profit Inicial: 40% de distancia entre el VWAP y la siguiente banda.
         """
-        if df_5m is None or len(df_5m) < 2:
+        if df_5m is None or len(df_5m) < 3:
             return None
 
-        # 1. VERIFICACIÓN DE VENTANA TEMPORAL (Desde el minuto 1 en adelante de la vela de 5m)
-        now_utc = datetime.now(timezone.utc)
+        spec = SUPPORTED_SYMBOLS.get(sym, {"tickSize": 0.25})
+        tick_size = float(spec.get("tickSize", 0.25))
+
+        bar_t2 = df_5m.iloc[-3]
+        bar_t1 = df_5m.iloc[-2]
         curr_bar = df_5m.iloc[-1]
 
-        # Minuto 1 al 4 del ciclo de 5 minutos (:01, :02, :03, :04 | :06, :07, :08, :09 | ...)
-        is_operable_minute = (now_utc.minute % 5 >= CHECK_WINDOW_START_MINUTE)
+        t2_high = float(bar_t2['High'])
+        t2_low = float(bar_t2['Low'])
+        t2_open = float(bar_t2['Open'])
+        t2_close = float(bar_t2['Close'])
+        t2_vwap = float(bar_t2['VWAP'])
 
-        if 'Timestamp' in curr_bar and pd.notna(curr_bar['Timestamp']):
-            try:
-                ts_bar = pd.to_datetime(curr_bar['Timestamp'], utc=True)
-                elapsed_sec = (now_utc - ts_bar).total_seconds()
-                if 0 <= elapsed_sec < 360:
-                    is_operable_minute = (elapsed_sec >= 60.0) or (now_utc.minute % 5 >= CHECK_WINDOW_START_MINUTE)
-            except Exception:
-                pass
-
-        if not is_operable_minute:
-            return None
-
-        # 2. EXTRACCIÓN DE VELAS Y PARÁMETROS
-        prev_candle = df_5m.iloc[-2]
-
-        prev_open = float(prev_candle['Open'])
-        prev_high = float(prev_candle['High'])
-        prev_low = float(prev_candle['Low'])
-        prev_close = float(prev_candle['Close'])
-        prev_vwap = float(prev_candle['VWAP'])
+        t1_high = float(bar_t1['High'])
+        t1_low = float(bar_t1['Low'])
+        t1_open = float(bar_t1['Open'])
+        t1_close = float(bar_t1['Close'])
+        t1_vwap = float(bar_t1['VWAP'])
 
         curr_open = float(curr_bar['Open'])
-        curr_high = float(curr_bar['High'])
-        curr_low = float(curr_bar['Low'])
         curr_close = float(current_price if current_price is not None else curr_bar['Close'])
         curr_vwap = float(curr_bar['VWAP'])
         curr_upper = float(curr_bar['Upper_Band'])
@@ -436,118 +418,77 @@ class AxiomEngine:
         if std_dev <= 0:
             return None
 
-        spec = SUPPORTED_SYMBOLS.get(sym, {"tickSize": 0.25})
-        tick_size = float(spec.get("tickSize", 0.25))
-
         setup_type = None
 
-        # 3. CONDICIÓN SHORT (Detector Toque VWAP + Retroceso Confirmado):
-        # a) Vela anterior t-1 completa (cuerpo y mechas) estrictamente DEBAJO del VWAP:
-        prev_below_complete = (prev_high < prev_vwap) and (prev_open < prev_vwap) and (prev_close < prev_vwap)
-        # b) Vela actual t tocó o cruzó el VWAP hacia arriba:
-        candle_wick_high = max(curr_high, curr_close)
-        curr_wick_touches_vwap_short = (candle_wick_high >= curr_vwap)
-        # c) El precio retrocedió hacia abajo sobre/debajo del VWAP por al menos VWAP_TOUCH_RETREAT_TICKS:
-        curr_retreats_below_vwap = (curr_close <= curr_vwap - (VWAP_TOUCH_RETREAT_TICKS * tick_size))
-        # d) El cuerpo abrió debajo del VWAP (viene desde la dirección del rechazo):
-        curr_open_below = (curr_open < curr_vwap)
+        # -------------------------------------------------------------
+        # CONDICIÓN SHORT:
+        # t-2 completamente debajo de VWAP
+        # t-1 mecha toca o pasa VWAP, pero cuerpo debajo
+        # t actual abrió debajo de VWAP
+        # -------------------------------------------------------------
+        t2_below_vwap = (t2_high < t2_vwap) and (t2_open < t2_vwap) and (t2_close < t2_vwap)
+        t1_wick_short = (t1_high >= t1_vwap)
+        t1_body_short = max(t1_open, t1_close) < t1_vwap
+        t_open_short = (curr_open < curr_vwap)
 
-        if prev_below_complete and curr_wick_touches_vwap_short and curr_retreats_below_vwap and curr_open_below:
+        if t2_below_vwap and t1_wick_short and t1_body_short and t_open_short:
             setup_type = "SHORT"
 
-        # 4. CONDICIÓN LONG (Detector Toque VWAP + Rebote Confirmado):
-        # a) Vela anterior t-1 completa (cuerpo y mechas) estrictamente ARRIBA del VWAP:
-        prev_above_complete = (prev_low > prev_vwap) and (prev_open > prev_vwap) and (prev_close > prev_vwap)
-        # b) Vela actual t tocó o cruzó el VWAP hacia abajo:
-        candle_wick_low = min(curr_low, curr_close)
-        curr_wick_touches_vwap_long = (candle_wick_low <= curr_vwap)
-        # c) El precio rebotó hacia arriba sobre el VWAP por al menos VWAP_TOUCH_RETREAT_TICKS:
-        curr_rebounds_above_vwap = (curr_close >= curr_vwap + (VWAP_TOUCH_RETREAT_TICKS * tick_size))
-        # d) El cuerpo abrió arriba del VWAP (viene desde la dirección del rechazo):
-        curr_open_above = (curr_open > curr_vwap)
+        # -------------------------------------------------------------
+        # CONDICIÓN LONG:
+        # t-2 completamente arriba de VWAP
+        # t-1 mecha toca o pasa VWAP, pero cuerpo arriba
+        # t actual abrió arriba de VWAP
+        # -------------------------------------------------------------
+        t2_above_vwap = (t2_low > t2_vwap) and (t2_open > t2_vwap) and (t2_close > t2_vwap)
+        t1_wick_long = (t1_low <= t1_vwap)
+        t1_body_long = min(t1_open, t1_close) > t1_vwap
+        t_open_long = (curr_open > curr_vwap)
 
-        if prev_above_complete and curr_wick_touches_vwap_long and curr_rebounds_above_vwap and curr_open_above:
+        if t2_above_vwap and t1_wick_long and t1_body_long and t_open_long:
             setup_type = "LONG"
-
-        # Logging informativo en consola cuando la mecha toca el VWAP en tiempo real
-        now_epoch = time.time()
-        last_touch_log = getattr(self, "_last_touch_log_ts", {}).get(sym, 0.0)
-        if (curr_wick_touches_vwap_short or curr_wick_touches_vwap_long) and (now_epoch - last_touch_log >= 30.0):
-            if not hasattr(self, "_last_touch_log_ts"):
-                self._last_touch_log_ts = {}
-            self._last_touch_log_ts[sym] = now_epoch
-            target_side = "SHORT" if curr_wick_touches_vwap_short else "LONG"
-            req_p = (curr_vwap - (VWAP_TOUCH_RETREAT_TICKS * tick_size)) if target_side == "SHORT" else (curr_vwap + (VWAP_TOUCH_RETREAT_TICKS * tick_size))
-            self.log(
-                f"👀 [DETECTOR] {sym} tocó VWAP ({curr_vwap:.2f}) | Precio: {curr_close:.2f} | "
-                f"Esperando retroceso a {req_p:.2f} ({VWAP_TOUCH_RETREAT_TICKS}t) para gatillar {target_side}...",
-                "DETECTOR", sym
-            )
 
         if not setup_type:
             return None
 
-        # 4.5. FILTRO DE TENDENCIA DEL VWAP (Hace 7 velas comparada con la actual)
-        # La pendiente debe estar completamente plana o a favor de la operación desde 1 tick a más
-        slope_desc = "Desactivado"
-        if USE_VWAP_SLOPE_FILTER:
-            lookback_bars = VWAP_SLOPE_LOOKBACK_BARS
-            if len(df_5m) > lookback_bars:
-                past_bar = df_5m.iloc[-(lookback_bars + 1)]
-                past_vwap = float(past_bar['VWAP'])
-                if pd.notna(past_vwap):
-                    slope_ticks = round((curr_vwap - past_vwap) / tick_size)
-                    # Para LONG: completamente plano (slope_ticks == 0) o alcista (slope_ticks >= 1 a favor)
-                    if setup_type == "LONG" and slope_ticks < 0:
-                        return None
-                    # Para SHORT: completamente plano (slope_ticks == 0) o bajista (slope_ticks <= -1 a favor)
-                    if setup_type == "SHORT" and slope_ticks > 0:
-                        return None
-                    slope_desc = "Plana (0t)" if slope_ticks == 0 else f"{slope_ticks:+d}t (A Favor)"
-
-        # 5. CÁLCULO DE SL Y TP (SOBRE / DEBAJO DEL VWAP)
-        # SL: 50% de la distancia del VWAP hacia la banda contraria (respiro ampliado)
-        d_sl_dist = round_to_tick(SL_VWAP_BAND_RATIO * std_dev, tick_size)
-        if d_sl_dist < 4 * tick_size:
-            d_sl_dist = 4 * tick_size
-
+        # -------------------------------------------------------------
+        # STOP LOSS INICIAL: EXACTO EN LA LÍNEA VWAP
+        # -------------------------------------------------------------
+        precio_sl = round_to_tick(curr_vwap, tick_size)
         if setup_type == "SHORT":
-            precio_sl = round_to_tick(curr_vwap + d_sl_dist, tick_size)
-            # Salvaguarda CME ante deslizamiento rápido
-            if precio_sl <= curr_close + (2 * tick_size):
-                precio_sl = round_to_tick(curr_close + (4 * tick_size), tick_size)
+            if precio_sl <= curr_close:
+                precio_sl = round_to_tick(curr_close + (2 * tick_size), tick_size)
             banda_objetivo = curr_lower
         else: # LONG
-            precio_sl = round_to_tick(curr_vwap - d_sl_dist, tick_size)
-            # Salvaguarda CME ante deslizamiento rápido
-            if precio_sl >= curr_close - (2 * tick_size):
-                precio_sl = round_to_tick(curr_close - (4 * tick_size), tick_size)
+            if precio_sl >= curr_close:
+                precio_sl = round_to_tick(curr_close - (2 * tick_size), tick_size)
             banda_objetivo = curr_upper
 
-        # TP: 50% de la distancia del VWAP hacia la siguiente banda
-        d_tp_dist = round_to_tick(TP_VWAP_BAND_RATIO * std_dev, tick_size)
-        if d_tp_dist < 4 * tick_size:
-            d_tp_dist = 4 * tick_size
+        # -------------------------------------------------------------
+        # TAKE PROFIT INICIAL: 40% DE DISTANCIA VWAP A BANDA
+        # -------------------------------------------------------------
+        d_tp = round_to_tick(TP_VWAP_BAND_RATIO * std_dev, tick_size)
+        if d_tp < 2 * tick_size:
+            d_tp = 2 * tick_size
 
         if setup_type == "SHORT":
-            precio_tp = round_to_tick(curr_vwap - d_tp_dist, tick_size)
-            if precio_tp >= curr_close - (2 * tick_size):
-                precio_tp = round_to_tick(curr_close - (4 * tick_size), tick_size)
+            precio_tp = round_to_tick(curr_vwap - d_tp, tick_size)
+            if precio_tp >= curr_close:
+                precio_tp = round_to_tick(curr_close - (2 * tick_size), tick_size)
         else: # LONG
-            precio_tp = round_to_tick(curr_vwap + d_tp_dist, tick_size)
-            if precio_tp <= curr_close + (2 * tick_size):
-                precio_tp = round_to_tick(curr_close + (4 * tick_size), tick_size)
+            precio_tp = round_to_tick(curr_vwap + d_tp, tick_size)
+            if precio_tp <= curr_close:
+                precio_tp = round_to_tick(curr_close + (2 * tick_size), tick_size)
 
-        sl_ticks = max(4, round(abs(curr_close - precio_sl) / tick_size))
-        tp_ticks = max(4, round(abs(curr_close - precio_tp) / tick_size))
+        sl_ticks = max(2, round(abs(curr_close - precio_sl) / tick_size))
+        tp_ticks = max(2, round(abs(curr_close - precio_tp) / tick_size))
         d_base = abs(precio_tp - curr_close)
 
+        now_utc = datetime.now(timezone.utc)
         condicion_desc = (
-            f"Reloj Suizo: Detector Toque VWAP + Retroceso {VWAP_TOUCH_RETREAT_TICKS}t ({setup_type}) | "
-            f"Tendencia VWAP 7 velas ({slope_desc}) | "
-            f"Vela t-1 limpia ({'debajo' if setup_type=='SHORT' else 'arriba'}) | "
-            f"Toque VWAP ({curr_vwap:.2f}) confirmado | "
-            f"SL 50% a Banda ({precio_sl:.2f}) | TP 50% a Banda ({precio_tp:.2f})"
+            f"VWAP Wick Rejection ({setup_type}) | "
+            f"Vela t-2 lado limpio | Vela t-1 mecha VWAP | Vela t open limpio | "
+            f"SL VWAP ({precio_sl:.2f} / {sl_ticks}t) | TP 40% ({precio_tp:.2f} / {tp_ticks}t)"
         )
 
         return {
@@ -565,7 +506,7 @@ class AxiomEngine:
             "std_dev": std_dev,
             "d_base": d_base,
             "condicion_tecnica": condicion_desc,
-            "entry_window": f"Minuto 4 a 5 ({now_utc.strftime('%H:%M:%S')} UTC)"
+            "entry_window": f"{now_utc.strftime('%H:%M:%S')} UTC"
         }
 
     # ==========================================
@@ -621,11 +562,6 @@ class AxiomEngine:
         if weekday in (0, 1, 2, 3) and hour == 17:
             return False, f"Pausa diaria de descanso CME (17:00 a 18:00 ET - {time_str})"
 
-        # 3. Filtro de 2 horas post-pausa de descanso (Lunes a Jueves 18:00 a 20:00 ET)
-        #    y filtro de 2 horas post-apertura de domingos (Domingos 18:00 a 20:00 ET)
-        if (weekday in (0, 1, 2, 3) or weekday == 6) and (18 <= hour < 20):
-            origen = "Apertura de Domingo" if weekday == 6 else "Pausa de descanso del día"
-            return False, f"Espera obligatoria de 2 horas post-{origen}: Inicio operativo a las 20:00 ET (Actual: {time_str} / {peru_time_str})"
             
         return True, f"Sesión regular activa ({time_str} / {peru_time_str})"
 
@@ -794,7 +730,7 @@ class AxiomEngine:
                 }
                 
                 ticks_sl_vwap = round(abs(precio_sl - vwap_cruce) / tick_size)
-                self.log(f"🚀 [{sym}] Orden EJECUTADA | Apertura: {hora_apertura} | {direccion} @ {precio_entrada:.2f} | Order ID: {order_id} | SL 50%: {ticks_sl_order_val}t ({precio_sl:.2f} / {ticks_sl_vwap}t desde VWAP) | TP 50%: {ticks_tp}t ({precio_tp:.2f}) | Cooldown: {SYMBOL_COOLDOWN_MINUTES} min", "ORDER", sym)
+                self.log(f"🚀 [{sym}] Orden EJECUTADA | Apertura: {hora_apertura} | {direccion} @ {precio_entrada:.2f} | Order ID: {order_id} | SL: {ticks_sl_order_val}t ({precio_sl:.2f}) | TP: {ticks_tp}t ({precio_tp:.2f})", "ORDER", sym)
                 self.registrar_en_csv(
                     simbolo=sym,
                     direccion=direccion,
@@ -951,8 +887,37 @@ class AxiomEngine:
         contract_id = trade["contract_id"]
         order_id = str(trade.get("order_id", "N/A"))
 
-        # [LIMPIO] Reglas previas de trailing dinámico / hitos eliminadas.
-        # En espera de las nuevas reglas de gestión de posición que definirá el usuario.
+        # ==========================================
+        # DINAMISMO DE SL A BREAK-EVEN + 2 TICKS:
+        # Cuando el precio avance a favor pasando el 50% de ganancia hacia el TP:
+        # El SL debe posicionarse a nuestro favor al precio de inicio de la operación + 2 ticks.
+        # ==========================================
+        if not trade.get("be_plus_2_active", False) and pct_avance >= DYNAMIC_BE_PROFIT_PCT:
+            if direccion == "LONG":
+                nuevo_sl = round_to_tick(precio_entrada + (DYNAMIC_BE_PROFIT_TICKS * tick_size), tick_size)
+                debe_mover = (nuevo_sl > sl_actual)
+            else: # SHORT
+                nuevo_sl = round_to_tick(precio_entrada - (DYNAMIC_BE_PROFIT_TICKS * tick_size), tick_size)
+                debe_mover = (nuevo_sl < sl_actual)
+
+            if debe_mover:
+                self.log(
+                    f"🛡️ [{sym}] ¡DINAMISMO ACTIVADO! Avance: {pct_avance:.1f}% (>= {DYNAMIC_BE_PROFIT_PCT}%) | "
+                    f"Asegurando SL a favor (Entrada {'+' if direccion=='LONG' else '-'} {DYNAMIC_BE_PROFIT_TICKS}t = {nuevo_sl:.2f})...",
+                    "ORDER", sym
+                )
+                exito_mov = self.mover_sl_en_topstep(contract_id, nuevo_sl, sym)
+                if exito_mov:
+                    trade["current_sl_price"] = nuevo_sl
+                    trade["be_plus_2_active"] = True
+                    trade["sl_stage"] = 1.0
+                    self.registrar_evento_be_en_csv(
+                        sym=sym,
+                        trade=trade,
+                        nuevo_sl=nuevo_sl,
+                        pct_avance=pct_avance,
+                        motivo=f"Dinamismo {DYNAMIC_BE_PROFIT_PCT}% TP -> Entrada + {DYNAMIC_BE_PROFIT_TICKS}t asegurado"
+                    )
 
         # SALVAGUARDA DE CIERRE AUTOMÁTICO (SL / TP Fijo)
         # El que alcanza primero cierra automáticamente la operación (Fail-Safe por Software)
@@ -2280,9 +2245,9 @@ class AxiomEngine:
                                 trg_t = setup.get('trigger_ticks', 15)
                                 dist_t = abs(current_price - setup['vwap_cruce']) / tick_size
                                 self.log(
-                                    f"⚡ [{sym}] ¡Gatillo Reloj Suizo activado! ({setup['direccion']}) | Entrada @ {current_price:.2f} | "
-                                    f"VWAP: {setup['vwap_cruce']:.2f} | SL 50%: {setup['precio_sl']:.2f} ({setup['sl_ticks']}t) | "
-                                    f"TP 50%: {setup['precio_tp']:.2f} ({setup['tp_ticks']}t)",
+                                    f"⚡ [{sym}] ¡Señal activada! ({setup['direccion']}) | Entrada @ {current_price:.2f} | "
+                                    f"VWAP: {setup['vwap_cruce']:.2f} | SL: {setup['precio_sl']:.2f} ({setup['sl_ticks']}t) | "
+                                    f"TP: {setup['precio_tp']:.2f} ({setup['tp_ticks']}t)",
                                     "ORDER", sym
                                 )
                                 self.ejecutar_orden(setup, sym)
