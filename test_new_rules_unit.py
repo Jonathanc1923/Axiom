@@ -113,6 +113,36 @@ class TestNewVwapIdea(unittest.TestCase):
         setup = self.engine.verificar_setup_vwap(df, "ES", current_price=5000.0)
         self.assertIsNone(setup, "No debe entrar si la vela actual abrió pasando el VWAP")
 
+    def test_setup_rejected_if_price_already_reached_tp(self):
+        """Caso exacto de YM: Rechazar si el rebote fue tan fuerte que el precio ya alcanzó o superó el TP."""
+        vwap = 52502.0
+        std_dev = 66.47
+        # TP objetivo = 52502 + (0.60 * 66.47) = 52541.88
+        # Vela t-2: limpia arriba
+        t2 = {"o": 52515.0, "h": 52520.0, "l": 52510.0, "c": 52518.0}
+        # Vela t-1: mecha tocó VWAP (Low 52501), pero cuerpo rebotó salvajemente hasta 52543 (ya superando el TP)
+        t1 = {"o": 52518.0, "h": 52544.0, "l": 52501.0, "c": 52543.0}
+        # Vela t: abre en 52543 (por encima del TP 52542)
+        t0 = {"o": 52543.0, "h": 52546.0, "l": 52542.0, "c": 52543.0}
+
+        df = self._create_3bar_df(t2, t1, t0, vwap=vwap, std_dev=std_dev)
+        setup = self.engine.verificar_setup_vwap(df, "YM", current_price=52543.0)
+        self.assertIsNone(setup, "Debe rechazar la entrada porque el precio ya rebasó el TP teórico antes de entrar")
+
+    def test_setup_rejected_if_late_entry_consumes_over_50pct_tp(self):
+        """Rechazar si el precio de entrada ya consumió más del 50% de la distancia al TP dejando R:R pobre."""
+        vwap = 5000.0
+        std_dev = 20.0
+        # TP = 5012.0 (12 pts desde VWAP). 50% de 12 pts = 6.0 pts.
+        # Si la vela abre a 5008.0 (8.0 pts consumidos = 66.7% > 50%), debe ser descartada.
+        t2 = {"o": 5010.0, "h": 5015.0, "l": 5005.0, "c": 5008.0}
+        t1 = {"o": 5008.0, "h": 5010.0, "l": 4998.0, "c": 5008.0}
+        t0 = {"o": 5008.0, "h": 5009.0, "l": 5007.0, "c": 5008.0}
+
+        df = self._create_3bar_df(t2, t1, t0, vwap=vwap, std_dev=std_dev)
+        setup = self.engine.verificar_setup_vwap(df, "ES", current_price=5008.0)
+        self.assertIsNone(setup, "Debe descartar si el precio ya consumió más del 50% de la ganancia al TP")
+
     def test_dinamismo_be_plus_2_ticks_long(self):
         """Para LONG: Al superar 50% de ganancia hacia el TP, el SL debe moverse a VWAP + 2 ticks a favor."""
         sym = "ES"

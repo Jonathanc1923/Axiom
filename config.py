@@ -55,6 +55,13 @@ DYNAMIC_BE_PROFIT_PCT = float(os.getenv("DYNAMIC_BE_PROFIT_PCT", "50.0"))
 DYNAMIC_BE_PROFIT_TICKS = int(os.getenv("DYNAMIC_BE_PROFIT_TICKS", "2"))
 DYNAMIC_BE_REFERENCE = os.getenv("DYNAMIC_BE_REFERENCE", "VWAP").upper()
 
+# Filtro de Entrada Tarde: Máximo % del TP consumido antes de entrar (evita entradas agotadas)
+MAX_ENTRY_TP_CONSUMED_PCT = float(os.getenv("MAX_ENTRY_TP_CONSUMED_PCT", "50.0"))
+# Mínimo ratio Riesgo/Beneficio requerido (TP restante / SL riesgo)
+MIN_SETUP_RR_RATIO = float(os.getenv("MIN_SETUP_RR_RATIO", "0.60"))
+# Mínimo de ticks de TP para abrir la operación (evita micro-ganancias que se van en comisiones)
+MIN_TP_TICKS = int(os.getenv("MIN_TP_TICKS", "6"))
+
 # Compatibilidad con módulos y variables previas
 CHECK_WINDOW_START_MINUTE = 0
 VWAP_TOUCH_RETREAT_TICKS = 0

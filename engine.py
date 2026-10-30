@@ -47,6 +47,7 @@ from config import (
     VWAP_TOUCH_RETREAT_TICKS, SL_VWAP_BUFFER_TICKS,
     SYMBOL_COOLDOWN_MINUTES, SYMBOL_COOLDOWN_SECONDS, USE_BASKET_TP, USE_DAILY_PROFIT_LOCK,
     DYNAMIC_BE_PROFIT_PCT, DYNAMIC_BE_PROFIT_TICKS, DYNAMIC_BE_REFERENCE,
+    MAX_ENTRY_TP_CONSUMED_PCT, MIN_SETUP_RR_RATIO, MIN_TP_TICKS,
     TOPSTEP_SYNC_INTERVAL_SECONDS
 )
 from topstep_client import TopstepClient
@@ -485,16 +486,40 @@ class AxiomEngine:
 
         if setup_type == "SHORT":
             precio_tp = round_to_tick(curr_vwap - d_tp, tick_size)
-            if precio_tp >= curr_close:
-                precio_tp = round_to_tick(curr_close - (2 * tick_size), tick_size)
+            # Descartar si el precio ya alcanzó o superó el TP hacia abajo
+            if curr_close <= precio_tp:
+                return None
+            dist_avanzada_tp = max(0.0, curr_vwap - curr_close)
         else: # LONG
             precio_tp = round_to_tick(curr_vwap + d_tp, tick_size)
-            if precio_tp <= curr_close:
-                precio_tp = round_to_tick(curr_close + (2 * tick_size), tick_size)
+            # Descartar si el precio ya alcanzó o superó el TP hacia arriba
+            if curr_close >= precio_tp:
+                return None
+            dist_avanzada_tp = max(0.0, curr_close - curr_vwap)
 
-        sl_ticks = max(2, round(abs(curr_close - precio_sl) / tick_size))
-        tp_ticks = max(2, round(abs(curr_close - precio_tp) / tick_size))
-        d_base = abs(precio_tp - curr_close)
+        # -------------------------------------------------------------
+        # FILTRO DE ENTRADA TARDE / RECHAZO AGOTADO:
+        # 1. Si la vela previa ya consumió más del 50% del TP hacia la banda.
+        # 2. Si el TP restante es menor a MIN_TP_TICKS (evita micro-ganancias).
+        # 3. Si el ratio R:R (TP restante / SL riesgo) es inferior al mínimo (0.60).
+        # -------------------------------------------------------------
+        pct_consumido = (dist_avanzada_tp / d_tp) * 100.0 if d_tp > 0 else 100.0
+        if pct_consumido > MAX_ENTRY_TP_CONSUMED_PCT:
+            return None
+
+        d_tp_restante = abs(precio_tp - curr_close)
+        d_sl_riesgo = abs(curr_close - precio_sl)
+
+        tp_ticks = round(d_tp_restante / tick_size)
+        sl_ticks = max(2, round(d_sl_riesgo / tick_size))
+
+        if tp_ticks < MIN_TP_TICKS:
+            return None
+
+        if d_sl_riesgo > 0 and (d_tp_restante / d_sl_riesgo) < MIN_SETUP_RR_RATIO:
+            return None
+
+        d_base = d_tp_restante
 
         now_utc = datetime.now(timezone.utc)
         condicion_desc = (
