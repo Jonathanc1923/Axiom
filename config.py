@@ -34,9 +34,9 @@ CSV_DIR = DATA_DIR
 CSV_PATH = os.path.join(DATA_DIR, "registro_operaciones.csv")
 
 # ==========================================
-# Configuración de Estrategia: RECHAZO DE MECHA EN VWAP (SL VWAP / TP 40% BANDA / BE+2T)
+# Configuración de Estrategia: RECHAZO DE MECHA EN VWAP (SL 25% BANDA / TP 60% BANDA / BE VWAP+2T @ 50%)
 # ==========================================
-STRATEGY_NAME = "VWAP Wick Rejection (SL VWAP | TP 40% | Dinámico BE+2t @ 50%)"
+STRATEGY_NAME = "VWAP Wick Rejection (SL 25% Banda | TP 60% | Dinámico BE VWAP+2t @ 50%)"
 
 # Intervalo central de monitoreo y actualización de mercado (cada 1.0 segundo estricto)
 POLL_INTERVAL_SECONDS = float(os.getenv("POLL_INTERVAL_SECONDS", "1.0"))
@@ -44,18 +44,21 @@ POLL_INTERVAL_SECONDS = float(os.getenv("POLL_INTERVAL_SECONDS", "1.0"))
 # Sincronización oficial autoritativa con TopstepX API en tiempo real (segundos)
 TOPSTEP_SYNC_INTERVAL_SECONDS = float(os.getenv("TOPSTEP_SYNC_INTERVAL_SECONDS", "5.0"))
 
-# Take Profit Inicial: 40% de distancia entre el VWAP y la siguiente banda
-TP_VWAP_BAND_RATIO = float(os.getenv("TP_VWAP_BAND_RATIO", "0.40"))
+# Stop Loss Inicial: 25% de distancia entre el VWAP y la banda contraria (+músculo de aguante)
+SL_VWAP_BAND_RATIO = float(os.getenv("SL_VWAP_BAND_RATIO", "0.25"))
 
-# Dinamismo de SL: Al avanzar a favor >= 50% del TP, asegurar Entrada + 2 ticks
+# Take Profit Inicial: 60% de distancia entre el VWAP y la siguiente banda
+TP_VWAP_BAND_RATIO = float(os.getenv("TP_VWAP_BAND_RATIO", "0.60"))
+
+# Dinamismo de SL: Al avanzar a favor >= 50% del TP, asegurar VWAP + 2 ticks a favor
 DYNAMIC_BE_PROFIT_PCT = float(os.getenv("DYNAMIC_BE_PROFIT_PCT", "50.0"))
 DYNAMIC_BE_PROFIT_TICKS = int(os.getenv("DYNAMIC_BE_PROFIT_TICKS", "2"))
+DYNAMIC_BE_REFERENCE = os.getenv("DYNAMIC_BE_REFERENCE", "VWAP").upper()
 
 # Compatibilidad con módulos y variables previas
 CHECK_WINDOW_START_MINUTE = 0
 VWAP_TOUCH_RETREAT_TICKS = 0
-SL_VWAP_BAND_RATIO = 0.0
-SL_VWAP_RATIO = 0.0
+SL_VWAP_RATIO = SL_VWAP_BAND_RATIO
 SL_VWAP_BUFFER_TICKS = 0
 SYMBOL_COOLDOWN_MINUTES = 0
 SYMBOL_COOLDOWN_SECONDS = 0

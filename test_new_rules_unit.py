@@ -52,9 +52,10 @@ class TestNewVwapIdea(unittest.TestCase):
 
         self.assertIsNotNone(setup, "Debe generar setup SHORT")
         self.assertEqual(setup["direccion"], "SHORT")
-        self.assertEqual(setup["precio_sl"], 5000.0, "SL debe estar exacto en VWAP")
-        # TP: 40% de 20.0 std_dev = 8.0 pts bajo VWAP = 4992.0
-        self.assertEqual(setup["precio_tp"], 4992.0, "TP debe estar al 40% de distancia hacia banda inferior")
+        # SL: 25% de 20.0 std_dev = 5.0 pts sobre VWAP = 5005.0 (mayor musculo de aguante)
+        self.assertEqual(setup["precio_sl"], 5005.0, "SL debe estar al 25% de distancia del VWAP hacia la banda superior")
+        # TP: 60% de 20.0 std_dev = 12.0 pts bajo VWAP = 4988.0
+        self.assertEqual(setup["precio_tp"], 4988.0, "TP debe estar al 60% de distancia hacia banda inferior")
 
     def test_setup_long_valid(self):
         """Vela t-2 completa sobre VWAP, Vela t-1 mecha toca VWAP y cuerpo sobre VWAP, Vela t abre sobre VWAP."""
@@ -71,9 +72,10 @@ class TestNewVwapIdea(unittest.TestCase):
 
         self.assertIsNotNone(setup, "Debe generar setup LONG")
         self.assertEqual(setup["direccion"], "LONG")
-        self.assertEqual(setup["precio_sl"], 5000.0, "SL debe estar exacto en VWAP")
-        # TP: 40% de 20.0 std_dev = 8.0 pts sobre VWAP = 5008.0
-        self.assertEqual(setup["precio_tp"], 5008.0, "TP debe estar al 40% de distancia hacia banda superior")
+        # SL: 25% de 20.0 std_dev = 5.0 pts bajo VWAP = 4995.0 (mayor musculo de aguante)
+        self.assertEqual(setup["precio_sl"], 4995.0, "SL debe estar al 25% de distancia del VWAP hacia la banda inferior")
+        # TP: 60% de 20.0 std_dev = 12.0 pts sobre VWAP = 5012.0
+        self.assertEqual(setup["precio_tp"], 5012.0, "TP debe estar al 60% de distancia hacia banda superior")
 
     def test_setup_rejected_if_body_crossed_vwap(self):
         """Rechazar si el cuerpo de la vela t-1 cerró al otro lado de VWAP."""
@@ -112,24 +114,26 @@ class TestNewVwapIdea(unittest.TestCase):
         self.assertIsNone(setup, "No debe entrar si la vela actual abrió pasando el VWAP")
 
     def test_dinamismo_be_plus_2_ticks_long(self):
-        """Para LONG: Al superar 50% de ganancia hacia el TP, el SL debe moverse a Entrada + 2 ticks."""
+        """Para LONG: Al superar 50% de ganancia hacia el TP, el SL debe moverse a VWAP + 2 ticks a favor."""
         sym = "ES"
         entry_price = 5004.0
-        initial_sl = 5000.0 # VWAP
-        initial_tp = 5014.0 # 10 pts TP
+        vwap = 5000.0
+        initial_sl = 4995.0 # 25% banda
+        initial_tp = 5016.0 # 12 pts TP
         
         self.engine.symbol_states[sym]["active_trade"] = {
             "symbol": sym,
             "contract_id": "CON_ES_TEST",
             "direction": "LONG",
             "entry_price": entry_price,
+            "vwap_cruce": vwap,
             "entry_timestamp": time.time(),
             "initial_sl_price": initial_sl,
             "current_sl_price": initial_sl,
             "initial_tp_price": initial_tp,
             "current_tp_price": initial_tp,
-            "base_tp_pts": 10.0,
-            "d_tp_ini": 10.0,
+            "base_tp_pts": 12.0,
+            "d_tp_ini": 12.0,
             "be_plus_2_active": False,
             "sl_stage": 0.0,
             "highest_price": entry_price,
@@ -143,43 +147,45 @@ class TestNewVwapIdea(unittest.TestCase):
         ]
         self.mock_client.modify_order.return_value = {"success": True}
 
-        # 1. Precio avanza a 5008.0 (4 pts = 40% de TP): No debe mover aún
+        # 1. Precio avanza a 5008.0 (4 pts = 33% de TP): No debe mover aún
         self.engine.monitorear_posicion_abierta(sym, current_price=5008.0, cached_positions=[{"contractId": "CON_ES_TEST", "size": 1}])
         trade = self.engine.symbol_states[sym]["active_trade"]
         self.assertFalse(trade.get("be_plus_2_active", False))
         self.assertEqual(trade["current_sl_price"], initial_sl)
 
-        # 2. Precio avanza a 5009.5 (5.5 pts = 55% de TP >= 50%): Debe activar BE + 2 ticks
-        # Tick size ES = 0.25 -> Entrada 5004.0 + (2 * 0.25) = 5004.50
-        self.engine.monitorear_posicion_abierta(sym, current_price=5009.5, cached_positions=[{"contractId": "CON_ES_TEST", "size": 1}])
+        # 2. Precio avanza a 5011.0 (7.0 pts = 58% de TP >= 50%): Debe activar BE + 2 ticks
+        # VWAP 5000.0 + (2 * 0.25) = 5000.50
+        self.engine.monitorear_posicion_abierta(sym, current_price=5011.0, cached_positions=[{"contractId": "CON_ES_TEST", "size": 1}])
         self.assertTrue(trade.get("be_plus_2_active", False), "Debe marcar BE+2t activo")
-        self.assertEqual(trade["current_sl_price"], 5004.50, "SL debe estar en Entrada + 2 ticks (5004.50)")
+        self.assertEqual(trade["current_sl_price"], 5000.50, "SL debe estar en VWAP + 2 ticks (5000.50)")
         self.mock_client.modify_order.assert_called_with(
             account_id=12345,
             order_id=101,
-            stop_price=5004.50,
+            stop_price=5000.50,
             size=1
         )
 
     def test_dinamismo_be_plus_2_ticks_short(self):
-        """Para SHORT: Al superar 50% de ganancia hacia el TP, el SL debe moverse a Entrada - 2 ticks (a favor)."""
+        """Para SHORT: Al superar 50% de ganancia hacia el TP, el SL debe moverse a VWAP - 2 ticks a favor."""
         sym = "ES"
         entry_price = 4996.0
-        initial_sl = 5000.0 # VWAP
-        initial_tp = 4986.0 # 10 pts TP
+        vwap = 5000.0
+        initial_sl = 5005.0 # 25% banda
+        initial_tp = 4984.0 # 12 pts TP
         
         self.engine.symbol_states[sym]["active_trade"] = {
             "symbol": sym,
             "contract_id": "CON_ES_TEST",
             "direction": "SHORT",
             "entry_price": entry_price,
+            "vwap_cruce": vwap,
             "entry_timestamp": time.time(),
             "initial_sl_price": initial_sl,
             "current_sl_price": initial_sl,
             "initial_tp_price": initial_tp,
             "current_tp_price": initial_tp,
-            "base_tp_pts": 10.0,
-            "d_tp_ini": 10.0,
+            "base_tp_pts": 12.0,
+            "d_tp_ini": 12.0,
             "be_plus_2_active": False,
             "sl_stage": 0.0,
             "highest_price": entry_price,
@@ -193,16 +199,16 @@ class TestNewVwapIdea(unittest.TestCase):
         ]
         self.mock_client.modify_order.return_value = {"success": True}
 
-        # Precio cae a 4990.5 (5.5 pts a favor = 55% de TP >= 50%): Debe activar BE + 2 ticks a favor
-        # Tick size ES = 0.25 -> Entrada 4996.0 - (2 * 0.25) = 4995.50
-        self.engine.monitorear_posicion_abierta(sym, current_price=4990.5, cached_positions=[{"contractId": "CON_ES_TEST", "size": -1}])
+        # Precio cae a 4989.0 (7.0 pts a favor = 58% de TP >= 50%): Debe activar BE + 2 ticks a favor
+        # VWAP 5000.0 - (2 * 0.25) = 4999.50
+        self.engine.monitorear_posicion_abierta(sym, current_price=4989.0, cached_positions=[{"contractId": "CON_ES_TEST", "size": -1}])
         trade = self.engine.symbol_states[sym]["active_trade"]
         self.assertTrue(trade.get("be_plus_2_active", False), "Debe marcar BE+2t activo")
-        self.assertEqual(trade["current_sl_price"], 4995.50, "SL debe estar en Entrada - 2 ticks (4995.50 a favor de SHORT)")
+        self.assertEqual(trade["current_sl_price"], 4999.50, "SL debe estar en VWAP - 2 ticks (4999.50 a favor de SHORT)")
         self.mock_client.modify_order.assert_called_with(
             account_id=12345,
             order_id=102,
-            stop_price=4995.50,
+            stop_price=4999.50,
             size=1
         )
 

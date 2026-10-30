@@ -46,7 +46,7 @@ from config import (
     STRATEGY_NAME, CHECK_WINDOW_START_MINUTE, SL_VWAP_RATIO, SL_VWAP_BAND_RATIO, TP_VWAP_BAND_RATIO,
     VWAP_TOUCH_RETREAT_TICKS, SL_VWAP_BUFFER_TICKS,
     SYMBOL_COOLDOWN_MINUTES, SYMBOL_COOLDOWN_SECONDS, USE_BASKET_TP, USE_DAILY_PROFIT_LOCK,
-    DYNAMIC_BE_PROFIT_PCT, DYNAMIC_BE_PROFIT_TICKS,
+    DYNAMIC_BE_PROFIT_PCT, DYNAMIC_BE_PROFIT_TICKS, DYNAMIC_BE_REFERENCE,
     TOPSTEP_SYNC_INTERVAL_SECONDS
 )
 from topstep_client import TopstepClient
@@ -462,14 +462,16 @@ class AxiomEngine:
             return None
 
         # -------------------------------------------------------------
-        # STOP LOSS INICIAL: EXACTO EN LA LÍNEA VWAP
+        # STOP LOSS INICIAL: 25% DE DISTANCIA DEL VWAP A LA BANDA (+MÚSCULO DE AGUANTE)
         # -------------------------------------------------------------
-        precio_sl = round_to_tick(curr_vwap, tick_size)
+        d_sl = round_to_tick(SL_VWAP_BAND_RATIO * std_dev, tick_size)
         if setup_type == "SHORT":
+            precio_sl = round_to_tick(curr_vwap + d_sl, tick_size)
             if precio_sl <= curr_close:
                 precio_sl = round_to_tick(curr_close + (2 * tick_size), tick_size)
             banda_objetivo = curr_lower
         else: # LONG
+            precio_sl = round_to_tick(curr_vwap - d_sl, tick_size)
             if precio_sl >= curr_close:
                 precio_sl = round_to_tick(curr_close - (2 * tick_size), tick_size)
             banda_objetivo = curr_upper
@@ -498,7 +500,7 @@ class AxiomEngine:
         condicion_desc = (
             f"VWAP Wick Rejection ({setup_type}) | "
             f"Vela t-2 lado limpio | Vela t-1 mecha VWAP | Vela t open limpio | "
-            f"SL VWAP ({precio_sl:.2f} / {sl_ticks}t) | TP 40% ({precio_tp:.2f} / {tp_ticks}t)"
+            f"SL {int(SL_VWAP_BAND_RATIO * 100)}% Banda ({precio_sl:.2f} / {sl_ticks}t) | TP {int(TP_VWAP_BAND_RATIO * 100)}% ({precio_tp:.2f} / {tp_ticks}t)"
         )
 
         return {
@@ -685,8 +687,8 @@ class AxiomEngine:
         trigger_ticks = setup.get("trigger_ticks", get_vwap_trigger_distance_ticks(sym))
         condicion_str = (
             f"VWAP Reversion. Entrada: {precio_entrada:.2f} | "
-            f"VWAP: {vwap_cruce:.2f} | SL (45% a Banda): {ticks_sl_order_val}t ({precio_sl:.2f}) | "
-            f"TP (50% a Banda): {ticks_tp}t ({precio_tp:.2f} | D_ini: {d_tp_ini:.2f} pts)"
+            f"VWAP: {vwap_cruce:.2f} | SL ({int(SL_VWAP_BAND_RATIO * 100)}% a Banda): {ticks_sl_order_val}t ({precio_sl:.2f}) | "
+            f"TP ({int(TP_VWAP_BAND_RATIO * 100)}% a Banda): {ticks_tp}t ({precio_tp:.2f} | D_ini: {d_tp_ini:.2f} pts)"
         )
         self.log(f"🚨 DISPARANDO {direccion} A MERCADO | {condicion_str}", "ORDER", sym)
         
@@ -898,22 +900,26 @@ class AxiomEngine:
         order_id = str(trade.get("order_id", "N/A"))
 
         # ==========================================
-        # DINAMISMO DE SL A BREAK-EVEN + 2 TICKS:
+        # DINAMISMO DE SL A PROTECCIÓN VWAP + 2 TICKS A FAVOR:
         # Cuando el precio avance a favor pasando el 50% de ganancia hacia el TP:
-        # El SL debe posicionarse a nuestro favor al precio de inicio de la operación + 2 ticks.
+        # El SL debe posicionarse a nuestro favor al precio VWAP + 2 ticks (o Entrada según config).
         # ==========================================
         if not trade.get("be_plus_2_active", False) and pct_avance >= DYNAMIC_BE_PROFIT_PCT:
+            vwap_ref = trade.get("vwap_cruce", precio_entrada)
+            base_ref = vwap_ref if DYNAMIC_BE_REFERENCE == "VWAP" else precio_entrada
+            ref_name = "VWAP" if DYNAMIC_BE_REFERENCE == "VWAP" else "Entrada"
+
             if direccion == "LONG":
-                nuevo_sl = round_to_tick(precio_entrada + (DYNAMIC_BE_PROFIT_TICKS * tick_size), tick_size)
+                nuevo_sl = round_to_tick(base_ref + (DYNAMIC_BE_PROFIT_TICKS * tick_size), tick_size)
                 debe_mover = (nuevo_sl > sl_actual)
             else: # SHORT
-                nuevo_sl = round_to_tick(precio_entrada - (DYNAMIC_BE_PROFIT_TICKS * tick_size), tick_size)
+                nuevo_sl = round_to_tick(base_ref - (DYNAMIC_BE_PROFIT_TICKS * tick_size), tick_size)
                 debe_mover = (nuevo_sl < sl_actual)
 
             if debe_mover:
                 self.log(
                     f"🛡️ [{sym}] ¡DINAMISMO ACTIVADO! Avance: {pct_avance:.1f}% (>= {DYNAMIC_BE_PROFIT_PCT}%) | "
-                    f"Asegurando SL a favor (Entrada {'+' if direccion=='LONG' else '-'} {DYNAMIC_BE_PROFIT_TICKS}t = {nuevo_sl:.2f})...",
+                    f"Asegurando SL a favor ({ref_name} {'+' if direccion=='LONG' else '-'} {DYNAMIC_BE_PROFIT_TICKS}t = {nuevo_sl:.2f})...",
                     "ORDER", sym
                 )
                 exito_mov = self.mover_sl_en_topstep(contract_id, nuevo_sl, sym)
