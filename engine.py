@@ -391,7 +391,7 @@ class AxiomEngine:
         3. Vela t (actual recién iniciada): No inició pasando el VWAP.
            - SHORT: open < vwap.
            - LONG: open > vwap.
-        4. Stop Loss Inicial: 25% de distancia del VWAP hacia la banda contraria (+músculo de aguante).
+        4. Stop Loss Inicial: 50% de distancia del VWAP hacia la banda contraria (+músculo de aguante).
         5. Take Profit Inicial: 60% de distancia entre el VWAP y la siguiente banda.
         """
         if df_5m is None or len(df_5m) < 3:
@@ -463,7 +463,7 @@ class AxiomEngine:
             return None
 
         # -------------------------------------------------------------
-        # STOP LOSS INICIAL: 25% DE DISTANCIA DEL VWAP A LA BANDA (+MÚSCULO DE AGUANTE)
+        # STOP LOSS INICIAL: 50% DE DISTANCIA DEL VWAP A LA BANDA (+MÚSCULO DE AGUANTE)
         # -------------------------------------------------------------
         d_sl = round_to_tick(SL_VWAP_BAND_RATIO * std_dev, tick_size)
         if setup_type == "SHORT":

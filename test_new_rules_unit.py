@@ -52,8 +52,8 @@ class TestNewVwapIdea(unittest.TestCase):
 
         self.assertIsNotNone(setup, "Debe generar setup SHORT")
         self.assertEqual(setup["direccion"], "SHORT")
-        # SL: 25% de 20.0 std_dev = 5.0 pts sobre VWAP = 5005.0 (mayor musculo de aguante)
-        self.assertEqual(setup["precio_sl"], 5005.0, "SL debe estar al 25% de distancia del VWAP hacia la banda superior")
+        # SL: 50% de 20.0 std_dev = 10.0 pts sobre VWAP = 5010.0 (mayor musculo de aguante)
+        self.assertEqual(setup["precio_sl"], 5010.0, "SL debe estar al 50% de distancia del VWAP hacia la banda superior")
         # TP: 60% de 20.0 std_dev = 12.0 pts bajo VWAP = 4988.0
         self.assertEqual(setup["precio_tp"], 4988.0, "TP debe estar al 60% de distancia hacia banda inferior")
 
@@ -72,8 +72,8 @@ class TestNewVwapIdea(unittest.TestCase):
 
         self.assertIsNotNone(setup, "Debe generar setup LONG")
         self.assertEqual(setup["direccion"], "LONG")
-        # SL: 25% de 20.0 std_dev = 5.0 pts bajo VWAP = 4995.0 (mayor musculo de aguante)
-        self.assertEqual(setup["precio_sl"], 4995.0, "SL debe estar al 25% de distancia del VWAP hacia la banda inferior")
+        # SL: 50% de 20.0 std_dev = 10.0 pts bajo VWAP = 4990.0 (mayor musculo de aguante)
+        self.assertEqual(setup["precio_sl"], 4990.0, "SL debe estar al 50% de distancia del VWAP hacia la banda inferior")
         # TP: 60% de 20.0 std_dev = 12.0 pts sobre VWAP = 5012.0
         self.assertEqual(setup["precio_tp"], 5012.0, "TP debe estar al 60% de distancia hacia banda superior")
 
