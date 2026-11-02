@@ -19,7 +19,7 @@ services:
       - key: ACCOUNT_FILTER
         value: PRAC
       - key: ACCOUNT_NAME
-        value: PRAC-V2-460183-90060755
+        value: PRAC-V2-460183-11478313
       - key: SL_VWAP_BAND_RATIO
         value: "0.50"
       - key: TP_VWAP_BAND_RATIO
