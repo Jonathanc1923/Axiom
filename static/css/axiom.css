@@ -282,6 +282,9 @@ body {
 }
 
 .symbol-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   background: transparent;
   border: 1px solid transparent;
   color: var(--text-muted);
@@ -292,6 +295,25 @@ body {
   border-radius: var(--radius-sm);
   cursor: pointer;
   transition: all 0.2s;
+}
+
+.symbol-tab .tab-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  display: inline-block;
+  background: #10B981;
+  box-shadow: 0 0 5px rgba(16, 185, 129, 0.6);
+  transition: all 0.2s;
+}
+
+.symbol-tab.tab-disabled .tab-dot {
+  background: #EF4444;
+  box-shadow: 0 0 5px rgba(239, 68, 68, 0.4);
+}
+
+.symbol-tab.tab-disabled {
+  opacity: 0.65;
 }
 
 .symbol-tab:hover {

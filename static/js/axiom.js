@@ -39,6 +39,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const hudSpread = document.getElementById('hud-spread');
     const radarSymbolBadge = document.getElementById('radar-symbol-badge');
     const specStatus = document.getElementById('spec-status');
+    const btnSpecToggle = document.getElementById('btn-spec-toggle');
     
     // Metrics Ribbon (Real Topstep Data)
     const metricPnl = document.getElementById('metric-pnl');
@@ -206,20 +207,45 @@ document.addEventListener('DOMContentLoaded', () => {
     function updateActiveSymbolControls(sym, isEnabled) {
         if (hudSymbol) hudSymbol.innerText = sym;
         if (radarSymbolBadge) radarSymbolBadge.innerText = sym;
+        const specSym = document.getElementById('spec-symbol');
+        if (specSym) specSym.innerText = sym;
         
         if (btnToggleActiveTrading) {
-            if (isEnabled) {
-                btnToggleActiveTrading.className = 'fleet-toggle-btn active';
-                btnToggleActiveTrading.innerText = 'TRADING: ACTIVO';
-            } else {
-                btnToggleActiveTrading.className = 'fleet-toggle-btn inactive';
-                btnToggleActiveTrading.innerText = 'TRADING: INACTIVO';
-            }
+            btnToggleActiveTrading.className = `fleet-toggle-btn ${isEnabled ? 'active' : 'inactive'}`;
+            btnToggleActiveTrading.innerText = `${sym}: ${isEnabled ? 'ACTIVO (Pausar)' : 'PAUSADO (Activar)'}`;
+            btnToggleActiveTrading.style.color = isEnabled ? '#10B981' : '#EF4444';
+            btnToggleActiveTrading.style.borderColor = isEnabled ? 'rgba(16, 185, 129, 0.4)' : 'rgba(239, 68, 68, 0.4)';
         }
         if (specStatus) {
-            specStatus.innerText = isEnabled ? 'ACTIVO (Operando)' : 'INACTIVO (Monitor)';
-            specStatus.style.color = isEnabled ? '#10B981' : '#94A3B8';
+            specStatus.innerText = isEnabled ? 'ACTIVO (Operando)' : 'PAUSADO (Solo Monitoreo)';
+            specStatus.style.color = isEnabled ? '#10B981' : '#EF4444';
         }
+        if (btnSpecToggle) {
+            btnSpecToggle.className = `fleet-toggle-btn ${isEnabled ? 'active' : 'inactive'}`;
+            btnSpecToggle.innerText = isEnabled ? 'PAUSAR' : 'ACTIVAR';
+            btnSpecToggle.style.color = isEnabled ? '#EF4444' : '#10B981';
+            btnSpecToggle.style.borderColor = isEnabled ? 'rgba(239, 68, 68, 0.4)' : 'rgba(16, 185, 129, 0.4)';
+        }
+    }
+
+    function updateSymbolTabsStatus(matrix) {
+        if (!matrix) return;
+        document.querySelectorAll('.symbol-tab').forEach(tab => {
+            const sym = tab.getAttribute('data-symbol');
+            const item = matrix[sym];
+            const isEnabled = item ? item.enabled : true;
+            
+            tab.classList.toggle('tab-enabled', isEnabled);
+            tab.classList.toggle('tab-disabled', !isEnabled);
+            
+            let dot = tab.querySelector('.tab-dot');
+            if (!dot) {
+                dot = document.createElement('span');
+                dot.className = 'tab-dot';
+                tab.insertBefore(dot, tab.firstChild);
+            }
+            tab.title = `${sym}: ${isEnabled ? 'OPERANDO (Click para ver gráfico, doble click para pausar)' : 'PAUSADO (Click para ver gráfico, doble click para activar)'}`;
+        });
     }
 
     async function loadChartMarkers(forSymbol = activeSymbol) {
@@ -324,6 +350,12 @@ document.addEventListener('DOMContentLoaded', () => {
                     if (msg.symbols_matrix) {
                         renderFleetStrip(msg.symbols_matrix);
                         updateMatrixUI(msg.symbols_matrix);
+                        updateSymbolTabsStatus(msg.symbols_matrix);
+                        const currentItem = msg.symbols_matrix[activeSymbol];
+                        if (currentItem) {
+                            if (specContract) specContract.innerText = currentItem.contract || 'Detectando...';
+                            updateActiveSymbolControls(activeSymbol, currentItem.enabled);
+                        }
                     }
                     if (msg.ranking) {
                         renderRankingSection(msg.ranking);
@@ -523,6 +555,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (status.symbols_matrix) {
             renderFleetStrip(status.symbols_matrix);
             updateMatrixUI(status.symbols_matrix);
+            updateSymbolTabsStatus(status.symbols_matrix);
             const currentItem = status.symbols_matrix[activeSymbol];
             if (currentItem) {
                 if (specContract) specContract.innerText = currentItem.contract || 'Detectando...';
@@ -1031,6 +1064,20 @@ document.addEventListener('DOMContentLoaded', () => {
     // ==========================================
     async function switchSymbol(symbolKey) {
         try {
+            activeSymbol = symbolKey;
+            // Update tabs visually immediately
+            document.querySelectorAll('.symbol-tab').forEach(t => {
+                t.classList.toggle('active', t.getAttribute('data-symbol') === symbolKey);
+            });
+            document.querySelectorAll('.fleet-card').forEach(c => {
+                c.classList.toggle('active-view', c.getAttribute('data-symbol') === symbolKey);
+            });
+            
+            const specSym = document.getElementById('spec-symbol');
+            if (specSym) specSym.innerText = symbolKey;
+            if (hudSymbol) hudSymbol.innerText = symbolKey;
+            if (radarSymbolBadge) radarSymbolBadge.innerText = symbolKey;
+
             const res = await fetch('/api/engine/symbol', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -1038,34 +1085,35 @@ document.addEventListener('DOMContentLoaded', () => {
             });
             const data = await res.json();
             if (data.success) {
-                activeSymbol = symbolKey;
-                // Update tabs
-                document.querySelectorAll('.symbol-tab').forEach(t => {
-                    t.classList.toggle('active', t.getAttribute('data-symbol') === symbolKey);
-                });
-                document.querySelectorAll('.fleet-card').forEach(c => {
-                    c.classList.toggle('active-view', c.getAttribute('data-symbol') === symbolKey);
-                });
+                // Refresh status immediately to update controls and specs for this symbol
+                try {
+                    const stRes = await fetch('/api/status');
+                    if (stRes.ok) {
+                        const st = await stRes.json();
+                        updateStatusUI(st);
+                    }
+                } catch (_) {}
                 fetchChartData(symbolKey);
             }
         } catch (e) {
-            alert('Error al cambiar de símbolo: ' + e);
+            console.error('Error al cambiar de símbolo:', e);
         }
     }
 
     async function toggleSymbol(symbolKey) {
         try {
+            const sym = symbolKey || activeSymbol;
             const res = await fetch('/api/symbol/toggle', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ symbol: symbolKey })
+                body: JSON.stringify({ symbol: sym })
             });
             const data = await res.json();
             if (data.success) {
                 // Refresh status
                 const st = await (await fetch('/api/status')).json();
                 updateStatusUI(st);
-                if (selectedTerminalSymbol === symbolKey || selectedTerminalSymbol === 'ALL') {
+                if (selectedTerminalSymbol === sym || selectedTerminalSymbol === 'ALL') {
                     reloadTerminalLogsForSymbol(selectedTerminalSymbol);
                 }
             }
@@ -1156,12 +1204,23 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
+    if (btnSpecToggle) {
+        btnSpecToggle.addEventListener('click', () => {
+            toggleSymbol(activeSymbol);
+        });
+    }
+
     // Chart symbol tabs
     if (chartSymbolTabs) {
         chartSymbolTabs.querySelectorAll('.symbol-tab').forEach(tab => {
+            const sym = tab.getAttribute('data-symbol');
             tab.addEventListener('click', () => {
-                const sym = tab.getAttribute('data-symbol');
                 switchSymbol(sym);
+            });
+            // Double click on tab directly toggles trading for that symbol
+            tab.addEventListener('dblclick', (e) => {
+                e.preventDefault();
+                toggleSymbol(sym);
             });
         });
     }

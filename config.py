@@ -258,6 +258,6 @@ def get_micro_shield_sl_ticks(symbol: str) -> int:
     shield = round(sl_init * (15.0 / 35.0))
     return max(shield, 10)
 
-# Símbolos habilitados por defecto en el arranque (Minis y Micros habilitados simultáneamente)
-DEFAULT_ENABLED_SYMBOLS_STR = os.getenv("ENABLED_SYMBOLS", "ES,NQ,YM,RTY,CL,GC,MES,MNQ,MYM,M2K,MCL,MGC")
+# Símbolos habilitados por defecto en el arranque (NQ y MNQ pausados por defecto)
+DEFAULT_ENABLED_SYMBOLS_STR = os.getenv("ENABLED_SYMBOLS", "ES,YM,RTY,CL,GC,MES,MYM,M2K,MCL,MGC")
 DEFAULT_ENABLED_SYMBOLS = [s.strip().upper() for s in DEFAULT_ENABLED_SYMBOLS_STR.split(",") if s.strip()]
