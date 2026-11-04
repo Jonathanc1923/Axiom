@@ -16,7 +16,7 @@ TOPSTEP_API_KEY = os.getenv("TOPSTEP_API_KEY", "O/Jvyz5VggKPKRLF69YDGJQjXIcxsKux
 TOPSTEP_BASE_URL = os.getenv("TOPSTEP_BASE_URL", "https://api.topstepx.com").rstrip("/")
 
 # Practice / Safety Filter
-ACCOUNT_NAME = os.getenv("ACCOUNT_NAME", "PRAC-V2-460183-11478313").strip()
+ACCOUNT_NAME = os.getenv("ACCOUNT_NAME", "PRAC-V2-460183-95785678").strip()
 ACCOUNT_FILTER = os.getenv("ACCOUNT_FILTER", "PRAC").upper()
 
 # Default Symbol on Startup
@@ -34,9 +34,13 @@ CSV_DIR = DATA_DIR
 CSV_PATH = os.path.join(DATA_DIR, "registro_operaciones.csv")
 
 # ==========================================
-# Configuración de Estrategia: RECHAZO DE MECHA EN VWAP (SL 50% BANDA / TP 60% BANDA / BE VWAP+2T @ 50%)
+# Configuración de Estrategia: RECHAZO DE MECHA EN VWAP 30M (SL FIJO 5 TICKS VWAP | TP 50% BANDA)
 # ==========================================
-STRATEGY_NAME = "VWAP Wick Rejection (SL 50% Banda | TP 60% | Dinámico BE VWAP+2t @ 50%)"
+STRATEGY_NAME = "VWAP Wick Rejection 30M (SL Fijo 5 ticks VWAP | TP 50% Banda)"
+
+# Marco Temporal de Velas (30 minutos)
+BAR_UNIT = int(os.getenv("BAR_UNIT", "2")) # 2 = minutos
+BAR_TIMEFRAME_MINUTES = int(os.getenv("BAR_TIMEFRAME_MINUTES", "30")) # 30 min
 
 # Intervalo central de monitoreo y actualización de mercado (cada 1.0 segundo estricto)
 POLL_INTERVAL_SECONDS = float(os.getenv("POLL_INTERVAL_SECONDS", "1.0"))
@@ -44,25 +48,27 @@ POLL_INTERVAL_SECONDS = float(os.getenv("POLL_INTERVAL_SECONDS", "1.0"))
 # Sincronización oficial autoritativa con TopstepX API en tiempo real (segundos)
 TOPSTEP_SYNC_INTERVAL_SECONDS = float(os.getenv("TOPSTEP_SYNC_INTERVAL_SECONDS", "5.0"))
 
-# Stop Loss Inicial: 50% de distancia entre el VWAP y la banda contraria (+músculo de aguante)
-SL_VWAP_BAND_RATIO = float(os.getenv("SL_VWAP_BAND_RATIO", "0.50"))
+# Stop Loss Fijo: 5 ticks de distancia de la línea VWAP
+SL_VWAP_DISTANCE_TICKS = int(os.getenv("SL_VWAP_DISTANCE_TICKS", "5"))
 
-# Take Profit Inicial: 60% de distancia entre el VWAP y la siguiente banda
-TP_VWAP_BAND_RATIO = float(os.getenv("TP_VWAP_BAND_RATIO", "0.60"))
+# Take Profit: 50% de distancia entre el VWAP y la siguiente banda
+TP_VWAP_BAND_RATIO = float(os.getenv("TP_VWAP_BAND_RATIO", "0.50"))
 
-# Dinamismo de SL: Al avanzar a favor >= 50% del TP, asegurar VWAP + 2 ticks a favor
+# SL Dinámico desactivado: ahora el SL es fijo a 5 ticks
+USE_DYNAMIC_SL = os.getenv("USE_DYNAMIC_SL", "false").lower() in ("true", "1", "yes")
 DYNAMIC_BE_PROFIT_PCT = float(os.getenv("DYNAMIC_BE_PROFIT_PCT", "50.0"))
 DYNAMIC_BE_PROFIT_TICKS = int(os.getenv("DYNAMIC_BE_PROFIT_TICKS", "2"))
 DYNAMIC_BE_REFERENCE = os.getenv("DYNAMIC_BE_REFERENCE", "VWAP").upper()
 
-# Filtro de Entrada Tarde: Máximo % del TP consumido antes de entrar (evita entradas agotadas)
-MAX_ENTRY_TP_CONSUMED_PCT = float(os.getenv("MAX_ENTRY_TP_CONSUMED_PCT", "50.0"))
-# Mínimo ratio Riesgo/Beneficio requerido (TP restante / SL riesgo)
-MIN_SETUP_RR_RATIO = float(os.getenv("MIN_SETUP_RR_RATIO", "0.40"))
-# Mínimo de ticks de TP para abrir la operación (evita micro-ganancias que se van en comisiones)
-MIN_TP_TICKS = int(os.getenv("MIN_TP_TICKS", "6"))
+# Filtro de Entrada Tarde eliminado (0.0 / 100.0 desactivado)
+MAX_ENTRY_TP_CONSUMED_PCT = float(os.getenv("MAX_ENTRY_TP_CONSUMED_PCT", "100.0"))
+# Mínimo ratio Riesgo/Beneficio desactivado
+MIN_SETUP_RR_RATIO = float(os.getenv("MIN_SETUP_RR_RATIO", "0.0"))
+# Mínimo de ticks de TP para abrir la operación (garantía mínima básica)
+MIN_TP_TICKS = int(os.getenv("MIN_TP_TICKS", "2"))
 
 # Compatibilidad con módulos y variables previas
+SL_VWAP_BAND_RATIO = 0.50
 CHECK_WINDOW_START_MINUTE = 0
 VWAP_TOUCH_RETREAT_TICKS = 0
 SL_VWAP_RATIO = SL_VWAP_BAND_RATIO

@@ -19,11 +19,15 @@ services:
       - key: ACCOUNT_FILTER
         value: PRAC
       - key: ACCOUNT_NAME
-        value: PRAC-V2-460183-11478313
-      - key: SL_VWAP_BAND_RATIO
-        value: "0.50"
+        value: PRAC-V2-460183-95785678
+      - key: BAR_TIMEFRAME_MINUTES
+        value: "30"
+      - key: SL_VWAP_DISTANCE_TICKS
+        value: "5"
       - key: TP_VWAP_BAND_RATIO
-        value: "0.60"
+        value: "0.50"
+      - key: USE_DYNAMIC_SL
+        value: "false"
       - key: DEFAULT_SYMBOL
         value: ES
       - key: AUTO_START_ENGINE

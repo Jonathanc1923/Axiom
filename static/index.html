@@ -110,7 +110,7 @@
              ========================================== -->
         <main class="main-workspace">
             
-            <!-- Left: Interactive 5m Chart Viewport -->
+            <!-- Left: Interactive 30m Chart Viewport -->
             <div class="chart-section">
                 <div class="chart-header">
                     <div class="symbol-tabs" id="chart-symbol-tabs">
@@ -227,19 +227,19 @@
                         </tr>
                         <tr>
                             <td>Patrón de Entrada</td>
-                            <td style="color:#38BDF8; font-weight:600;">VWAP Wick Rejection (Rechazo Mecha)</td>
+                            <td style="color:#38BDF8; font-weight:600;">VWAP Wick Rejection 30M</td>
                         </tr>
                         <tr>
-                            <td>Ventana de Verificación</td>
-                            <td style="color:#FACC15;">Continua (Cierre Vela 5m)</td>
+                            <td>Marco Temporal / Verificación</td>
+                            <td style="color:#FACC15;">Continua (Vela 30m)</td>
                         </tr>
                         <tr>
-                            <td>Stop Loss Inicial</td>
-                            <td style="color:#EF4444; font-weight:600;">50% hacia Banda Contraria</td>
+                            <td>Stop Loss</td>
+                            <td style="color:#EF4444; font-weight:600;">Fijo a 5 ticks de Línea VWAP</td>
                         </tr>
                         <tr>
-                            <td>Take Profit Inicial</td>
-                            <td style="color:#10B981; font-weight:600;">60% hacia Banda Objetivo (BE @ 50%)</td>
+                            <td>Take Profit</td>
+                            <td style="color:#10B981; font-weight:600;">50% Distancia VWAP a Banda (SL Fijo)</td>
                         </tr>
                         <tr>
                             <td>Enfriamiento (Cooldown)</td>
@@ -316,8 +316,8 @@
                     </div>
                     <div class="metric-card" style="background:#0D1626; border:1px solid #1E293B; padding:12px; border-radius:8px;">
                         <span class="metric-title" style="font-size:11px; color:#94A3B8;">Estrategia Activa</span>
-                        <span class="metric-value" style="font-size:16px; font-weight:700; color:#38BDF8;">VWAP Wick Rejection</span>
-                        <span class="metric-sub" style="font-size:10px; color:#10B981;">Vela 5m | SL 50% | TP 60% | BE+2t</span>
+                        <span class="metric-value" style="font-size:16px; font-weight:700; color:#38BDF8;">VWAP Wick Rejection 30M</span>
+                        <span class="metric-sub" style="font-size:10px; color:#10B981;">Vela 30m | SL 5t VWAP | TP 50% Banda | SL Fijo</span>
                     </div>
                 </div>
 

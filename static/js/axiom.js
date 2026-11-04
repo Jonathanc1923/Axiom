@@ -130,7 +130,7 @@ document.addEventListener('DOMContentLoaded', () => {
             },
         });
 
-        // 5m Candlestick series
+        // 30m Candlestick series
         candleSeries = chart.addCandlestickSeries({
             upColor: '#10B981',
             downColor: '#EF4444',
