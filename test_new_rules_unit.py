@@ -16,71 +16,78 @@ class TestNewVwap30mRules(unittest.TestCase):
         self.engine = AxiomEngine(client=self.mock_client, default_symbol="ES")
         self.engine.account_id = 29324973
 
-    def _create_single_bar_df(self, bar, vwap=5000.0, std_dev=20.0):
+    def _create_2bar_df(self, closed_bar, curr_bar, vwap=5000.0, std_dev=20.0):
         data = [
             {
                 "Timestamp": pd.Timestamp("2026-11-04 04:00:00", tz="UTC"),
-                "Open": bar["o"], "High": bar["h"], "Low": bar["l"], "Close": bar["c"],
+                "Open": closed_bar["o"], "High": closed_bar["h"], "Low": closed_bar["l"], "Close": closed_bar["c"],
                 "Volume": 1000, "VWAP": vwap, "Upper_Band": vwap + std_dev, "Lower_Band": vwap - std_dev
+            },
+            {
+                "Timestamp": pd.Timestamp("2026-11-04 04:30:00", tz="UTC"),
+                "Open": curr_bar["o"], "High": curr_bar["h"], "Low": curr_bar["l"], "Close": curr_bar["c"],
+                "Volume": 50, "VWAP": vwap, "Upper_Band": vwap + std_dev, "Lower_Band": vwap - std_dev
             }
         ]
         return pd.DataFrame(data)
 
-    def test_setup_short_valid(self):
-        """Vela actual de 30m: abre bajo VWAP, mecha toca o pasa VWAP, precio actual bajo VWAP."""
+    def test_setup_short_valid_after_candle_closes(self):
+        """Vela de 30m cerró: abrió bajo VWAP, mecha tocó/pasó VWAP, cerró bajo VWAP. Vela actual cotiza bajo VWAP."""
         vwap = 5000.0
         std_dev = 20.0 # 50% = 10.0 pts (40 ticks en ES)
-        # Bar: opens 4995, wick tests 5002 >= 5000, current price is 4996 < 5000
-        bar = {"o": 4995.0, "h": 5002.0, "l": 4990.0, "c": 4996.0}
+        # Vela cerrada: opens 4995, wick tests 5002 >= 5000, close is 4996 < 5000
+        closed_bar = {"o": 4995.0, "h": 5002.0, "l": 4990.0, "c": 4996.0}
+        curr_bar = {"o": 4996.0, "h": 4997.0, "l": 4994.0, "c": 4995.0}
 
-        df = self._create_single_bar_df(bar, vwap=vwap, std_dev=std_dev)
-        setup = self.engine.verificar_setup_vwap(df, "ES", current_price=4996.0)
+        df = self._create_2bar_df(closed_bar, curr_bar, vwap=vwap, std_dev=std_dev)
+        setup = self.engine.verificar_setup_vwap(df, "ES", current_price=4995.0)
 
-        self.assertIsNotNone(setup, "Debe generar setup SHORT")
+        self.assertIsNotNone(setup, "Debe generar setup SHORT al cerrar la vela con mecha en VWAP")
         self.assertEqual(setup["direccion"], "SHORT")
         # SL fijo a 5 ticks de VWAP (5 * 0.25 = 1.25 pts arriba de VWAP = 5001.25)
         self.assertEqual(setup["precio_sl"], 5001.25, "SL debe estar fijo a 5 ticks por encima del VWAP (5001.25)")
-        # TP con el 50% de la distancia entre VWAP y siguiente banda (10.0 pts) desde la apertura de operacion
-        # 4996.0 - 10.0 = 4986.0 (gana exactamente 10 pts = 40 ticks)
-        self.assertEqual(setup["precio_tp"], 4986.0, "TP debe estar a 10.0 pts de la entrada (4986.0)")
+        # TP con el 50% de la distancia entre VWAP y siguiente banda (10.0 pts) desde la entrada (4995.0 - 10.0 = 4985.0)
+        self.assertEqual(setup["precio_tp"], 4985.0, "TP debe estar a 10.0 pts de la entrada (4985.0)")
         self.assertEqual(setup["tp_ticks"], 40, "TP debe ganar exactamente 40 ticks")
 
-    def test_setup_long_valid(self):
-        """Vela actual de 30m: abre sobre VWAP, mecha toca o pasa VWAP, precio actual sobre VWAP."""
+    def test_setup_long_valid_after_candle_closes(self):
+        """Vela de 30m cerró: abrió sobre VWAP, mecha tocó/pasó VWAP, cerró sobre VWAP. Vela actual cotiza sobre VWAP."""
         vwap = 5000.0
         std_dev = 20.0 # 50% = 10.0 pts (40 ticks en ES)
-        # Bar: opens 5005, wick tests 4998 <= 5000, current price is 5004 > 5000
-        bar = {"o": 5005.0, "h": 5010.0, "l": 4998.0, "c": 5004.0}
+        # Vela cerrada: opens 5005, wick tests 4998 <= 5000, close is 5004 > 5000
+        closed_bar = {"o": 5005.0, "h": 5010.0, "l": 4998.0, "c": 5004.0}
+        curr_bar = {"o": 5004.0, "h": 5006.0, "l": 5003.0, "c": 5005.0}
 
-        df = self._create_single_bar_df(bar, vwap=vwap, std_dev=std_dev)
-        setup = self.engine.verificar_setup_vwap(df, "ES", current_price=5004.0)
+        df = self._create_2bar_df(closed_bar, curr_bar, vwap=vwap, std_dev=std_dev)
+        setup = self.engine.verificar_setup_vwap(df, "ES", current_price=5005.0)
 
-        self.assertIsNotNone(setup, "Debe generar setup LONG")
+        self.assertIsNotNone(setup, "Debe generar setup LONG al cerrar la vela con mecha en VWAP")
         self.assertEqual(setup["direccion"], "LONG")
         # SL fijo a 5 ticks de VWAP (5 * 0.25 = 1.25 pts abajo de VWAP = 4998.75)
         self.assertEqual(setup["precio_sl"], 4998.75, "SL debe estar fijo a 5 ticks por debajo del VWAP (4998.75)")
-        # TP con el 50% de la distancia entre VWAP y siguiente banda (10.0 pts) desde la apertura de operacion
-        # 5004.0 + 10.0 = 5014.0 (gana exactamente 10 pts = 40 ticks)
-        self.assertEqual(setup["precio_tp"], 5014.0, "TP debe estar a 10.0 pts de la entrada (5014.0)")
+        # TP con el 50% de la distancia entre VWAP y siguiente banda (10.0 pts) desde la entrada (5005.0 + 10.0 = 5015.0)
+        self.assertEqual(setup["precio_tp"], 5015.0, "TP debe estar a 10.0 pts de la entrada (5015.0)")
         self.assertEqual(setup["tp_ticks"], 40, "TP debe ganar exactamente 40 ticks")
 
-    def test_setup_rejected_if_no_wick_touched_vwap(self):
-        """Rechazar si la mecha no alcanzó la línea del VWAP."""
+    def test_setup_rejected_if_no_wick_touched_vwap_on_closed_bar(self):
+        """Rechazar si en la vela cerrada la mecha no alcanzó la línea del VWAP."""
         vwap = 5000.0
         # High 4998 < 5000 (no tocó VWAP)
-        bar = {"o": 4990.0, "h": 4998.0, "l": 4985.0, "c": 4995.0}
-        df = self._create_single_bar_df(bar, vwap=vwap, std_dev=20.0)
-        setup = self.engine.verificar_setup_vwap(df, "ES", current_price=4995.0)
-        self.assertIsNone(setup, "No debe entrar si la mecha no tocó el VWAP")
+        closed_bar = {"o": 4990.0, "h": 4998.0, "l": 4985.0, "c": 4995.0}
+        curr_bar = {"o": 4995.0, "h": 4996.0, "l": 4993.0, "c": 4994.0}
+        df = self._create_2bar_df(closed_bar, curr_bar, vwap=vwap, std_dev=20.0)
+        setup = self.engine.verificar_setup_vwap(df, "ES", current_price=4994.0)
+        self.assertIsNone(setup, "No debe entrar si la mecha de la vela cerrada no tocó el VWAP")
 
-    def test_setup_rejected_if_price_closed_above_vwap_for_short(self):
-        """Rechazar si la vela rompió al alza en lugar de rebotar hacia abajo."""
+    def test_setup_rejected_if_closed_bar_crossed_vwap(self):
+        """Rechazar si la vela cerrada cruzó el VWAP con su cuerpo en lugar de rebotar."""
         vwap = 5000.0
-        # Precio actual 5002 > 5000 (rompió VWAP)
-        bar = {"o": 4995.0, "h": 5005.0, "l": 4992.0, "c": 5002.0}
-        df = self._create_single_bar_df(bar, vwap=vwap, std_dev=20.0)
-        setup = self.engine.verificar_setup_vwap(df, "ES", current_price=5002.0)
-        self.assertIsNone(setup, "No debe entrar SHORT si el precio está por encima del VWAP")
+        # Close 5002 > 5000 (cuerpo cruzó VWAP)
+        closed_bar = {"o": 4995.0, "h": 5005.0, "l": 4992.0, "c": 5002.0}
+        curr_bar = {"o": 5002.0, "h": 5004.0, "l": 5001.0, "c": 5003.0}
+        df = self._create_2bar_df(closed_bar, curr_bar, vwap=vwap, std_dev=20.0)
+        setup = self.engine.verificar_setup_vwap(df, "ES", current_price=5003.0)
+        self.assertIsNone(setup, "No debe entrar si el cuerpo de la vela cerró cruzando el VWAP")
 
     def test_sl_remains_fixed_no_dynamic_trailing(self):
         """Verifica que el SL permanezca fijo y no se mueva con USE_DYNAMIC_SL=False."""

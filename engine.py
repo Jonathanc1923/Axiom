@@ -383,36 +383,51 @@ class AxiomEngine:
     def verificar_setup_vwap(self, df_5m: pd.DataFrame, sym: str, current_price: Optional[float] = None) -> Optional[Dict[str, Any]]:
         """
         NUEVA ESTRATEGIA INSTITUCIONAL (RECHAZO DE MECHA EN VWAP 30M):
-        1. Velas de 30 minutos (30m).
-        2. Solo la vela actual: verificamos si con su mecha toca o pasa el VWAP.
-           - SHORT: Vela abrió bajo VWAP (Open < VWAP), mecha tocó/pasó VWAP (High >= VWAP), precio actual bajo VWAP (Close < VWAP).
-           - LONG:  Vela abrió sobre VWAP (Open > VWAP), mecha tocó/pasó VWAP (Low <= VWAP), precio actual sobre VWAP (Close > VWAP).
-        3. Stop Loss Fijo: 5 ticks de distancia de la línea VWAP:
-           - SHORT: SL a 5 ticks por encima del VWAP (VWAP + 5 ticks).
-           - LONG:  SL a 5 ticks por debajo del VWAP (VWAP - 5 ticks).
-        4. Take Profit: 50% de la distancia entre el VWAP actual y la siguiente banda.
+        1. Velas de 30 minutos (30M).
+        2. Espera a que la vela de 30m cierre (vela t-1 en el historial con includePartialBar=True).
+        3. Se comprueba que en la vela cerrada hubo mecha que tocó o rompió/superó la línea de VWAP:
+           - SHORT:
+             * Vela cerrada abrió por debajo de VWAP (Open < VWAP)
+             * Mecha superior tocó o superó VWAP (High >= VWAP)
+             * Cuerpo de la vela cerrada quedó por debajo de VWAP (max(Open, Close) < VWAP)
+             * Vela actual cotiza por debajo de VWAP (Close < VWAP)
+           - LONG:
+             * Vela cerrada abrió por encima de VWAP (Open > VWAP)
+             * Mecha inferior tocó o perforó VWAP (Low <= VWAP)
+             * Cuerpo de la vela cerrada quedó por encima de VWAP (min(Open, Close) > VWAP)
+             * Vela actual cotiza por encima de VWAP (Close > VWAP)
+        4. Stop Loss Fijo: 5 ticks de distancia de la línea VWAP:
+           - SHORT: SL a 5 ticks por encima de VWAP (VWAP + 5 ticks).
+           - LONG:  SL a 5 ticks por debajo de VWAP (VWAP - 5 ticks).
+        5. Take Profit: 50% de la distancia entre el VWAP actual y la siguiente banda.
            El total de ese 50% se pone en el momento que se abre la operación (sin restar precio de apertura),
            ganando el total de ticks correspondiente al 50% entre VWAP y banda.
-        5. Sin Filtro de Entrada Tardía / Recorrido Agotado.
-        6. SL fijo a 5 ticks (sin dinamismo BE ni trailing).
+        6. Sin Filtro de Entrada Tardía / Recorrido Agotado.
+        7. SL fijo a 5 ticks (sin dinamismo BE ni trailing).
         """
-        if df_5m is None or len(df_5m) < 1:
+        if df_5m is None or len(df_5m) < 2:
             return None
 
         spec = SUPPORTED_SYMBOLS.get(sym, {"tickSize": 0.25})
         tick_size = float(spec.get("tickSize", 0.25))
 
+        # Vela recién cerrada (t-1) y vela actual en formación (t)
+        closed_bar = df_5m.iloc[-2]
         curr_bar = df_5m.iloc[-1]
 
+        closed_open = float(closed_bar['Open'])
+        closed_high = float(closed_bar['High'])
+        closed_low = float(closed_bar['Low'])
+        closed_close = float(closed_bar['Close'])
+        closed_vwap = float(closed_bar['VWAP'])
+
         curr_open = float(curr_bar['Open'])
-        curr_high = float(curr_bar['High'])
-        curr_low = float(curr_bar['Low'])
         curr_close = float(current_price if current_price is not None else curr_bar['Close'])
         curr_vwap = float(curr_bar['VWAP'])
         curr_upper = float(curr_bar['Upper_Band'])
         curr_lower = float(curr_bar['Lower_Band'])
 
-        if pd.isna(curr_vwap) or pd.isna(curr_upper) or pd.isna(curr_lower):
+        if pd.isna(curr_vwap) or pd.isna(curr_upper) or pd.isna(curr_lower) or pd.isna(closed_vwap):
             return None
 
         std_dev = (curr_upper - curr_lower) / 2.0
@@ -423,18 +438,26 @@ class AxiomEngine:
 
         # -------------------------------------------------------------
         # CONDICIÓN SHORT:
-        # Vela actual abrió por debajo de VWAP, mecha superior tocó o superó VWAP,
-        # y precio actual cotiza por debajo de VWAP (confirmando rechazo hacia abajo)
+        # Vela de 30m cerró, con mecha superior que tocó o rompió/pasó VWAP,
+        # su cuerpo cerró por debajo de VWAP y la vela actual cotiza por debajo de VWAP
         # -------------------------------------------------------------
-        if (curr_open < curr_vwap) and (curr_high >= curr_vwap) and (curr_close < curr_vwap):
+        wick_short = (closed_high >= closed_vwap)
+        body_short = max(closed_open, closed_close) < closed_vwap
+        curr_short = (curr_close < curr_vwap)
+
+        if wick_short and body_short and curr_short:
             setup_type = "SHORT"
 
         # -------------------------------------------------------------
         # CONDICIÓN LONG:
-        # Vela actual abrió por encima de VWAP, mecha inferior tocó o superó VWAP,
-        # y precio actual cotiza por encima de VWAP (confirmando rechazo hacia arriba)
+        # Vela de 30m cerró, con mecha inferior que tocó o perforó/rompió VWAP,
+        # su cuerpo cerró por encima de VWAP y la vela actual cotiza por encima de VWAP
         # -------------------------------------------------------------
-        elif (curr_open > curr_vwap) and (curr_low <= curr_vwap) and (curr_close > curr_vwap):
+        wick_long = (closed_low <= closed_vwap)
+        body_long = min(closed_open, closed_close) > closed_vwap
+        curr_long = (curr_close > curr_vwap)
+
+        if wick_long and body_long and curr_long:
             setup_type = "LONG"
 
         if not setup_type:
@@ -478,7 +501,7 @@ class AxiomEngine:
         now_utc = datetime.now(timezone.utc)
         condicion_desc = (
             f"VWAP Wick Rejection 30M ({setup_type}) | "
-            f"Vela actual mecha VWAP | "
+            f"Vela 30m cerrada ({closed_bar['Timestamp'].strftime('%H:%M')} UTC) mecha VWAP | "
             f"SL Fijo 5 ticks VWAP ({precio_sl:.2f} / {sl_ticks}t) | "
             f"TP 50% Banda ({precio_tp:.2f} / {tp_ticks}t)"
         )
@@ -498,6 +521,7 @@ class AxiomEngine:
             "std_dev": std_dev,
             "d_base": d_base,
             "condicion_tecnica": condicion_desc,
+            "candle_closed_ts": closed_bar['Timestamp'],
             "entry_window": f"{now_utc.strftime('%H:%M:%S')} UTC"
         }
 
@@ -2315,23 +2339,22 @@ class AxiomEngine:
                     if has_open_pos or state.get("active_trade"):
                         self.monitorear_posicion_abierta(sym, current_price=current_price, df_5m=df_5m, cached_positions=cached_positions)
 
-                    # RAMA B: BÚSQUEDA DE NUEVAS ENTRADAS (Permite hasta 2 operaciones si la 1ª ya está asegurada)
+                    # RAMA B: BÚSQUEDA DE NUEVAS ENTRADAS (Al cierre de vela 30m comprobando mecha en VWAP)
                     can_open, open_reason = self.puede_abrir_posicion(sym, cached_positions=cached_positions)
-                    if can_open and is_enabled and df_5m is not None and not df_5m.empty:
-                        # Respetar Cooldown y evitar reentradas repetidas en la misma vela
-                        vela_5m_actual = df_5m.iloc[-1]
-                        vela_ts = vela_5m_actual['Timestamp']
+                    if can_open and is_enabled and df_5m is not None and len(df_5m) >= 2:
+                        # Vela de 30m recién cerrada
+                        closed_candle_ts = df_5m.iloc[-2]['Timestamp']
                         
-                        if time.time() >= state["cooldown_until"] and state.get("last_executed_candle_ts") != vela_ts:
+                        if time.time() >= state["cooldown_until"] and state.get("last_executed_candle_ts") != closed_candle_ts:
                             setup = self.verificar_setup_vwap(df_5m, sym, current_price=current_price)
                             if setup:
-                                state["last_executed_candle_ts"] = vela_ts
+                                state["last_executed_candle_ts"] = closed_candle_ts
                                 trg_t = setup.get('trigger_ticks', 15)
                                 dist_t = abs(current_price - setup['vwap_cruce']) / tick_size
                                 self.log(
                                     f"⚡ [{sym}] ¡Señal activada! ({setup['direccion']}) | Entrada @ {current_price:.2f} | "
                                     f"VWAP: {setup['vwap_cruce']:.2f} | SL: {setup['precio_sl']:.2f} ({setup['sl_ticks']}t) | "
-                                    f"TP: {setup['precio_tp']:.2f} ({setup['tp_ticks']}t)",
+                                    f"TP: {setup['precio_tp']:.2f} ({setup['tp_ticks']}t) | Vela cerrada: {closed_candle_ts}",
                                     "ORDER", sym
                                 )
                                 self.ejecutar_orden(setup, sym)
