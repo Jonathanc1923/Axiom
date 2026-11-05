@@ -19,9 +19,17 @@ services:
       - key: ACCOUNT_FILTER
         value: PRAC
       - key: ACCOUNT_NAME
-        value: PRAC-V2-460183-95785678
+        value: PRAC-V2-460183-70487469
       - key: BAR_TIMEFRAME_MINUTES
         value: "30"
+      - key: CHECK_INTERVAL_MINUTES
+        value: "5"
+      - key: MIN_ENTRY_CONFIRM_TICKS
+        value: "5"
+      - key: MAX_ENTRY_BAND_RATIO
+        value: "0.25"
+      - key: MAX_TRADES_PER_30M_CANDLE
+        value: "1"
       - key: SL_VWAP_DISTANCE_TICKS
         value: "5"
       - key: TP_VWAP_BAND_RATIO

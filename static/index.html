@@ -192,7 +192,7 @@
                             <span class="check-indicator ready">HABILITADO</span>
                         </div>
                         <div class="checklist-item">
-                            <span>SL Estructural (10 Ticks)</span>
+                            <span>SL Fijo (5 Ticks VWAP)</span>
                             <span class="check-indicator ready">CALIBRADO</span>
                         </div>
                     </div>
@@ -230,8 +230,20 @@
                             <td style="color:#38BDF8; font-weight:600;">VWAP Wick Rejection 30M</td>
                         </tr>
                         <tr>
-                            <td>Marco Temporal / Verificación</td>
-                            <td style="color:#FACC15;">Continua (Vela 30m)</td>
+                            <td>Marco Temporal / Chequeo</td>
+                            <td style="color:#FACC15;">Vela 30M (Evaluación Cada 5 Min)</td>
+                        </tr>
+                        <tr>
+                            <td>Confirmación Mínima</td>
+                            <td style="color:#38BDF8;">Mínimo 5 Ticks de VWAP</td>
+                        </tr>
+                        <tr>
+                            <td>Tope Distancia Máxima</td>
+                            <td style="color:#10B981;">Máx 25% Distancia VWAP a Banda</td>
+                        </tr>
+                        <tr>
+                            <td>Límite por Vela</td>
+                            <td style="color:#FACC15;">Máximo 1 Operación por Vela 30M</td>
                         </tr>
                         <tr>
                             <td>Stop Loss</td>
@@ -239,7 +251,7 @@
                         </tr>
                         <tr>
                             <td>Take Profit</td>
-                            <td style="color:#10B981; font-weight:600;">50% Distancia VWAP a Banda (SL Fijo)</td>
+                            <td style="color:#10B981; font-weight:600;">50% Distancia VWAP a Banda</td>
                         </tr>
                         <tr>
                             <td>Enfriamiento (Cooldown)</td>

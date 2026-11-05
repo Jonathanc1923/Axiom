@@ -16,7 +16,7 @@ TOPSTEP_API_KEY = os.getenv("TOPSTEP_API_KEY", "O/Jvyz5VggKPKRLF69YDGJQjXIcxsKux
 TOPSTEP_BASE_URL = os.getenv("TOPSTEP_BASE_URL", "https://api.topstepx.com").rstrip("/")
 
 # Practice / Safety Filter
-ACCOUNT_NAME = os.getenv("ACCOUNT_NAME", "PRAC-V2-460183-95785678").strip()
+ACCOUNT_NAME = os.getenv("ACCOUNT_NAME", "PRAC-V2-460183-70487469").strip()
 ACCOUNT_FILTER = os.getenv("ACCOUNT_FILTER", "PRAC").upper()
 
 # Default Symbol on Startup
@@ -34,13 +34,25 @@ CSV_DIR = DATA_DIR
 CSV_PATH = os.path.join(DATA_DIR, "registro_operaciones.csv")
 
 # ==========================================
-# Configuración de Estrategia: RECHAZO DE MECHA EN VWAP 30M (SL FIJO 5 TICKS VWAP | TP 50% BANDA)
+# Configuración de Estrategia: RECHAZO DE MECHA EN VWAP 30M (EVALUACIÓN 5M | CORREDOR 5T-25% BANDA | SL 5T VWAP | TP 50% BANDA)
 # ==========================================
-STRATEGY_NAME = "VWAP Wick Rejection 30M (SL Fijo 5 ticks VWAP | TP 50% Banda)"
+STRATEGY_NAME = "VWAP Wick Rejection 30M (Evaluación 5M | Corredor 5t-25% Banda | SL 5t VWAP | TP 50% Banda)"
 
-# Marco Temporal de Velas (30 minutos)
+# Marco Temporal de Velas Base (30 minutos)
 BAR_UNIT = int(os.getenv("BAR_UNIT", "2")) # 2 = minutos
 BAR_TIMEFRAME_MINUTES = int(os.getenv("BAR_TIMEFRAME_MINUTES", "30")) # 30 min
+
+# Intervalo de Evaluación de Setup: Comprobación cada 5 minutos dentro de la vela de 30m
+CHECK_INTERVAL_MINUTES = int(os.getenv("CHECK_INTERVAL_MINUTES", "5"))
+
+# Confirmación Mínima de Rechazo: Precio al menos a 5 ticks de nuestro lado desde VWAP
+MIN_ENTRY_CONFIRM_TICKS = int(os.getenv("MIN_ENTRY_CONFIRM_TICKS", "5"))
+
+# Tope Máximo de Distancia de Entrada: Máximo 25% de la distancia entre VWAP y la siguiente banda
+MAX_ENTRY_BAND_RATIO = float(os.getenv("MAX_ENTRY_BAND_RATIO", "0.25"))
+
+# Límite Estricto de Operaciones: Máximo 1 operación por vela de 30 minutos por cada símbolo
+MAX_TRADES_PER_30M_CANDLE = int(os.getenv("MAX_TRADES_PER_30M_CANDLE", "1"))
 
 # Intervalo central de monitoreo y actualización de mercado (cada 1.0 segundo estricto)
 POLL_INTERVAL_SECONDS = float(os.getenv("POLL_INTERVAL_SECONDS", "1.0"))
