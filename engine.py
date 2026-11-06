@@ -50,7 +50,8 @@ from config import (
     MAX_ENTRY_TP_CONSUMED_PCT, MIN_SETUP_RR_RATIO, MIN_TP_TICKS,
     BAR_UNIT, BAR_TIMEFRAME_MINUTES, SL_VWAP_DISTANCE_TICKS, USE_DYNAMIC_SL,
     TOPSTEP_SYNC_INTERVAL_SECONDS, CHECK_INTERVAL_MINUTES,
-    MIN_ENTRY_CONFIRM_TICKS, MAX_ENTRY_BAND_RATIO, MAX_TRADES_PER_30M_CANDLE
+    MIN_ENTRY_CONFIRM_TICKS, MAX_ENTRY_BAND_RATIO, MAX_TRADES_PER_30M_CANDLE,
+    USE_VWAP_TREND_FILTER, VWAP_TREND_LOOKBACK_BARS
 )
 from topstep_client import TopstepClient
 
@@ -442,12 +443,35 @@ class AxiomEngine:
         min_confirm_dist = MIN_ENTRY_CONFIRM_TICKS * tick_size  # 5 ticks mínimos
         max_corridor_dist = MAX_ENTRY_BAND_RATIO * std_dev      # 25% de distancia VWAP a banda
 
+        # -------------------------------------------------------------
+        # FILTRO INSTITUCIONAL DE TENDENCIA DE VWAP:
+        # LONG: Aprobado solo si el VWAP de la sesión está subiendo (pendiente > 0).
+        # SHORT: Aprobado solo si el VWAP de la sesión está bajando (pendiente < 0).
+        # -------------------------------------------------------------
+        lookback = max(1, VWAP_TREND_LOOKBACK_BARS)
+        prev_idx = bar_index - lookback
+        if abs(prev_idx) <= len(df_5m):
+            prev_vwap = float(df_5m.iloc[prev_idx]['VWAP'])
+        else:
+            prev_vwap = bar_vwap
+
+        vwap_delta = bar_vwap - prev_vwap
+        is_vwap_rising = vwap_delta > 0
+        is_vwap_falling = vwap_delta < 0
+
+        use_trend = USE_VWAP_TREND_FILTER or getattr(self, "USE_VWAP_SLOPE_FILTER", False) or USE_VWAP_SLOPE_FILTER
+        trend_ok_short = (not use_trend) or is_vwap_falling
+        trend_ok_long = (not use_trend) or is_vwap_rising
+
         setup_type = None
 
         # -------------------------------------------------------------
         # CONDICIÓN SHORT:
-        # Vela abrió bajo VWAP, mecha tocó/superó VWAP, cuerpo bajo VWAP,
-        # precio entre 5 ticks y 25% de la banda inferior
+        # 1. VWAP en bajada (inclinación negativa)
+        # 2. Vela abrió bajo VWAP
+        # 3. Mecha tocó/superó VWAP
+        # 4. Cuerpo bajo VWAP (mecha pura)
+        # 5. Distancia entre 5 ticks y 25% de la banda inferior
         # -------------------------------------------------------------
         dist_short = bar_vwap - bar_close
         wick_short = (bar_high >= bar_vwap)
@@ -455,13 +479,16 @@ class AxiomEngine:
         min_confirm_short = (dist_short >= min_confirm_dist)
         within_corridor_short = (dist_short <= max_corridor_dist)
 
-        if wick_short and pure_wick_short and min_confirm_short and within_corridor_short:
+        if trend_ok_short and wick_short and pure_wick_short and min_confirm_short and within_corridor_short:
             setup_type = "SHORT"
 
         # -------------------------------------------------------------
         # CONDICIÓN LONG:
-        # Vela abrió sobre VWAP, mecha tocó/perforó VWAP, cuerpo sobre VWAP,
-        # precio entre 5 ticks y 25% de la banda superior
+        # 1. VWAP en subida (inclinación positiva)
+        # 2. Vela abrió sobre VWAP
+        # 3. Mecha tocó/perforó VWAP
+        # 4. Cuerpo sobre VWAP (mecha pura)
+        # 5. Distancia entre 5 ticks y 25% de la banda superior
         # -------------------------------------------------------------
         dist_long = bar_close - bar_vwap
         wick_long = (bar_low <= bar_vwap)
@@ -469,7 +496,7 @@ class AxiomEngine:
         min_confirm_long = (dist_long >= min_confirm_dist)
         within_corridor_long = (dist_long <= max_corridor_dist)
 
-        if wick_long and pure_wick_long and min_confirm_long and within_corridor_long:
+        if trend_ok_long and wick_long and pure_wick_long and min_confirm_long and within_corridor_long:
             setup_type = "LONG"
 
         if not setup_type:
@@ -514,8 +541,10 @@ class AxiomEngine:
         is_current_candle = (bar_index == -1)
         candle_desc = f"Vela 30m en desarrollo ({candle_ts.strftime('%H:%M')} UTC)" if is_current_candle else f"Vela 30m cerrada ({candle_ts.strftime('%H:%M')} UTC)"
 
+        trend_desc = "VWAP en bajada" if setup_type == "SHORT" else "VWAP en subida"
         condicion_desc = (
             f"VWAP Wick Rejection 30M ({setup_type}) | "
+            f"Tendencia: {trend_desc} (ΔVWAP: {vwap_delta:+.4f}) | "
             f"{candle_desc} | Mecha pura en VWAP | "
             f"Dist VWAP: {dist_vwap_ticks}t (Corredor 5t-{max_corridor_ticks}t) | "
             f"SL Fijo 5t VWAP ({precio_sl:.2f} / {sl_ticks}t) | "
@@ -531,6 +560,8 @@ class AxiomEngine:
             "sl_ticks": sl_ticks,
             "tp_ticks": tp_ticks,
             "vwap_cruce": bar_vwap,
+            "vwap_delta": vwap_delta,
+            "vwap_trend": "RISING" if is_vwap_rising else ("FALLING" if is_vwap_falling else "FLAT"),
             "banda_objetivo": banda_objetivo,
             "upper_band": bar_upper,
             "lower_band": bar_lower,
@@ -2387,6 +2418,7 @@ class AxiomEngine:
                                         state["last_executed_candle_ts"] = candle_ts
                                         self.log(
                                             f"⚡ [{sym}] ¡Señal activada en evaluación 5M! ({setup['direccion']}) | "
+                                            f"Tendencia: {setup.get('vwap_trend')} (Δ: {setup.get('vwap_delta', 0.0):+.4f}) | "
                                             f"Entrada @ {setup['precio_entrada']:.2f} | VWAP: {setup['vwap_cruce']:.2f} | "
                                             f"Dist VWAP: {setup.get('dist_vwap_ticks', 0)}t (Tope 25%: {setup.get('max_corridor_ticks', 0)}t) | "
                                             f"SL Fijo 5t VWAP: {setup['precio_sl']:.2f} ({setup['sl_ticks']}t) | "
@@ -2404,7 +2436,7 @@ class AxiomEngine:
                                     slot_str = datetime.fromtimestamp(current_5m_slot, timezone.utc).strftime('%H:%M')
                                     next_slot_str = datetime.fromtimestamp(current_5m_slot + 300, timezone.utc).strftime('%H:%M')
                                     self.log(
-                                        f"🔍 [{sym}] Evaluación 5M ({slot_str} UTC): Sin setup en vela 30m (mecha no tocó VWAP o fuera del corredor 5t-25% banda). Próxima revisión: {next_slot_str} UTC.",
+                                        f"🔍 [{sym}] Evaluación 5M ({slot_str} UTC): Sin setup en vela 30m (filtro tendencia VWAP, mecha o corredor 5t-25% banda). Próxima revisión: {next_slot_str} UTC.",
                                         "DEBUG", sym
                                     )
 

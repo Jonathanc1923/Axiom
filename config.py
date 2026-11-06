@@ -54,6 +54,10 @@ MAX_ENTRY_BAND_RATIO = float(os.getenv("MAX_ENTRY_BAND_RATIO", "0.25"))
 # Límite Estricto de Operaciones: Máximo 1 operación por vela de 30 minutos por cada símbolo
 MAX_TRADES_PER_30M_CANDLE = int(os.getenv("MAX_TRADES_PER_30M_CANDLE", "1"))
 
+# Filtro de Tendencia de VWAP: LONG solo si VWAP sube; SHORT solo si VWAP baja
+USE_VWAP_TREND_FILTER = os.getenv("USE_VWAP_TREND_FILTER", "true").lower() in ("true", "1", "yes")
+VWAP_TREND_LOOKBACK_BARS = int(os.getenv("VWAP_TREND_LOOKBACK_BARS", "1"))
+
 # Intervalo central de monitoreo y actualización de mercado (cada 1.0 segundo estricto)
 POLL_INTERVAL_SECONDS = float(os.getenv("POLL_INTERVAL_SECONDS", "1.0"))
 
@@ -116,8 +120,8 @@ LOCK_PROFIT_TICKS = 0
 EXPAND_TP_PCT = 0.0
 STEP_SL_PCT = 0.0
 MIN_PREV_CANDLE_DIFF_TICKS = 0
-USE_VWAP_SLOPE_FILTER = False
-VWAP_SLOPE_LOOKBACK_BARS = 0
+USE_VWAP_SLOPE_FILTER = USE_VWAP_TREND_FILTER
+VWAP_SLOPE_LOOKBACK_BARS = VWAP_TREND_LOOKBACK_BARS
 MIN_VWAP_SLOPE_TICKS = 0
 INITIAL_SL_TICKS = 35
 INITIAL_SL_TICKS_ES = 35
