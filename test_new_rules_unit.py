@@ -14,14 +14,15 @@ class TestNewVwap30mRules(unittest.TestCase):
         self.mock_client.search_open_orders.return_value = []
         self.mock_client.resolve_contract.return_value = {"id": "CON_ES_TEST", "name": "ESZ6"}
         self.engine = AxiomEngine(client=self.mock_client, default_symbol="ES")
-        self.engine.account_id = 29409647
+        self.engine.account_id = 29611278
 
-    def _create_2bar_df(self, closed_bar, curr_bar, vwap=5000.0, std_dev=20.0):
+    def _create_2bar_df(self, closed_bar, curr_bar, vwap=5000.0, std_dev=20.0, vwap_prev=None):
+        v_prev = vwap if vwap_prev is None else vwap_prev
         data = [
             {
                 "Timestamp": pd.Timestamp("2026-11-04 04:00:00", tz="UTC"),
                 "Open": closed_bar["o"], "High": closed_bar["h"], "Low": closed_bar["l"], "Close": closed_bar["c"],
-                "Volume": 1000, "VWAP": vwap, "Upper_Band": vwap + std_dev, "Lower_Band": vwap - std_dev
+                "Volume": 1000, "VWAP": v_prev, "Upper_Band": v_prev + std_dev, "Lower_Band": v_prev - std_dev
             },
             {
                 "Timestamp": pd.Timestamp("2026-11-04 04:30:00", tz="UTC"),
@@ -44,8 +45,10 @@ class TestNewVwap30mRules(unittest.TestCase):
         closed_bar = {"o": 4990.0, "h": 4995.0, "l": 4985.0, "c": 4992.0}
         curr_bar = {"o": 4998.0, "h": 5002.0, "l": 4996.0, "c": 4998.0}
 
-        df = self._create_2bar_df(closed_bar, curr_bar, vwap=vwap, std_dev=std_dev)
-        setup = self.engine.verificar_setup_vwap(df, "ES", current_price=4998.0, bar_index=-1)
+        df = self._create_2bar_df(closed_bar, curr_bar, vwap=vwap, std_dev=std_dev, vwap_prev=5002.0)
+        from unittest.mock import patch
+        with patch("engine.INVERT_STRATEGY", False):
+            setup = self.engine.verificar_setup_vwap(df, "ES", current_price=4998.0, bar_index=-1)
 
         self.assertIsNotNone(setup, "Debe generar setup SHORT válido dentro del corredor")
         self.assertEqual(setup["direccion"], "SHORT")
@@ -70,8 +73,10 @@ class TestNewVwap30mRules(unittest.TestCase):
         closed_bar = {"o": 5010.0, "h": 5015.0, "l": 5005.0, "c": 5008.0}
         curr_bar = {"o": 5002.0, "h": 5005.0, "l": 4998.0, "c": 5002.0}
 
-        df = self._create_2bar_df(closed_bar, curr_bar, vwap=vwap, std_dev=std_dev)
-        setup = self.engine.verificar_setup_vwap(df, "ES", current_price=5002.0, bar_index=-1)
+        df = self._create_2bar_df(closed_bar, curr_bar, vwap=vwap, std_dev=std_dev, vwap_prev=4998.0)
+        from unittest.mock import patch
+        with patch("engine.INVERT_STRATEGY", False):
+            setup = self.engine.verificar_setup_vwap(df, "ES", current_price=5002.0, bar_index=-1)
 
         self.assertIsNotNone(setup, "Debe generar setup LONG válido dentro del corredor")
         self.assertEqual(setup["direccion"], "LONG")
@@ -183,7 +188,7 @@ class TestNewVwap30mRules(unittest.TestCase):
 
     def test_new_configuration_values(self):
         """Verifica que los parámetros de configuración coincidan con las nuevas reglas y la nueva cuenta."""
-        self.assertEqual(config.ACCOUNT_NAME, "PRAC-V2-460183-70487469")
+        self.assertEqual(config.ACCOUNT_NAME, "PRAC-V2-460183-95078649")
         self.assertEqual(config.BAR_TIMEFRAME_MINUTES, 30)
         self.assertEqual(config.CHECK_INTERVAL_MINUTES, 5)
         self.assertEqual(config.MIN_ENTRY_CONFIRM_TICKS, 5)
