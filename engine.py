@@ -51,7 +51,7 @@ from config import (
     BAR_UNIT, BAR_TIMEFRAME_MINUTES, SL_VWAP_DISTANCE_TICKS, USE_DYNAMIC_SL,
     TOPSTEP_SYNC_INTERVAL_SECONDS, CHECK_INTERVAL_MINUTES,
     MIN_ENTRY_CONFIRM_TICKS, MAX_ENTRY_BAND_RATIO, MAX_TRADES_PER_30M_CANDLE,
-    USE_VWAP_TREND_FILTER, VWAP_TREND_LOOKBACK_BARS
+    USE_VWAP_TREND_FILTER, VWAP_TREND_LOOKBACK_BARS, INVERT_STRATEGY
 )
 from topstep_client import TopstepClient
 
@@ -503,37 +503,63 @@ class AxiomEngine:
             return None
 
         # -------------------------------------------------------------
-        # STOP LOSS FIJO: A EXACTAMENTE 5 TICKS DE DISTANCIA DE LA LÍNEA VWAP
+        # NIVELES BASE (SL Y TP ORIGINALES DEL RECHAZO)
         # -------------------------------------------------------------
         sl_dist_pts = SL_VWAP_DISTANCE_TICKS * tick_size  # 5 ticks
         if setup_type == "SHORT":
-            precio_sl = round_to_tick(bar_vwap + sl_dist_pts, tick_size)
-            if precio_sl <= bar_close:
-                precio_sl = round_to_tick(bar_close + (2 * tick_size), tick_size)
+            precio_sl_base = round_to_tick(bar_vwap + sl_dist_pts, tick_size)
+            if precio_sl_base <= bar_close:
+                precio_sl_base = round_to_tick(bar_close + (2 * tick_size), tick_size)
             banda_objetivo = bar_lower
             dist_vwap_actual = dist_short
         else:  # LONG
-            precio_sl = round_to_tick(bar_vwap - sl_dist_pts, tick_size)
-            if precio_sl >= bar_close:
-                precio_sl = round_to_tick(bar_close - (2 * tick_size), tick_size)
+            precio_sl_base = round_to_tick(bar_vwap - sl_dist_pts, tick_size)
+            if precio_sl_base >= bar_close:
+                precio_sl_base = round_to_tick(bar_close - (2 * tick_size), tick_size)
             banda_objetivo = bar_upper
             dist_vwap_actual = dist_long
 
-        sl_ticks = max(2, round(abs(precio_sl - bar_close) / tick_size))
-
         # -------------------------------------------------------------
-        # TAKE PROFIT: 50% DE DISTANCIA ENTRE VWAP Y SIGUIENTE BANDA
+        # TAKE PROFIT BASE: 50% DE DISTANCIA ENTRE VWAP Y SIGUIENTE BANDA
         # -------------------------------------------------------------
         d_tp = round_to_tick(TP_VWAP_BAND_RATIO * std_dev, tick_size)
         if d_tp < 2 * tick_size:
             d_tp = 2 * tick_size
 
-        tp_ticks = round(d_tp / tick_size)
-
         if setup_type == "SHORT":
-            precio_tp = round_to_tick(bar_close - d_tp, tick_size)
+            precio_tp_base = round_to_tick(bar_close - d_tp, tick_size)
         else:  # LONG
-            precio_tp = round_to_tick(bar_close + d_tp, tick_size)
+            precio_tp_base = round_to_tick(bar_close + d_tp, tick_size)
+
+        # -------------------------------------------------------------
+        # MODO INVERTIDO (Donde teníamos SL ahora es TP, donde teníamos TP ahora es SL):
+        # Para que el antiguo SL sea TP y el antiguo TP sea SL, la dirección se invierte:
+        # SHORT -> LONG con TP en VWAP+5t (ganancia corta) y SL en banda (pérdida larga).
+        # LONG -> SHORT con TP en VWAP-5t (ganancia corta) y SL en banda (pérdida larga).
+        # -------------------------------------------------------------
+        if INVERT_STRATEGY:
+            exec_direction = "LONG" if setup_type == "SHORT" else "SHORT"
+            precio_tp = precio_sl_base
+            precio_sl = precio_tp_base
+        else:
+            exec_direction = setup_type
+            precio_tp = precio_tp_base
+            precio_sl = precio_sl_base
+
+        # Validaciones de seguridad de brackets según la dirección de ejecución:
+        if exec_direction == "LONG":
+            if precio_tp <= bar_close:
+                precio_tp = round_to_tick(bar_close + (4 * tick_size), tick_size)
+            if precio_sl >= bar_close:
+                precio_sl = round_to_tick(bar_close - (4 * tick_size), tick_size)
+        else:  # SHORT
+            if precio_tp >= bar_close:
+                precio_tp = round_to_tick(bar_close - (4 * tick_size), tick_size)
+            if precio_sl <= bar_close:
+                precio_sl = round_to_tick(bar_close + (4 * tick_size), tick_size)
+
+        sl_ticks = max(2, round(abs(precio_sl - bar_close) / tick_size))
+        tp_ticks = max(2, round(abs(precio_tp - bar_close) / tick_size))
 
         now_utc = datetime.now(timezone.utc)
         dist_vwap_ticks = round(dist_vwap_actual / tick_size)
@@ -542,18 +568,21 @@ class AxiomEngine:
         candle_desc = f"Vela 30m en desarrollo ({candle_ts.strftime('%H:%M')} UTC)" if is_current_candle else f"Vela 30m cerrada ({candle_ts.strftime('%H:%M')} UTC)"
 
         trend_desc = "VWAP en bajada" if setup_type == "SHORT" else "VWAP en subida"
+        mode_str = "INVERTIDO (SL->TP / TP->SL)" if INVERT_STRATEGY else "ESTÁNDAR"
         condicion_desc = (
-            f"VWAP Wick Rejection 30M ({setup_type}) | "
-            f"Tendencia: {trend_desc} (ΔVWAP: {vwap_delta:+.4f}) | "
+            f"VWAP Wick Rejection 30M [{mode_str}] ({exec_direction}) | "
+            f"Setup Base: {setup_type} | Tendencia: {trend_desc} (ΔVWAP: {vwap_delta:+.4f}) | "
             f"{candle_desc} | Mecha pura en VWAP | "
             f"Dist VWAP: {dist_vwap_ticks}t (Corredor 5t-{max_corridor_ticks}t) | "
-            f"SL Fijo 5t VWAP ({precio_sl:.2f} / {sl_ticks}t) | "
-            f"TP 50% Banda ({precio_tp:.2f} / {tp_ticks}t)"
+            f"SL ({precio_sl:.2f} / {sl_ticks}t) | "
+            f"TP ({precio_tp:.2f} / {tp_ticks}t)"
         )
 
         return {
             "simbolo": sym,
-            "direccion": setup_type,
+            "direccion": exec_direction,
+            "setup_base": setup_type,
+            "es_invertido": INVERT_STRATEGY,
             "precio_entrada": bar_close,
             "precio_sl": precio_sl,
             "precio_tp": precio_tp,
@@ -566,7 +595,7 @@ class AxiomEngine:
             "upper_band": bar_upper,
             "lower_band": bar_lower,
             "std_dev": std_dev,
-            "d_base": d_tp,
+            "d_base": abs(precio_tp - bar_close),
             "dist_vwap_ticks": dist_vwap_ticks,
             "max_corridor_ticks": max_corridor_ticks,
             "condicion_tecnica": condicion_desc,
@@ -2416,13 +2445,14 @@ class AxiomEngine:
                                     # REGLA ESTRICTA: Máximo 1 operación por vela de 30 minutos por cada símbolo
                                     if state.get("last_executed_candle_ts") != candle_ts:
                                         state["last_executed_candle_ts"] = candle_ts
+                                        inv_tag = " [INVERTIDO]" if setup.get("es_invertido") else ""
                                         self.log(
-                                            f"⚡ [{sym}] ¡Señal activada en evaluación 5M! ({setup['direccion']}) | "
+                                            f"⚡ [{sym}] ¡Señal activada en evaluación 5M! ({setup['direccion']}{inv_tag}) | "
                                             f"Tendencia: {setup.get('vwap_trend')} (Δ: {setup.get('vwap_delta', 0.0):+.4f}) | "
                                             f"Entrada @ {setup['precio_entrada']:.2f} | VWAP: {setup['vwap_cruce']:.2f} | "
                                             f"Dist VWAP: {setup.get('dist_vwap_ticks', 0)}t (Tope 25%: {setup.get('max_corridor_ticks', 0)}t) | "
-                                            f"SL Fijo 5t VWAP: {setup['precio_sl']:.2f} ({setup['sl_ticks']}t) | "
-                                            f"TP 50% Banda: {setup['precio_tp']:.2f} ({setup['tp_ticks']}t) | "
+                                            f"SL: {setup['precio_sl']:.2f} ({setup['sl_ticks']}t) | "
+                                            f"TP: {setup['precio_tp']:.2f} ({setup['tp_ticks']}t) | "
                                             f"Vela 30m: {candle_ts.strftime('%H:%M')} UTC",
                                             "ORDER", sym
                                         )

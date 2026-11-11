@@ -1,0 +1,250 @@
+//@version=5
+strategy("Axiom VWAP Wick Rejection 30M (Filtro Tendencia VWAP)", 
+     shorttitle="Axiom VWAP 30M (VWAP Trend)", 
+     overlay=true, 
+     initial_capital=150000, 
+     default_qty_type=strategy.fixed, 
+     default_qty_value=1, 
+     commission_type=strategy.commission.cash_per_order, 
+     commission_value=2.16, 
+     currency=currency.USD, 
+     process_orders_on_close=true)
+
+// =============================================================================
+// 1. PARÁMETROS INSTITUCIONALES CONFIGURABLES
+// =============================================================================
+grp_strat = "Parámetros de Estrategia"
+min_confirm_ticks  = input.int(5, "Confirmación Mínima (Ticks desde VWAP)", minval=1, group=grp_strat,
+                     tooltip="Margen mínimo que el precio debe alejarse del VWAP a nuestro favor para confirmar el rechazo.")
+max_corridor_pct   = input.float(25.0, "Tope Máximo Distancia (% VWAP a Banda)", minval=1.0, maxval=100.0, step=1.0, group=grp_strat,
+                     tooltip="Tope máximo permitido: 25% de la distancia entre VWAP y la banda de 1 STD.") / 100.0
+
+// Stop Loss: 15% de la distancia entre VWAP y la banda
+sl_band_ratio      = input.float(15.0, "Distancia SL (% VWAP a Banda)", minval=1.0, maxval=100.0, step=1.0, group=grp_strat,
+                     tooltip="Stop Loss colocado al 15% de la distancia de la banda por detrás de la línea VWAP.") / 100.0
+
+tp_band_ratio      = input.float(50.0, "Take Profit (% Distancia VWAP a Banda)", minval=5.0, maxval=100.0, step=5.0, group=grp_strat,
+                     tooltip="Take Profit colocado al 50% de la distancia a la banda.") / 100.0
+
+grp_mode = "Modo de Ejecución (Invertido vs Normal)"
+invert_strategy    = input.bool(true, "Invertir Estrategia (Donde era SL ahora es TP, donde era TP ahora es SL)", group=grp_mode,
+                     tooltip="Si está activo: SHORT ejecuta LONG con TP en VWAP y SL en banda; LONG ejecuta SHORT con TP en VWAP y SL en banda. Ganará poco cuando gane y perderá mucho cuando pierda.")
+
+grp_trend = "Filtro de Tendencia de VWAP (Exclusivo)"
+use_vwap_trend     = input.bool(true, "Activar Filtro de Tendencia de VWAP", group=grp_trend,
+                     tooltip="LONG solo si VWAP está en subida. SHORT solo si VWAP está en bajada.")
+vwap_lookback_bars = input.int(1, "Barras para Medir Dirección de VWAP", minval=1, maxval=20, group=grp_trend,
+                     tooltip="Compara el VWAP de la barra actual con el de hace N barras (1 barra por defecto).")
+colorize_vwap      = input.bool(true, "Colorear VWAP según Tendencia (Verde=Sube, Rojo=Baja)", group=grp_trend)
+
+grp_session = "Horarios Institucionales CME (America/New_York)"
+apply_cme_buffer   = input.bool(false, "Aplicar Buffer 2h Post-Apertura (18:00 a 20:00 ET)", group=grp_session,
+                     tooltip="Si está activo, bloquea entradas entre 18:00 y 20:00 ET.")
+
+grp_vis = "Visualización y Señales"
+show_bands         = input.bool(true, "Mostrar Bandas VWAP (+/- 1 Desviación Estándar)", group=grp_vis)
+show_corridor      = input.bool(true, "Mostrar Corredor de Entrada (Tope 25%)", group=grp_vis)
+
+// =============================================================================
+// 2. CÁLCULO INSTITUCIONAL DE VWAP Y BANDAS (+/- 1 STD)
+// =============================================================================
+// Detección matemática infalible del cambio de sesión CME (18:00 ET New York):
+cme_session_day = dayofmonth(time + 6 * 3600000, "America/New_York")
+is_new_session  = ta.change(cme_session_day) != 0 or bar_index == 0
+
+var float cum_vol  = 0.0
+var float cum_pv   = 0.0
+var float cum_pv2  = 0.0
+
+hlc3_price = (high + low + close) / 3.0
+pv         = hlc3_price * volume
+pv2        = math.pow(hlc3_price, 2) * volume
+
+if is_new_session
+    cum_vol := volume
+    cum_pv  := pv
+    cum_pv2 := pv2
+else
+    cum_vol += volume
+    cum_pv  += pv
+    cum_pv2 += pv2
+
+vwap_val     = cum_vol > 0 ? (cum_pv / cum_vol) : hlc3_price
+variance_val = cum_vol > 0 ? math.max(0.0, (cum_pv2 / cum_vol) - math.pow(vwap_val, 2)) : 0.0
+std_dev_val  = math.sqrt(variance_val)
+
+upper_band   = vwap_val + std_dev_val
+lower_band   = vwap_val - std_dev_val
+
+// Límites del corredor del 25% (filtro de entrada)
+upper_corridor = vwap_val + (max_corridor_pct * std_dev_val)
+lower_corridor = vwap_val - (max_corridor_pct * std_dev_val)
+
+// =============================================================================
+// 3. MEDICIÓN DE LA TENDENCIA / PENDIENTE DEL VWAP
+// =============================================================================
+// Cambio del VWAP respecto a hace N barras
+vwap_delta = vwap_val - nz(vwap_val[vwap_lookback_bars], vwap_val)
+
+is_vwap_rising  = vwap_delta > 0
+is_vwap_falling = vwap_delta < 0
+
+// Filtros estrictos de dirección:
+// LONG solo si VWAP sube; SHORT solo si VWAP baja
+trend_ok_long  = not use_vwap_trend or is_vwap_rising
+trend_ok_short = not use_vwap_trend or is_vwap_falling
+
+// =============================================================================
+// 4. CONSTRUCCIÓN DE LA VELA DINÁMICA DE 30 MINUTOS
+// =============================================================================
+current_30m_id = math.floor(time / 1800000) * 1800000
+
+var float candle_30m_open = na
+var float candle_30m_high = na
+var float candle_30m_low  = na
+var int   last_seen_30m   = 0
+
+is_new_30m = (current_30m_id != last_seen_30m) or is_new_session
+
+if is_new_30m
+    candle_30m_open := open
+    candle_30m_high := high
+    candle_30m_low  := low
+    last_seen_30m   := current_30m_id
+else
+    candle_30m_high := math.max(nz(candle_30m_high, high), high)
+    candle_30m_low  := math.min(nz(candle_30m_low, low), low)
+
+candle_30m_close = close
+
+// =============================================================================
+// 5. CONTROL DE HORARIO CME Y CANDADO INSTITUCIONAL
+// =============================================================================
+hour_ny        = hour(time, "America/New_York")
+dayofweek_ny   = dayofweek(time, "America/New_York")
+
+// Pausa diaria de mantenimiento CME: 17:00 a 17:59 ET (Lunes a Jueves)
+is_daily_pause = (hour_ny == 17)
+
+// Buffer opcional de 2 horas post-apertura: 18:00 a 19:59 ET
+is_cme_buffer  = apply_cme_buffer and (hour_ny == 18 or hour_ny == 19)
+
+// Fin de semana CME
+is_weekend     = (dayofweek_ny == dayofweek.saturday) or 
+                 (dayofweek_ny == dayofweek.friday and hour_ny >= 17) or 
+                 (dayofweek_ny == dayofweek.sunday and hour_ny < 18)
+
+is_operable_time = not is_daily_pause and not is_cme_buffer and not is_weekend
+
+// Candado: Máximo 1 operación por vela de 30 minutos
+var int last_traded_30m_id = 0
+can_trade_in_this_30m = (last_traded_30m_id != current_30m_id)
+
+// =============================================================================
+// 6. EVALUACIÓN Y GATILLO DE ENTRADA CON FILTRO VWAP
+// =============================================================================
+tick_size = syminfo.mintick
+min_confirm_pts  = min_confirm_ticks * tick_size
+max_corridor_pts = max_corridor_pct * std_dev_val
+
+// Distancias del precio respecto a VWAP
+dist_short = vwap_val - candle_30m_close
+dist_long  = candle_30m_close - vwap_val
+
+// --- CONDICIÓN SHORT ---
+wick_short       = (candle_30m_high >= vwap_val)
+pure_wick_short  = (candle_30m_open < vwap_val) and (math.max(candle_30m_open, candle_30m_close) < vwap_val)
+confirm_short    = (dist_short >= min_confirm_pts) and (dist_short <= max_corridor_pts)
+
+setup_short = is_operable_time and 
+              can_trade_in_this_30m and 
+              (strategy.position_size == 0) and 
+              (std_dev_val > 0) and 
+              trend_ok_short and 
+              wick_short and 
+              pure_wick_short and 
+              confirm_short
+
+// --- CONDICIÓN LONG ---
+wick_long        = (candle_30m_low <= vwap_val)
+pure_wick_long   = (candle_30m_open > vwap_val) and (math.min(candle_30m_open, candle_30m_close) > vwap_val)
+confirm_long     = (dist_long >= min_confirm_pts) and (dist_long <= max_corridor_pts)
+
+setup_long  = is_operable_time and 
+              can_trade_in_this_30m and 
+              (strategy.position_size == 0) and 
+              (std_dev_val > 0) and 
+              trend_ok_long and 
+              wick_long and 
+              pure_wick_long and 
+              confirm_long
+
+// =============================================================================
+// 7. EJECUCIÓN CON BRACKETS OCO FIJOS (SL 15% BANDA | TP 50% BANDA)
+// =============================================================================
+var float entry_sl_price = na
+var float entry_tp_price = na
+
+if setup_short
+    sl_dist = math.max(tick_size, sl_band_ratio * std_dev_val)
+    tp_dist = tp_band_ratio * std_dev_val
+    if invert_strategy
+        // Invertido: ejecutamos LONG.
+        // TP donde estaba SL (vwap_val + sl_dist, ganancia pequeña hacia VWAP)
+        // SL donde estaba TP (candle_30m_close - tp_dist, pérdida grande hacia la banda)
+        entry_tp_price := vwap_val + sl_dist
+        entry_sl_price := candle_30m_close - tp_dist
+        last_traded_30m_id := current_30m_id
+        strategy.entry("LONG (INV)", strategy.long)
+        strategy.exit("SL/TP LONG INV", "LONG (INV)", stop=entry_sl_price, limit=entry_tp_price)
+    else
+        entry_sl_price := vwap_val + sl_dist
+        entry_tp_price := candle_30m_close - tp_dist
+        last_traded_30m_id := current_30m_id
+        strategy.entry("SHORT", strategy.short)
+        strategy.exit("SL/TP SHORT", "SHORT", stop=entry_sl_price, limit=entry_tp_price)
+
+if setup_long
+    sl_dist = math.max(tick_size, sl_band_ratio * std_dev_val)
+    tp_dist = tp_band_ratio * std_dev_val
+    if invert_strategy
+        // Invertido: ejecutamos SHORT.
+        // TP donde estaba SL (vwap_val - sl_dist, ganancia pequeña hacia VWAP)
+        // SL donde estaba TP (candle_30m_close + tp_dist, pérdida grande hacia la banda)
+        entry_tp_price := vwap_val - sl_dist
+        entry_sl_price := candle_30m_close + tp_dist
+        last_traded_30m_id := current_30m_id
+        strategy.entry("SHORT (INV)", strategy.short)
+        strategy.exit("SL/TP SHORT INV", "SHORT (INV)", stop=entry_sl_price, limit=entry_tp_price)
+    else
+        entry_sl_price := vwap_val - sl_dist
+        entry_tp_price := candle_30m_close + tp_dist
+        last_traded_30m_id := current_30m_id
+        strategy.entry("LONG", strategy.long)
+        strategy.exit("SL/TP LONG", "LONG", stop=entry_sl_price, limit=entry_tp_price)
+
+// Resetear niveles al salir de posición
+if strategy.position_size == 0
+    entry_sl_price := na
+    entry_tp_price := na
+
+// =============================================================================
+// 8. GRAFICACIÓN Y TELEMETRÍA EN PANTALLA
+// =============================================================================
+// Color dinámico del VWAP: Verde cuando sube, Rojo cuando baja
+vwap_color = not colorize_vwap ? color.new(#00E5FF, 0) : 
+             (is_vwap_rising ? color.new(#00E676, 0) : (is_vwap_falling ? color.new(#FF5252, 0) : color.new(#00E5FF, 0)))
+
+plot(vwap_val, title="VWAP Sesión CME", color=vwap_color, linewidth=2)
+plot(show_bands ? upper_band : na, title="+1 STD Banda", color=color.new(#FF5252, 20), linewidth=1, style=plot.style_line)
+plot(show_bands ? lower_band : na, title="-1 STD Banda", color=color.new(#00E676, 20), linewidth=1, style=plot.style_line)
+
+plot(show_corridor ? upper_corridor : na, title="Tope 25% Superior", color=color.new(#FFB74D, 60), style=plot.style_circles)
+plot(show_corridor ? lower_corridor : na, title="Tope 25% Inferior", color=color.new(#FFB74D, 60), style=plot.style_circles)
+
+plotshape(setup_short, title="Señal SHORT", style=shape.triangledown, location=location.abovebar, color=#FF5252, size=size.small, text="SHORT")
+plotshape(setup_long,  title="Señal LONG",  style=shape.triangleup,   location=location.belowbar, color=#00E676, size=size.small, text="LONG")
+
+// Sombreado de horarios especiales
+bgcolor(is_daily_pause ? color.new(color.gray, 85) : na, title="Pausa CME 17-18 ET")
+bgcolor(is_cme_buffer  ? color.new(color.purple, 90) : na, title="Buffer CME 18-20 ET")

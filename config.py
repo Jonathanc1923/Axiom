@@ -58,6 +58,10 @@ MAX_TRADES_PER_30M_CANDLE = int(os.getenv("MAX_TRADES_PER_30M_CANDLE", "1"))
 USE_VWAP_TREND_FILTER = os.getenv("USE_VWAP_TREND_FILTER", "true").lower() in ("true", "1", "yes")
 VWAP_TREND_LOOKBACK_BARS = int(os.getenv("VWAP_TREND_LOOKBACK_BARS", "1"))
 
+# Modo Invertido: Donde teníamos SL ahora es TP, y donde teníamos TP ahora es SL
+# Gana poco cuando gana (distancia pequeña a VWAP), pierde mucho cuando pierde (distancia grande a banda)
+INVERT_STRATEGY = os.getenv("INVERT_STRATEGY", "true").lower() in ("true", "1", "yes")
+
 # Intervalo central de monitoreo y actualización de mercado (cada 1.0 segundo estricto)
 POLL_INTERVAL_SECONDS = float(os.getenv("POLL_INTERVAL_SECONDS", "1.0"))
 
