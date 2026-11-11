@@ -54,9 +54,9 @@ class TestNewVwap30mRules(unittest.TestCase):
         self.assertEqual(setup["direccion"], "SHORT")
         # SL fijo a 5 ticks de VWAP (5 * 0.25 = 1.25 pts arriba de VWAP = 5001.25)
         self.assertEqual(setup["precio_sl"], 5001.25, "SL debe estar fijo a 5 ticks por encima de VWAP")
-        # TP con el 50% de la distancia entre VWAP y banda (10.0 pts) desde entrada (4998.0 - 10.0 = 4988.0)
-        self.assertEqual(setup["precio_tp"], 4988.0, "TP debe estar a 10.0 pts de la entrada")
-        self.assertEqual(setup["tp_ticks"], 40, "TP debe ser exactamente 40 ticks")
+        # TP con el 20% de la distancia entre VWAP y banda (4.0 pts) desde entrada (4998.0 - 4.0 = 4994.0)
+        self.assertEqual(setup["precio_tp"], 4994.0, "TP debe estar a 4.0 pts de la entrada")
+        self.assertEqual(setup["tp_ticks"], 16, "TP debe ser exactamente 16 ticks")
         self.assertEqual(setup["dist_vwap_ticks"], 8, "Distancia a VWAP debe ser 8 ticks")
         self.assertEqual(setup["max_corridor_ticks"], 20, "Tope máximo 25% debe ser 20 ticks")
 
@@ -82,9 +82,9 @@ class TestNewVwap30mRules(unittest.TestCase):
         self.assertEqual(setup["direccion"], "LONG")
         # SL fijo a 5 ticks de VWAP (5 * 0.25 = 1.25 pts abajo de VWAP = 4998.75)
         self.assertEqual(setup["precio_sl"], 4998.75, "SL debe estar fijo a 5 ticks por debajo de VWAP")
-        # TP con el 50% de la distancia entre VWAP y banda (10.0 pts) desde entrada (5002.0 + 10.0 = 5012.0)
-        self.assertEqual(setup["precio_tp"], 5012.0, "TP debe estar a 10.0 pts de la entrada")
-        self.assertEqual(setup["tp_ticks"], 40, "TP debe ser exactamente 40 ticks")
+        # TP con el 20% de la distancia entre VWAP y banda (4.0 pts) desde entrada (5002.0 + 4.0 = 5006.0)
+        self.assertEqual(setup["precio_tp"], 5006.0, "TP debe estar a 4.0 pts de la entrada")
+        self.assertEqual(setup["tp_ticks"], 16, "TP debe ser exactamente 16 ticks")
 
     def test_setup_rejected_if_less_than_5_ticks_confirmation(self):
         """Rechazar si el precio no se ha confirmado al menos 5 ticks de nuestro lado."""
@@ -195,7 +195,7 @@ class TestNewVwap30mRules(unittest.TestCase):
         self.assertEqual(config.MAX_ENTRY_BAND_RATIO, 0.25)
         self.assertEqual(config.MAX_TRADES_PER_30M_CANDLE, 1)
         self.assertEqual(config.SL_VWAP_DISTANCE_TICKS, 5)
-        self.assertEqual(config.TP_VWAP_BAND_RATIO, 0.50)
+        self.assertEqual(config.TP_VWAP_BAND_RATIO, 0.20)
         self.assertFalse(config.USE_DYNAMIC_SL)
         self.assertEqual(config.POLL_INTERVAL_SECONDS, 1.0)
 

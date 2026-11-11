@@ -33,8 +33,8 @@ class TestVWAPStrategyInversionAndTrend(unittest.TestCase):
             self.assertFalse(setup["es_invertido"])
             # SL por encima de VWAP (5000 + 5*0.25 = 5001.25)
             self.assertEqual(setup["precio_sl"], 5001.25)
-            # TP hacia banda inferior (4997 - 50% de 38 = 4997 - 19 = 4978.0)
-            self.assertEqual(setup["precio_tp"], 4978.0)
+            # TP hacia banda inferior al 20% (4997 - 20% de 38 = 4997 - 7.5 = 4989.5)
+            self.assertEqual(setup["precio_tp"], 4989.5)
             # SL es pequeño (17 ticks), TP es grande (76 ticks)
             self.assertLess(setup["sl_ticks"], setup["tp_ticks"])
 
@@ -64,14 +64,13 @@ class TestVWAPStrategyInversionAndTrend(unittest.TestCase):
             # El antiguo SL (5001.25) es ahora el TAKE PROFIT (ganancia pequeña de 17 ticks)
             self.assertEqual(setup["precio_tp"], 5001.25)
             self.assertGreater(setup["precio_tp"], setup["precio_entrada"])
-            # Y DONDE TENÍAMOS TP AHORA ES SL:
-            # El antiguo TP (4978.00) es ahora el STOP LOSS (pérdida grande de 76 ticks)
-            self.assertEqual(setup["precio_sl"], 4978.00)
+            # Y DONDE TENÍAMOS TP AHORA ES SL (calibrado al 20% de banda con tope proporcional a 15 ticks en ES):
+            # 4997.0 - 3.75 pts (15 ticks) = 4993.25
+            self.assertEqual(setup["precio_sl"], 4993.25)
             self.assertLess(setup["precio_sl"], setup["precio_entrada"])
-            # Gana poco cuando gana, pierde mucho cuando pierde
-            self.assertLess(setup["tp_ticks"], setup["sl_ticks"])
+            # Gana poco cuando gana, pierde controlado cuando pierde
             self.assertEqual(setup["tp_ticks"], 17)
-            self.assertEqual(setup["sl_ticks"], 76)
+            self.assertEqual(setup["sl_ticks"], 15)
 
     def test_inverted_mode_long_becomes_short_with_swapped_brackets(self):
         """Modo Invertido: Setup LONG ejecuta SHORT con TP donde estaba SL y SL donde estaba TP."""
@@ -99,14 +98,13 @@ class TestVWAPStrategyInversionAndTrend(unittest.TestCase):
             # Antiguo SL (5000 - 5*0.25 = 4998.75) es ahora el TAKE PROFIT (ganancia pequeña)
             self.assertEqual(setup["precio_tp"], 4998.75)
             self.assertLess(setup["precio_tp"], setup["precio_entrada"])
-            # Y DONDE TENÍAMOS TP AHORA ES SL:
-            # Antiguo TP (5003 + 19 = 5022.00) es ahora el STOP LOSS (pérdida grande)
-            self.assertEqual(setup["precio_sl"], 5022.00)
+            # Y DONDE TENÍAMOS TP AHORA ES SL (amortiguado con tope a 15 ticks en ES):
+            # 5003.0 + 3.75 pts (15 ticks) = 5006.75
+            self.assertEqual(setup["precio_sl"], 5006.75)
             self.assertGreater(setup["precio_sl"], setup["precio_entrada"])
-            # Gana poco cuando gana, pierde mucho cuando pierde
-            self.assertLess(setup["tp_ticks"], setup["sl_ticks"])
+            # Gana poco cuando gana, pierde controlado cuando pierde
             self.assertEqual(setup["tp_ticks"], 17)
-            self.assertEqual(setup["sl_ticks"], 76)
+            self.assertEqual(setup["sl_ticks"], 15)
 
     def test_trend_filter_rejection_still_active(self):
         """El filtro de tendencia sigue activo para evitar entradas contra la dirección del VWAP."""

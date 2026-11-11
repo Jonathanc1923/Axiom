@@ -71,8 +71,9 @@ TOPSTEP_SYNC_INTERVAL_SECONDS = float(os.getenv("TOPSTEP_SYNC_INTERVAL_SECONDS",
 # Stop Loss Fijo: 5 ticks de distancia de la línea VWAP
 SL_VWAP_DISTANCE_TICKS = int(os.getenv("SL_VWAP_DISTANCE_TICKS", "5"))
 
-# Take Profit: 50% de distancia entre el VWAP y la siguiente banda
-TP_VWAP_BAND_RATIO = float(os.getenv("TP_VWAP_BAND_RATIO", "0.50"))
+# Distancia a la Banda: Calibrado al 20% de distancia entre VWAP y Banda (amortiguación de pérdidas en modo invertido)
+INVERTED_SL_BAND_RATIO = float(os.getenv("INVERTED_SL_BAND_RATIO", "0.20"))
+TP_VWAP_BAND_RATIO = float(os.getenv("TP_VWAP_BAND_RATIO", "0.20"))
 
 # SL Dinámico desactivado: ahora el SL es fijo a 5 ticks
 USE_DYNAMIC_SL = os.getenv("USE_DYNAMIC_SL", "false").lower() in ("true", "1", "yes")
@@ -169,6 +170,7 @@ SUPPORTED_SYMBOLS = {
         "tickValue": 12.50, # USD per tick per contract
         "pointValue": 50.0,
         "defaultSlTicks": INITIAL_SL_TICKS_ES,
+        "maxInvertedSlTicks": 15, # Tope proporcional: 15t = 3.75 pts ($187.50 max)
     },
     "NQ": {
         "name": "E-mini Nasdaq-100",
@@ -178,6 +180,7 @@ SUPPORTED_SYMBOLS = {
         "tickValue": 5.00,
         "pointValue": 20.0,
         "defaultSlTicks": INITIAL_SL_TICKS_NQ,
+        "maxInvertedSlTicks": 60, # Tope proporcional: 60t = 15.0 pts ($300.00 max)
     },
     "YM": {
         "name": "E-mini Dow Jones ($5)",
@@ -187,6 +190,7 @@ SUPPORTED_SYMBOLS = {
         "tickValue": 5.00,
         "pointValue": 5.0,
         "defaultSlTicks": INITIAL_SL_TICKS_YM,
+        "maxInvertedSlTicks": 20, # Tope proporcional: 20t = 20 pts ($100.00 max)
     },
     "RTY": {
         "name": "E-mini Russell 2000",
@@ -196,6 +200,7 @@ SUPPORTED_SYMBOLS = {
         "tickValue": 5.00,
         "pointValue": 50.0,
         "defaultSlTicks": INITIAL_SL_TICKS_RTY,
+        "maxInvertedSlTicks": 16, # Tope proporcional: 16t = 1.6 pts ($80.00 max)
     },
     "MES": {
         "name": "Micro E-mini S&P 500",
@@ -205,6 +210,7 @@ SUPPORTED_SYMBOLS = {
         "tickValue": 1.25,
         "pointValue": 5.0,
         "defaultSlTicks": INITIAL_SL_TICKS_ES,
+        "maxInvertedSlTicks": 15, # Tope proporcional: 15t = 3.75 pts ($18.75 max)
     },
     "MNQ": {
         "name": "Micro E-mini Nasdaq-100",
@@ -214,6 +220,7 @@ SUPPORTED_SYMBOLS = {
         "tickValue": 0.50,
         "pointValue": 2.0,
         "defaultSlTicks": INITIAL_SL_TICKS_NQ,
+        "maxInvertedSlTicks": 60, # Tope proporcional: 60t = 15.0 pts ($30.00 max)
     },
     "CL": {
         "name": "Crude Oil Futures",
@@ -223,6 +230,7 @@ SUPPORTED_SYMBOLS = {
         "tickValue": 10.00,
         "pointValue": 1000.0,
         "defaultSlTicks": INITIAL_SL_TICKS_CL,
+        "maxInvertedSlTicks": 20, # Tope proporcional: 20t = $0.20 ($200.00 max)
     },
     "GC": {
         "name": "Gold Futures",
@@ -232,6 +240,7 @@ SUPPORTED_SYMBOLS = {
         "tickValue": 10.00,
         "pointValue": 100.0,
         "defaultSlTicks": INITIAL_SL_TICKS_GC,
+        "maxInvertedSlTicks": 20, # Tope proporcional: 20t = $2.00 ($200.00 max)
     },
     "MYM": {
         "name": "Micro E-mini Dow Jones",
@@ -241,6 +250,7 @@ SUPPORTED_SYMBOLS = {
         "tickValue": 0.50,
         "pointValue": 0.50,
         "defaultSlTicks": INITIAL_SL_TICKS_YM,
+        "maxInvertedSlTicks": 20, # Tope proporcional: 20t = 20 pts ($10.00 max)
     },
     "M2K": {
         "name": "Micro E-mini Russell 2000",
@@ -250,6 +260,7 @@ SUPPORTED_SYMBOLS = {
         "tickValue": 0.50,
         "pointValue": 5.0,
         "defaultSlTicks": INITIAL_SL_TICKS_RTY,
+        "maxInvertedSlTicks": 16, # Tope proporcional: 16t = 1.6 pts ($8.00 max)
     },
     "MGC": {
         "name": "Micro Gold Futures",
@@ -259,6 +270,7 @@ SUPPORTED_SYMBOLS = {
         "tickValue": 1.00,
         "pointValue": 10.0,
         "defaultSlTicks": INITIAL_SL_TICKS_GC,
+        "maxInvertedSlTicks": 20, # Tope proporcional: 20t = $2.00 ($20.00 max)
     },
     "MCL": {
         "name": "Micro Crude Oil Futures",
@@ -268,6 +280,7 @@ SUPPORTED_SYMBOLS = {
         "tickValue": 1.00,
         "pointValue": 100.0,
         "defaultSlTicks": INITIAL_SL_TICKS_CL,
+        "maxInvertedSlTicks": 20, # Tope proporcional: 20t = $0.20 ($20.00 max)
     }
 }
 

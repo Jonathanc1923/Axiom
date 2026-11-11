@@ -23,8 +23,8 @@ max_corridor_pct   = input.float(25.0, "Tope Máximo Distancia (% VWAP a Banda)"
 sl_band_ratio      = input.float(15.0, "Distancia SL (% VWAP a Banda)", minval=1.0, maxval=100.0, step=1.0, group=grp_strat,
                      tooltip="Stop Loss colocado al 15% de la distancia de la banda por detrás de la línea VWAP.") / 100.0
 
-tp_band_ratio      = input.float(50.0, "Take Profit (% Distancia VWAP a Banda)", minval=5.0, maxval=100.0, step=5.0, group=grp_strat,
-                     tooltip="Take Profit colocado al 50% de la distancia a la banda.") / 100.0
+tp_band_ratio      = input.float(20.0, "Distancia Nivel Banda (% VWAP a Banda)", minval=5.0, maxval=100.0, step=5.0, group=grp_strat,
+                     tooltip="Distancia a la banda calibrada al 20% (en modo invertido actúa como Stop Loss amortiguado).") / 100.0
 
 grp_mode = "Modo de Ejecución (Invertido vs Normal)"
 invert_strategy    = input.bool(true, "Invertir Estrategia (Donde era SL ahora es TP, donde era TP ahora es SL)", group=grp_mode,

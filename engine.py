@@ -51,7 +51,8 @@ from config import (
     BAR_UNIT, BAR_TIMEFRAME_MINUTES, SL_VWAP_DISTANCE_TICKS, USE_DYNAMIC_SL,
     TOPSTEP_SYNC_INTERVAL_SECONDS, CHECK_INTERVAL_MINUTES,
     MIN_ENTRY_CONFIRM_TICKS, MAX_ENTRY_BAND_RATIO, MAX_TRADES_PER_30M_CANDLE,
-    USE_VWAP_TREND_FILTER, VWAP_TREND_LOOKBACK_BARS, INVERT_STRATEGY
+    USE_VWAP_TREND_FILTER, VWAP_TREND_LOOKBACK_BARS, INVERT_STRATEGY,
+    INVERTED_SL_BAND_RATIO
 )
 from topstep_client import TopstepClient
 
@@ -520,11 +521,21 @@ class AxiomEngine:
             dist_vwap_actual = dist_long
 
         # -------------------------------------------------------------
-        # TAKE PROFIT BASE: 50% DE DISTANCIA ENTRE VWAP Y SIGUIENTE BANDA
+        # DISTANCIA DE LA BANDA (SL EN MODO INVERTIDO / TP EN MODO ESTÁNDAR):
+        # Calibrado al 20% de la distancia entre VWAP y Banda (+ tope de seguridad en ticks por símbolo)
         # -------------------------------------------------------------
-        d_tp = round_to_tick(TP_VWAP_BAND_RATIO * std_dev, tick_size)
-        if d_tp < 2 * tick_size:
-            d_tp = 2 * tick_size
+        ratio_banda = INVERTED_SL_BAND_RATIO if INVERT_STRATEGY else TP_VWAP_BAND_RATIO
+        d_banda = ratio_banda * std_dev
+
+        # Aplicar tope máximo proporcional de ticks de SL por símbolo si está en modo invertido:
+        max_sl_ticks = spec.get("maxInvertedSlTicks", 20)
+        if INVERT_STRATEGY and max_sl_ticks > 0:
+            max_sl_pts = max_sl_ticks * tick_size
+            d_banda = min(d_banda, max_sl_pts)
+
+        d_tp = round_to_tick(d_banda, tick_size)
+        if d_tp < 4 * tick_size:
+            d_tp = 4 * tick_size
 
         if setup_type == "SHORT":
             precio_tp_base = round_to_tick(bar_close - d_tp, tick_size)
@@ -534,8 +545,8 @@ class AxiomEngine:
         # -------------------------------------------------------------
         # MODO INVERTIDO (Donde teníamos SL ahora es TP, donde teníamos TP ahora es SL):
         # Para que el antiguo SL sea TP y el antiguo TP sea SL, la dirección se invierte:
-        # SHORT -> LONG con TP en VWAP+5t (ganancia corta) y SL en banda (pérdida larga).
-        # LONG -> SHORT con TP en VWAP-5t (ganancia corta) y SL en banda (pérdida larga).
+        # SHORT -> LONG con TP en VWAP+5t (ganancia corta) y SL amortiguado (20% de banda o tope proporcional).
+        # LONG -> SHORT con TP en VWAP-5t (ganancia corta) y SL amortiguado (20% de banda o tope proporcional).
         # -------------------------------------------------------------
         if INVERT_STRATEGY:
             exec_direction = "LONG" if setup_type == "SHORT" else "SHORT"
